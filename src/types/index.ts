@@ -467,6 +467,8 @@ export interface MobileTradeNotification {
   summaryTextAr: string;
 }
 
+export type AppExitBehaviorMode = 'KEEP_ALIVE_BACKGROUND' | 'FULL_EXIT';
+
 export interface MobileNotificationSettings {
   enabled: boolean;
   notifyOnOpen: boolean;
@@ -479,7 +481,12 @@ export interface MobileNotificationSettings {
   vibrationEnabled: boolean;
   browserPushEnabled: boolean;
   inAppBannerEnabled: boolean;
+  lockScreenNotificationsEnabled: boolean;
+  lockScreenShowSensitiveDetails: boolean;
+  appExitBehavior: AppExitBehaviorMode;
+  wakeLockEnabled: boolean;
   telegramEnabled: boolean;
   telegramBotToken: string;
   telegramChatId: string;
 }
+

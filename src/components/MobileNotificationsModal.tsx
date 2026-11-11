@@ -19,6 +19,9 @@ import {
   CheckCircle2,
   AlertCircle,
   AlertTriangle,
+  Lock,
+  Cpu,
+  Power,
 } from 'lucide-react';
 import {
   MobileNotificationActionType,
@@ -1002,7 +1005,7 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                   <span>خصائص تنبيه الهاتف (الصوت، الاهتزاز، وإشعار النظام)</span>
                 </h4>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   <label className="flex items-center justify-between bg-[#12171D] border border-[#232E3A] rounded-xl p-2.5 cursor-pointer">
                     <span className="text-xs text-white flex items-center gap-1.5">
                       <BellRing className="w-3.5 h-3.5 text-[#01BC8D]" />
@@ -1012,6 +1015,21 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                       type="checkbox"
                       checked={settings.inAppBannerEnabled}
                       onChange={(e) => onUpdateSettings({ inAppBannerEnabled: e.target.checked })}
+                      className="w-4 h-4 accent-[#01BC8D]"
+                    />
+                  </label>
+
+                  <label className="flex items-center justify-between bg-[#12171D] border border-[#232E3A] rounded-xl p-2.5 cursor-pointer">
+                    <span className="text-xs text-white flex items-center gap-1.5">
+                      <Lock className="w-3.5 h-3.5 text-[#01BC8D]" />
+                      <span>الإشعارات في شاشة القفل (Lock Screen)</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={settings.lockScreenNotificationsEnabled ?? true}
+                      onChange={(e) =>
+                        onUpdateSettings({ lockScreenNotificationsEnabled: e.target.checked })
+                      }
                       className="w-4 h-4 accent-[#01BC8D]"
                     />
                   </label>
@@ -1041,6 +1059,48 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                       className="w-4 h-4 accent-[#01BC8D]"
                     />
                   </label>
+                </div>
+
+                {/* Background vs Full Exit Quick Switch inside Notifications Modal */}
+                <div className="bg-[#12171D] border border-[#232E3A] rounded-xl p-3 space-y-2">
+                  <div className="text-xs font-bold text-white flex items-center justify-between">
+                    <span>وضع عمل التطبيق عند الإغلاق:</span>
+                    <span className="text-[10px] text-[#01BC8D]">
+                      {(settings.appExitBehavior || 'KEEP_ALIVE_BACKGROUND') ===
+                      'KEEP_ALIVE_BACKGROUND'
+                        ? 'يعمل في الخلفية حتى وإن أُقفل نهائياً'
+                        : 'إغلاق كلي للتطبيق'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateSettings({ appExitBehavior: 'KEEP_ALIVE_BACKGROUND' })
+                      }
+                      className={`py-2 px-2.5 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer border transition-colors ${
+                        (settings.appExitBehavior || 'KEEP_ALIVE_BACKGROUND') ===
+                        'KEEP_ALIVE_BACKGROUND'
+                          ? 'bg-[#0D2B24] border-[#01BC8D] text-[#01BC8D]'
+                          : 'bg-[#0B0E11] border-[#232E3A] text-[#8A99AD] hover:text-white'
+                      }`}
+                    >
+                      <Cpu className="w-3.5 h-3.5" />
+                      <span>تركه يعمل في الخلفية</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onUpdateSettings({ appExitBehavior: 'FULL_EXIT' })}
+                      className={`py-2 px-2.5 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer border transition-colors ${
+                        settings.appExitBehavior === 'FULL_EXIT'
+                          ? 'bg-[#3A1219] border-[#F6465D] text-[#F6465D]'
+                          : 'bg-[#0B0E11] border-[#232E3A] text-[#8A99AD] hover:text-white'
+                      }`}
+                    >
+                      <Power className="w-3.5 h-3.5" />
+                      <span>الإغلاق الكلي للتطبيق</span>
+                    </button>
+                  </div>
                 </div>
 
                 {/* Native System Notification Permission */}

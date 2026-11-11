@@ -1,16 +1,27 @@
 package ai.whalecopy.pro
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.DownloadManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.MediaStore
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -56,6 +67,9 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -75,13 +89,321 @@ private val Gold = Color(0xFF01BC8D)
 private val RedAlert = Color(0xFFF6465D)
 private val Muted = Color(0xFF8A99AD)
 
+private const val PREFS_NAME = "copytr_app_prefs"
+private const val KEY_KEEP_ALIVE_BG = "keep_alive_bg"
+private const val KEY_LOCKSCREEN_NOTIF = "lockscreen_notif"
+private const val KEY_SHOW_SENSITIVE = "show_sensitive"
+
+private const val BG_CHANNEL_ID = "copytr_bg_service_channel"
+private const val ALERT_CHANNEL_ID = "copytr_lockscreen_alerts_channel"
+private const val BG_NOTIF_ID = 91001
+
+object AppPreferencesHelper {
+    fun isKeepAliveEnabled(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_KEEP_ALIVE_BG, true)
+    }
+
+    fun isLockScreenNotifEnabled(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_LOCKSCREEN_NOTIF, true)
+    }
+
+    fun isShowSensitiveEnabled(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_SHOW_SENSITIVE, true)
+    }
+
+    fun saveBackgroundConfig(
+        context: Context,
+        keepAlive: Boolean,
+        lockScreenNotif: Boolean,
+        showSensitive: Boolean
+    ) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_KEEP_ALIVE_BG, keepAlive)
+            .putBoolean(KEY_LOCKSCREEN_NOTIF, lockScreenNotif)
+            .putBoolean(KEY_SHOW_SENSITIVE, showSensitive)
+            .apply()
+    }
+}
+
+class WhaleBackgroundService : Service() {
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        ensureChannels(this)
+        LocalWebProxyServer.ensureStarted(applicationContext)
+        acquireWakeLock()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!AppPreferencesHelper.isKeepAliveEnabled(this)) {
+            releaseWakeLock()
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        val notification = buildForegroundNotification()
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    BG_NOTIF_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                startForeground(BG_NOTIF_ID, notification)
+            }
+        } catch (_: Exception) {
+            // ignore
+        }
+
+        return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        if (!AppPreferencesHelper.isKeepAliveEnabled(this)) {
+            releaseWakeLock()
+            stopSelf()
+        }
+    }
+
+    override fun onDestroy() {
+        releaseWakeLock()
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun acquireWakeLock() {
+        try {
+            if (wakeLock == null) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                wakeLock = pm.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "CopyTR::BackgroundSyncWakeLock"
+                ).apply {
+                    setReferenceCounted(false)
+                    acquire(12 * 60 * 60 * 1000L)
+                }
+            }
+        } catch (_: Exception) {
+            // ignore
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            wakeLock?.let {
+                if (it.isHeld) it.release()
+            }
+            wakeLock = null
+        } catch (_: Exception) {
+            // ignore
+        }
+    }
+
+    private fun buildForegroundNotification(): Notification {
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val pendingIntent = PendingIntent.getActivity(this, 0, openIntent, pendingFlags)
+
+        return NotificationCompat.Builder(this, BG_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle("Copy TR يعمل في الخلفية")
+            .setContentText("مراقبة الصفقات المنسوخة ونسبة التراجع (Drawdown) نشطة")
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setContentIntent(pendingIntent)
+            .build()
+    }
+
+    companion object {
+        fun ensureChannels(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+                val bgChannel = NotificationChannel(
+                    BG_CHANNEL_ID,
+                    "تشغيل Copy TR في الخلفية",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "يبقي محرك نسخ الصفقات ومراقبة التراجع نشطاً في الخلفية"
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                }
+
+                val alertChannel = NotificationChannel(
+                    ALERT_CHANNEL_ID,
+                    "تنبيهات الصفقات وشاشة القفل الفورية",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "إشعارات فتح الصفقات، التدعيم، الإغلاق، وتنبيهات التراجع على شاشة القفل"
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 220, 80, 220, 80, 300)
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                }
+
+                nm.createNotificationChannel(bgChannel)
+                nm.createNotificationChannel(alertChannel)
+            }
+        }
+
+        fun updateServiceState(context: Context, keepAlive: Boolean) {
+            val intent = Intent(context, WhaleBackgroundService::class.java)
+            try {
+                if (keepAlive) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(intent)
+                    } else {
+                        context.startService(intent)
+                    }
+                } else {
+                    context.stopService(intent)
+                }
+            } catch (_: Exception) {
+                // ignore
+            }
+        }
+    }
+}
+
+class AndroidAppControl(private val activity: Activity) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    @JavascriptInterface
+    fun setBackgroundMode(
+        keepAlive: Boolean,
+        lockScreenNotifications: Boolean,
+        showSensitiveDetails: Boolean
+    ) {
+        AppPreferencesHelper.saveBackgroundConfig(
+            activity.applicationContext,
+            keepAlive,
+            lockScreenNotifications,
+            showSensitiveDetails
+        )
+        mainHandler.post {
+            WhaleBackgroundService.updateServiceState(activity.applicationContext, keepAlive)
+        }
+    }
+
+    @JavascriptInterface
+    fun showNativeNotification(
+        title: String,
+        body: String,
+        notifId: String,
+        isUrgent: Boolean
+    ) {
+        val ctx = activity.applicationContext
+        if (!AppPreferencesHelper.isLockScreenNotifEnabled(ctx)) return
+
+        WhaleBackgroundService.ensureChannels(ctx)
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        val openIntent = Intent(ctx, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val pendingIntent = PendingIntent.getActivity(ctx, notifId.hashCode(), openIntent, pendingFlags)
+
+        val visibility = if (AppPreferencesHelper.isShowSensitiveEnabled(ctx)) {
+            NotificationCompat.VISIBILITY_PUBLIC
+        } else {
+            NotificationCompat.VISIBILITY_PRIVATE
+        }
+
+        val notification = NotificationCompat.Builder(ctx, ALERT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(body.lines().firstOrNull() ?: body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setPriority(if (isUrgent) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setVisibility(visibility)
+            .setAutoCancel(true)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        try {
+            nm.notify(notifId.hashCode(), notification)
+        } catch (_: Exception) {
+            // ignore
+        }
+    }
+
+    @JavascriptInterface
+    fun exitAppCompletely() {
+        AppPreferencesHelper.saveBackgroundConfig(
+            activity.applicationContext,
+            false,
+            AppPreferencesHelper.isLockScreenNotifEnabled(activity.applicationContext),
+            AppPreferencesHelper.isShowSensitiveEnabled(activity.applicationContext)
+        )
+        mainHandler.post {
+            WhaleBackgroundService.updateServiceState(activity.applicationContext, false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                activity.finishAndRemoveTask()
+            } else {
+                activity.finishAffinity()
+            }
+        }
+    }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+
+        WhaleBackgroundService.ensureChannels(applicationContext)
+        requestNotificationPermissionIfNeeded()
+
+        if (AppPreferencesHelper.isKeepAliveEnabled(applicationContext)) {
+            WhaleBackgroundService.updateServiceState(applicationContext, true)
+        }
+
         setContent {
             CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-                WhaleApp()
+                WhaleApp(activity = this)
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        if (!AppPreferencesHelper.isKeepAliveEnabled(applicationContext)) {
+            WhaleBackgroundService.updateServiceState(applicationContext, false)
+        }
+        super.onDestroy()
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    1001
+                )
             }
         }
     }
@@ -417,7 +739,7 @@ object LocalWebProxyServer {
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun WhaleApp() {
+fun WhaleApp(activity: Activity) {
     val context = LocalContext.current
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
     var isLoading by remember { mutableStateOf(true) }
@@ -432,13 +754,29 @@ fun WhaleApp() {
         }
     }
 
-    BackHandler(enabled = webViewInstance?.canGoBack() == true) {
-        webViewInstance?.goBack()
+    BackHandler(enabled = true) {
+        val wv = webViewInstance
+        if (wv != null && wv.canGoBack()) {
+            wv.goBack()
+        } else {
+            if (AppPreferencesHelper.isKeepAliveEnabled(context)) {
+                activity.moveTaskToBack(true)
+            } else {
+                WhaleBackgroundService.updateServiceState(context, false)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    activity.finishAndRemoveTask()
+                } else {
+                    activity.finishAffinity()
+                }
+            }
+        }
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            webViewInstance?.destroy()
+            if (!AppPreferencesHelper.isKeepAliveEnabled(context)) {
+                webViewInstance?.destroy()
+            }
         }
     }
 
@@ -468,6 +806,7 @@ fun WhaleApp() {
                     settings.cacheMode = WebSettings.LOAD_DEFAULT
 
                     addJavascriptInterface(AndroidFileDownloader(ctx), "AndroidDownloader")
+                    addJavascriptInterface(AndroidAppControl(activity), "AndroidAppControl")
 
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)

@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-apk:
-    name: Build Android APK
+    name: Build Android Release APK
     runs-on: ubuntu-24.04
 
     steps:
@@ -40,41 +40,26 @@ jobs:
       - name: Make Gradlew Executable
         run: chmod +x gradlew
 
-      - name: Prepare Keystore
+      - name: Prepare Release Keystore
         run: |
-          if [ -f "debug.keystore.base64" ]; then
-            echo "Decoding debug.keystore from debug.keystore.base64..."
-            base64 -d debug.keystore.base64 > debug.keystore
-          fi
-          if [ ! -f "debug.keystore" ]; then
-            echo "Generating debug.keystore..."
+          if [ ! -f "release.keystore" ]; then
             keytool -genkey -v \
-              -keystore debug.keystore \
-              -alias androiddebugkey \
+              -keystore release.keystore \
+              -alias copytrreleasekey \
               -keyalg RSA \
               -keysize 2048 \
               -validity 10000 \
               -storepass android \
               -keypass android \
-              -dname "CN=Android Debug,O=Android,C=US"
+              -dname "CN=CopyTR Release,O=CopyTR,C=US"
           fi
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
-
-      - name: Build Release APK
+      - name: Build Signed Release APK
         run: ./gradlew assembleRelease --no-daemon --stacktrace
-
-      - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: CopyTR-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
           name: CopyTR-release-apk
           path: app/build/outputs/apk/release/app-release.apk
-          if-no-files-found: warn
+          if-no-files-found: error

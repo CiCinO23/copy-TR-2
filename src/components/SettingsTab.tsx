@@ -1,11 +1,31 @@
-import React from 'react';
-import { Key, ShieldCheck, BellRing } from 'lucide-react';
-import { BinanceConfig, BinanceConnectionState } from '../types';
+import React, { useState } from 'react';
+import {
+  Key,
+  ShieldCheck,
+  BellRing,
+  Power,
+  Cpu,
+  Lock,
+  Eye,
+  EyeOff,
+  CheckCircle2,
+  Play,
+  Sparkles,
+} from 'lucide-react';
+import {
+  BinanceConfig,
+  BinanceConnectionState,
+  MobileNotificationSettings,
+  AppExitBehaviorMode,
+} from '../types';
 import { BINANCE_ENVIRONMENTS } from '../services/binanceApi';
+import { mobileNotifications } from '../services/mobileNotifications';
 
 interface SettingsTabProps {
   config: BinanceConfig;
   connectionState: BinanceConnectionState;
+  notificationSettings?: MobileNotificationSettings;
+  onUpdateNotificationSettings?: (partial: Partial<MobileNotificationSettings>) => void;
   onLive: () => void;
   onOpenApiSetup: () => void;
   onOpenNotifications?: () => void;
@@ -14,11 +34,86 @@ interface SettingsTabProps {
 export const SettingsTab: React.FC<SettingsTabProps> = ({
   config,
   connectionState,
+  notificationSettings,
+  onUpdateNotificationSettings,
   onLive,
   onOpenApiSetup,
   onOpenNotifications,
 }) => {
   const envInfo = BINANCE_ENVIRONMENTS[config.environment];
+  const currentSettings = notificationSettings || mobileNotifications.getSettings();
+  const appExitBehavior: AppExitBehaviorMode =
+    currentSettings.appExitBehavior || 'KEEP_ALIVE_BACKGROUND';
+  const lockScreenEnabled = currentSettings.lockScreenNotificationsEnabled ?? true;
+  const showSensitiveDetails = currentSettings.lockScreenShowSensitiveDetails ?? true;
+  const wakeLockEnabled = currentSettings.wakeLockEnabled ?? true;
+
+  const [browserPerm, setBrowserPerm] = useState<NotificationPermission | 'unsupported'>(() =>
+    mobileNotifications.getBrowserPermissionStatus()
+  );
+  const [statusFeedback, setStatusFeedback] = useState<string | null>(null);
+  const [isStoppedByFullExit, setIsStoppedByFullExit] = useState<boolean>(() =>
+    mobileNotifications.isAppStoppedByFullExit()
+  );
+
+  const handleUpdate = (partial: Partial<MobileNotificationSettings>, messageAr?: string) => {
+    if (onUpdateNotificationSettings) {
+      onUpdateNotificationSettings(partial);
+    } else {
+      mobileNotifications.updateSettings(partial);
+    }
+    if (messageAr) {
+      setStatusFeedback(messageAr);
+      setTimeout(() => setStatusFeedback(null), 4000);
+    }
+  };
+
+  const handleSelectExitBehavior = (mode: AppExitBehaviorMode) => {
+    if (mode === 'KEEP_ALIVE_BACKGROUND') {
+      mobileNotifications.resumeFromFullExit();
+      setIsStoppedByFullExit(false);
+      handleUpdate(
+        { appExitBehavior: 'KEEP_ALIVE_BACKGROUND' },
+        '✅ تم تفعيل وضع العمل في الخلفية: سيبقى التطبيق يعمل ويرسل الإشعارات حتى وإن أُقفل نهائياً.'
+      );
+    } else {
+      handleUpdate(
+        { appExitBehavior: 'FULL_EXIT' },
+        '✅ تم ضبط وضع الإغلاق الكلي: سيتم إيقاف جميع العمليات الخلفية تماماً عند إغلاق التطبيق.'
+      );
+    }
+  };
+
+  const handleExecuteImmediateFullExit = () => {
+    handleUpdate({ appExitBehavior: 'FULL_EXIT' });
+    mobileNotifications.performFullAppExit();
+    setIsStoppedByFullExit(true);
+    setStatusFeedback(
+      '🛑 تم إيقاف جميع الخدمات والعمليات الخلفية للتطبيق بالكامل.'
+    );
+  };
+
+  const handleResumeAppServices = () => {
+    mobileNotifications.resumeFromFullExit();
+    setIsStoppedByFullExit(false);
+    setStatusFeedback('✅ تم إعادة تشغيل خدمات التطبيق والمزامنة بنجاح.');
+  };
+
+  const handleTestLockScreenNotification = async () => {
+    if (browserPerm !== 'granted' && browserPerm !== 'unsupported') {
+      const perm = await mobileNotifications.requestBrowserPermission();
+      setBrowserPerm(perm);
+    }
+    handleUpdate({
+      enabled: true,
+      lockScreenNotificationsEnabled: true,
+      browserPushEnabled: true,
+    });
+    mobileNotifications.triggerTestNotification('OPEN_TRADE');
+    setStatusFeedback(
+      '🔔 تم إرسال إشعار فوري مخصص لشاشة القفل! يمكنك قفل شاشة الهاتف لمعاينة ظهور الإشعار.'
+    );
+  };
 
   return (
     <div className="space-y-5 animate-in fade-in duration-200">
@@ -28,11 +123,322 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           الإعدادات وإدارة المخاطر
         </h2>
         <p className="text-xs text-[#8A99AD] mt-0.5">
-          ضبط معايير الأمان، الربط المباشر، وتفضيلات المحرك وتنبيهات الموبايل
+          ضبط سلوك إغلاق التطبيق أو عمله في الخلفية، إشعارات شاشة القفل، ومعايير الأمان والربط المباشر
         </p>
       </div>
 
-      {/* Main Settings Card */}
+      {statusFeedback && (
+        <div
+          data-testid="settings_status_feedback"
+          className="bg-[#0D2B24] border border-[#01BC8D] text-[#01BC8D] px-4 py-2.5 rounded-xl text-xs font-bold flex items-center justify-between gap-2"
+        >
+          <span>{statusFeedback}</span>
+          <button
+            type="button"
+            onClick={() => setStatusFeedback(null)}
+            className="text-[11px] text-white/80 hover:text-white cursor-pointer"
+          >
+            إغلاق
+          </button>
+        </div>
+      )}
+
+      {/* 1. Background Mode vs Full Exit Card */}
+      <div
+        data-testid="settings_background_mode_card"
+        className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4"
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-[#232E3A] pb-3">
+          <div className="flex items-center gap-2.5">
+            <div
+              className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
+                appExitBehavior === 'KEEP_ALIVE_BACKGROUND' && !isStoppedByFullExit
+                  ? 'bg-[#0D2B24] border-[#01BC8D]/50 text-[#01BC8D]'
+                  : 'bg-[#3A1219] border-[#F6465D]/50 text-[#F6465D]'
+              }`}
+            >
+              {appExitBehavior === 'KEEP_ALIVE_BACKGROUND' && !isStoppedByFullExit ? (
+                <Cpu className="w-5 h-5" />
+              ) : (
+                <Power className="w-5 h-5" />
+              )}
+            </div>
+            <div>
+              <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2 flex-wrap">
+                <span>وضع إغلاق التطبيق أو العمل في الخلفية</span>
+                <span
+                  className={`text-[10px] px-2 py-0.5 rounded-md font-bold ${
+                    isStoppedByFullExit
+                      ? 'bg-[#3A1219] text-[#F6465D] border border-[#F6465D]/40'
+                      : appExitBehavior === 'KEEP_ALIVE_BACKGROUND'
+                      ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
+                      : 'bg-[#3B2606] text-[#FBBF24] border border-[#F59E0B]/40'
+                  }`}
+                >
+                  {isStoppedByFullExit
+                    ? 'متوقف كلياً'
+                    : appExitBehavior === 'KEEP_ALIVE_BACKGROUND'
+                    ? 'يعمل في الخلفية دائماً'
+                    : 'إغلاق كلي عند الخروج'}
+                </span>
+              </h3>
+              <p className="text-[11px] text-[#8A99AD] mt-0.5">
+                اختر بين ترك التطبيق يعمل في الخلفية حتى وإن أُقفل نهائياً لمتابعة الصفقات، أو الإغلاق الكلي للتطبيق
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Two Choice Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* Option A: Keep Alive in Background */}
+          <button
+            type="button"
+            data-testid="mode_keep_alive_background_btn"
+            onClick={() => handleSelectExitBehavior('KEEP_ALIVE_BACKGROUND')}
+            className={`text-right rounded-xl p-3.5 border-2 transition-all cursor-pointer flex flex-col justify-between gap-2 ${
+              appExitBehavior === 'KEEP_ALIVE_BACKGROUND' && !isStoppedByFullExit
+                ? 'bg-[#0D2B24]/90 border-[#01BC8D] shadow-[0_0_18px_rgba(1,188,141,0.18)]'
+                : 'bg-[#0B0E11] border-[#232E3A] hover:border-[#01BC8D]/50'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-2 w-full">
+              <div className="flex items-center gap-2">
+                <Cpu
+                  className={`w-4 h-4 shrink-0 ${
+                    appExitBehavior === 'KEEP_ALIVE_BACKGROUND' && !isStoppedByFullExit
+                      ? 'text-[#01BC8D]'
+                      : 'text-[#8A99AD]'
+                  }`}
+                />
+                <span className="text-xs sm:text-sm font-bold text-white">
+                  تركه يعمل في الخلفية (حتى وإن أُقفل نهائياً)
+                </span>
+              </div>
+              <span
+                className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${
+                  appExitBehavior === 'KEEP_ALIVE_BACKGROUND' && !isStoppedByFullExit
+                    ? 'border-[#01BC8D] bg-[#01BC8D] text-[#0B0E11]'
+                    : 'border-[#8A99AD]'
+                }`}
+              >
+                {appExitBehavior === 'KEEP_ALIVE_BACKGROUND' && !isStoppedByFullExit && (
+                  <CheckCircle2 className="w-3 h-3" />
+                )}
+              </span>
+            </div>
+            <p className="text-[11px] text-[#8A99AD] leading-relaxed">
+              يبقي محرك النسخ ومراقبة الصفقات ونسبة التراجع (Drawdown) نشطاً في الخلفية عبر خدمة النظام المستمرة لإرسال الإشعارات الفورية حتى بعد إغلاق التطبيق نهائياً.
+            </p>
+          </button>
+
+          {/* Option B: Full App Exit */}
+          <button
+            type="button"
+            data-testid="mode_full_exit_btn"
+            onClick={() => handleSelectExitBehavior('FULL_EXIT')}
+            className={`text-right rounded-xl p-3.5 border-2 transition-all cursor-pointer flex flex-col justify-between gap-2 ${
+              appExitBehavior === 'FULL_EXIT' || isStoppedByFullExit
+                ? 'bg-[#2B1216]/90 border-[#F6465D] shadow-[0_0_18px_rgba(246,70,93,0.18)]'
+                : 'bg-[#0B0E11] border-[#232E3A] hover:border-[#F6465D]/50'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-2 w-full">
+              <div className="flex items-center gap-2">
+                <Power
+                  className={`w-4 h-4 shrink-0 ${
+                    appExitBehavior === 'FULL_EXIT' || isStoppedByFullExit
+                      ? 'text-[#F6465D]'
+                      : 'text-[#8A99AD]'
+                  }`}
+                />
+                <span className="text-xs sm:text-sm font-bold text-white">
+                  الإغلاق الكلي للتطبيق عند الخروج
+                </span>
+              </div>
+              <span
+                className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${
+                  appExitBehavior === 'FULL_EXIT' || isStoppedByFullExit
+                    ? 'border-[#F6465D] bg-[#F6465D] text-white'
+                    : 'border-[#8A99AD]'
+                }`}
+              >
+                {(appExitBehavior === 'FULL_EXIT' || isStoppedByFullExit) && (
+                  <CheckCircle2 className="w-3 h-3" />
+                )}
+              </span>
+            </div>
+            <p className="text-[11px] text-[#8A99AD] leading-relaxed">
+              إيقاف شامل وفوري لجميع العمليات الخلفية والمزامنة والاتصالات بمجرد إغلاق التطبيق لتوفير البطارية والبيانات بالكامل.
+            </p>
+          </button>
+        </div>
+
+        {/* Sub-controls for Background Wake Lock & Immediate Full Exit Button */}
+        <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <label className="flex items-center gap-2.5 cursor-pointer">
+            <input
+              type="checkbox"
+              data-testid="toggle_wake_lock"
+              checked={wakeLockEnabled}
+              onChange={(e) =>
+                handleUpdate(
+                  { wakeLockEnabled: e.target.checked },
+                  e.target.checked
+                    ? '✅ تم تفعيل منع خمول المعالج أثناء العمل في الخلفية'
+                    : 'تم إيقاف منع خمول المعالج'
+                )
+              }
+              className="w-4 h-4 accent-[#01BC8D] cursor-pointer"
+            />
+            <div>
+              <div className="text-xs font-bold text-white">
+                منع خمول الهاتف وتجميد العمليات أثناء العمل في الخلفية (Wake Lock)
+              </div>
+              <div className="text-[10px] text-[#8A99AD]">
+                يضمن استمرار تدفق الأسعار اللحظية وفحص الصفقات دون انقطاع
+              </div>
+            </div>
+          </label>
+
+          {isStoppedByFullExit ? (
+            <button
+              type="button"
+              data-testid="resume_app_services_btn"
+              onClick={handleResumeAppServices}
+              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3.5 py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>إعادة تشغيل خدمات التطبيق</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              data-testid="immediate_full_exit_btn"
+              onClick={handleExecuteImmediateFullExit}
+              className="bg-[#3A1219] hover:bg-[#F6465D] text-[#F6465D] hover:text-white border border-[#F6465D]/50 font-bold px-3.5 py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shrink-0"
+            >
+              <Power className="w-3.5 h-3.5" />
+              <span>إغلاق التطبيق كلياً الآن</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* 2. Lock Screen Notifications Card (خاصية الإشعارات في شاشة القفل) */}
+      <div
+        data-testid="settings_lockscreen_notifications_card"
+        className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4"
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-[#232E3A] pb-3">
+          <div className="flex items-center gap-2.5">
+            <div
+              className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
+                lockScreenEnabled
+                  ? 'bg-[#0D2B24] border-[#01BC8D]/50 text-[#01BC8D]'
+                  : 'bg-[#1A222B] border-[#232E3A] text-[#8A99AD]'
+              }`}
+            >
+              <Lock className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2 flex-wrap">
+                <span>الإشعارات في شاشة القفل (Lock Screen Notifications)</span>
+                <span
+                  className={`text-[10px] px-2 py-0.5 rounded-md font-bold ${
+                    lockScreenEnabled
+                      ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
+                      : 'bg-[#3A1219] text-[#F6465D] border border-[#F6465D]/40'
+                  }`}
+                >
+                  {lockScreenEnabled ? 'مفعّلة على شاشة القفل' : 'غير مفعّلة'}
+                </span>
+              </h3>
+              <p className="text-[11px] text-[#8A99AD] mt-0.5">
+                إظهار تنبيهات فتح الصفقات، التدعيم، الإغلاق، وتنبيه التراجع (Drawdown) مباشرة على شاشة قفل الهاتف
+              </p>
+            </div>
+          </div>
+
+          <input
+            type="checkbox"
+            data-testid="toggle_lockscreen_notifications"
+            checked={lockScreenEnabled}
+            onChange={(e) =>
+              handleUpdate(
+                { lockScreenNotificationsEnabled: e.target.checked },
+                e.target.checked
+                  ? '✅ تم تفعيل ظهور الإشعارات الفورية على شاشة القفل'
+                  : 'تم إيقاف إشعارات شاشة القفل'
+              )
+            }
+            className="w-5 h-5 accent-[#01BC8D] cursor-pointer shrink-0 mt-1"
+          />
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* Toggle: Show Full Financial Details on Lock Screen */}
+          <label className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3 flex items-start justify-between gap-2.5 cursor-pointer">
+            <div className="flex items-start gap-2">
+              {showSensitiveDetails ? (
+                <Eye className="w-4 h-4 text-[#01BC8D] shrink-0 mt-0.5" />
+              ) : (
+                <EyeOff className="w-4 h-4 text-[#F59E0B] shrink-0 mt-0.5" />
+              )}
+              <div>
+                <div className="text-xs font-bold text-white">
+                  إظهار التفاصيل المالية الكاملة على شاشة القفل
+                </div>
+                <div className="text-[10px] text-[#8A99AD] mt-0.5">
+                  {showSensitiveDetails
+                    ? 'يعرض السعر، قيمة الصفقة، صافي الربح/الخسارة، ونسبة التراجع على شاشة القفل'
+                    : 'يخفي المبالغ المالية والرصيد على شاشة القفل لحماية الخصوصية'}
+                </div>
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              data-testid="toggle_lockscreen_sensitive_details"
+              checked={showSensitiveDetails}
+              onChange={(e) =>
+                handleUpdate(
+                  { lockScreenShowSensitiveDetails: e.target.checked },
+                  e.target.checked
+                    ? '✅ سيتم عرض التفاصيل المالية الكاملة على شاشة القفل'
+                    : '🔒 تم إخفاء المبالغ الحساسة على شاشة القفل للخصوصية'
+                )
+              }
+              className="w-4 h-4 accent-[#01BC8D] cursor-pointer shrink-0 mt-0.5"
+            />
+          </label>
+
+          {/* Test Lock Screen Notification Button */}
+          <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3 flex flex-col justify-between gap-2">
+            <div className="text-[11px] text-[#8A99AD] flex items-center justify-between">
+              <span>صلاحية إشعارات النظام وشاشة القفل:</span>
+              <strong
+                className={
+                  browserPerm === 'granted' ? 'text-[#01BC8D]' : 'text-[#F59E0B]'
+                }
+              >
+                {browserPerm === 'granted' ? 'ممنوحة وجاهزة ✅' : 'تحتاج تفعيل 🔔'}
+              </strong>
+            </div>
+
+            <button
+              type="button"
+              data-testid="test_lockscreen_notification_btn"
+              onClick={handleTestLockScreenNotification}
+              className="w-full bg-[#0D2B24] hover:bg-[#01BC8D]/25 text-[#01BC8D] border border-[#01BC8D]/50 font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>🔒 تجربة إشعار شاشة القفل الآن</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. Main Platform & API Settings Card */}
       <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4">
         <div>
           <div className="text-xs sm:text-sm font-semibold text-white">
@@ -65,7 +471,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             className="w-full bg-[#0D2B24] hover:bg-[#01BC8D]/25 border border-[#01BC8D] text-[#01BC8D] font-bold py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 text-xs sm:text-sm transition-colors cursor-pointer"
           >
             <BellRing className="w-4 h-4" />
-            <span>إعدادات وسجل تنبيهات الموبايل (فتح صفقات، التدعيم، والخروج)</span>
+            <span>إعدادات وسجل تنبيهات الموبايل (فتح صفقات، التدعيم، الخروج، والتراجع)</span>
           </button>
         )}
 
@@ -102,8 +508,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         </h3>
         <div className="text-xs text-[#8A99AD] space-y-1">
           <div>• التحكم الموحد في قيمة الصفقة والرافعة والعمولة من نافذة التداول</div>
-          <div>• تنبيهات فورية على الموبايل عند فتح الصفقات، التدعيم، السحب الجزئي، والإغلاق الكامل</div>
-          <div>• مراقبة مستمرة للسيولة (Open Interest) قبل تنفيذ أي أمر</div>
+          <div>• تنبيهات فورية على الموبايل وشاشة القفل عند فتح الصفقات، التدعيم، السحب الجزئي، الإغلاق، وتجاوز حد التراجع</div>
+          <div>• إمكانية الاختيار بين العمل المستمر في الخلفية أو الإغلاق الكلي للتطبيق</div>
           <div>• عدم حفظ المفاتيح في خوادم سحابية خارجية (تخزين محلي آمن في المتصفح فقط)</div>
         </div>
       </div>

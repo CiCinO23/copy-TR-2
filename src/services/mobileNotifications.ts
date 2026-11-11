@@ -23,10 +23,35 @@ export const DEFAULT_MOBILE_NOTIFICATION_SETTINGS: MobileNotificationSettings = 
   vibrationEnabled: true,
   browserPushEnabled: true,
   inAppBannerEnabled: true,
+  lockScreenNotificationsEnabled: true,
+  lockScreenShowSensitiveDetails: true,
+  appExitBehavior: 'KEEP_ALIVE_BACKGROUND',
+  wakeLockEnabled: true,
   telegramEnabled: false,
   telegramBotToken: '',
   telegramChatId: '',
 };
+
+interface AndroidAppControlBridge {
+  setBackgroundMode?: (
+    keepAlive: boolean,
+    lockScreenNotifications: boolean,
+    showSensitiveDetails: boolean
+  ) => void;
+  showNativeNotification?: (
+    title: string,
+    body: string,
+    notifId: string,
+    isUrgent: boolean
+  ) => void;
+  exitAppCompletely?: () => void;
+}
+
+declare global {
+  interface Window {
+    AndroidAppControl?: AndroidAppControlBridge;
+  }
+}
 
 interface AccountDrawdownAlertRecord {
   alertedAtThreshold: number;
@@ -45,11 +70,14 @@ class MobileNotificationService {
   private settings: MobileNotificationSettings = { ...DEFAULT_MOBILE_NOTIFICATION_SETTINGS };
   private listeners: Set<NotificationListener> = new Set();
   private drawdownAlertState: Record<string, AccountDrawdownAlertRecord> = {};
+  private wakeLockSentinel: { release: () => Promise<void> } | null = null;
+  private isFullExitTriggered: boolean = false;
 
   constructor() {
     this.settings = this.loadSettings();
     this.notifications = this.loadNotifications();
     this.drawdownAlertState = this.loadDrawdownAlertState();
+    this.initBackgroundAndLockScreenLifecycle();
   }
 
   private loadSettings(): MobileNotificationSettings {
@@ -130,6 +158,128 @@ class MobileNotificationService {
     return { ...this.settings };
   }
 
+  public isAppStoppedByFullExit(): boolean {
+    return this.isFullExitTriggered;
+  }
+
+  public resumeFromFullExit(): void {
+    this.isFullExitTriggered = false;
+    this.syncBackgroundAndLockScreenMode();
+    this.emitChange(null);
+  }
+
+  private initBackgroundAndLockScreenLifecycle(): void {
+    if (typeof window === 'undefined') return;
+
+    this.syncBackgroundAndLockScreenMode();
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && !this.isFullExitTriggered) {
+        this.applyWakeLock();
+      }
+    });
+
+    window.addEventListener('pagehide', () => {
+      if (this.settings.appExitBehavior === 'FULL_EXIT') {
+        this.stopBackgroundWorkers();
+      }
+    });
+  }
+
+  private async applyWakeLock(): Promise<void> {
+    if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return;
+    const shouldKeepAwake =
+      !this.isFullExitTriggered &&
+      this.settings.appExitBehavior === 'KEEP_ALIVE_BACKGROUND' &&
+      (this.settings.wakeLockEnabled ?? true);
+
+    try {
+      if (shouldKeepAwake) {
+        if (!this.wakeLockSentinel) {
+          const wl = await (
+            navigator as unknown as {
+              wakeLock: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> };
+            }
+          ).wakeLock.request('screen');
+          this.wakeLockSentinel = wl;
+        }
+      } else if (this.wakeLockSentinel) {
+        await this.wakeLockSentinel.release();
+        this.wakeLockSentinel = null;
+      }
+    } catch {
+      // WakeLock requires active visible tab in some browsers
+    }
+  }
+
+  private stopBackgroundWorkers(): void {
+    try {
+      if (this.wakeLockSentinel) {
+        this.wakeLockSentinel.release().catch(() => {});
+        this.wakeLockSentinel = null;
+      }
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistration().then((reg) => {
+          reg?.active?.postMessage({ type: 'STOP_ALL_BACKGROUND' });
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  public async syncBackgroundAndLockScreenMode(): Promise<void> {
+    if (typeof window === 'undefined') return;
+
+    const keepAlive =
+      !this.isFullExitTriggered && this.settings.appExitBehavior === 'KEEP_ALIVE_BACKGROUND';
+    const lockScreenNotif = Boolean(this.settings.lockScreenNotificationsEnabled ?? true);
+    const showSensitive = Boolean(this.settings.lockScreenShowSensitiveDetails ?? true);
+
+    // 1. Sync with Android Native APK Service & Lock Screen Notification Manager if present
+    try {
+      if (window.AndroidAppControl?.setBackgroundMode) {
+        window.AndroidAppControl.setBackgroundMode(keepAlive, lockScreenNotif, showSensitive);
+      }
+    } catch {
+      // ignore
+    }
+
+    // 2. Register and configure Web Service Worker (/sw.js)
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.register('/sw.js');
+        const targetWorker = reg.active || reg.waiting || reg.installing;
+        targetWorker?.postMessage({
+          type: 'CONFIGURE_BACKGROUND_MODE',
+          keepAlive,
+          lockScreenNotificationsEnabled: lockScreenNotif,
+        });
+      }
+    } catch {
+      // ignore
+    }
+
+    // 3. Apply Screen Wake Lock preference
+    await this.applyWakeLock();
+  }
+
+  /**
+   * Perform an immediate Full Exit of the app (stopping background services, workers, and closing Android Task if on APK)
+   */
+  public performFullAppExit(): void {
+    this.isFullExitTriggered = true;
+    this.stopBackgroundWorkers();
+    try {
+      if (typeof window !== 'undefined' && window.AndroidAppControl?.exitAppCompletely) {
+        window.AndroidAppControl.exitAppCompletely();
+      }
+    } catch {
+      // ignore
+    }
+    this.emitChange(null);
+  }
+
   public updateSettings(partial: Partial<MobileNotificationSettings>): MobileNotificationSettings {
     const prevThreshold = this.settings.drawdownThresholdPercent;
     this.settings = { ...this.settings, ...partial };
@@ -141,6 +291,7 @@ class MobileNotificationService {
       this.resetAccountDrawdownAlert();
     }
     this.saveSettings();
+    this.syncBackgroundAndLockScreenMode();
     this.emitChange(null);
     return { ...this.settings };
   }
@@ -313,34 +464,46 @@ class MobileNotificationService {
   }
 
   /**
-   * Dispatch native system notification on Android / iOS PWA / Desktop Browser
+   * Dispatch native system & Lock Screen notification on Android APK / iOS PWA / Desktop Browser
    */
   private async sendBrowserSystemNotification(item: MobileTradeNotification): Promise<void> {
-    if (!this.settings.browserPushEnabled || typeof window === 'undefined' || !('Notification' in window)) {
+    if (this.isFullExitTriggered && this.settings.appExitBehavior === 'FULL_EXIT') {
       return;
     }
 
-    if (Notification.permission !== 'granted') {
+    const allowPush =
+      this.settings.browserPushEnabled || (this.settings.lockScreenNotificationsEnabled ?? true);
+    if (!allowPush || typeof window === 'undefined') {
       return;
     }
 
+    const showSensitiveOnLockScreen = this.settings.lockScreenShowSensitiveDetails ?? true;
     let title = `${item.actionTitleAr} — ${item.symbol}`;
     let lines: string[] = [];
 
     if (item.actionType === 'DRAWDOWN_ALERT') {
       const accName = item.accountName || item.traderName || 'حساب افتراضي';
       const ddPct = (item.drawdownPercent ?? 0).toFixed(2);
-      const threshPct = (item.drawdownThresholdPercent ?? this.settings.drawdownThresholdPercent).toFixed(1);
+      const threshPct = (
+        item.drawdownThresholdPercent ?? this.settings.drawdownThresholdPercent
+      ).toFixed(1);
       const initBal = (item.initialBalanceUsdt ?? item.marginUsdt ?? 0).toFixed(2);
       const eqNow = (item.currentEquityUsdt ?? item.price ?? 0).toFixed(2);
       const lossVal = (item.drawdownLossUsdt ?? Math.abs(item.realizedPnlUsdt || 0)).toFixed(2);
 
       title = `${item.actionTitleAr} — ${accName}`;
-      lines = [
-        `الحساب الافتراضي: ${accName} | نسبة التراجع: ${ddPct}% (الحد: ${threshPct}%)`,
-        `رأس المال الأولي: ${initBal}$ ⬅️ الرصيد الحالي (Equity): ${eqNow}$`,
-        `مقدار التراجع من رأس المال الأولي: -${lossVal}$ USDT`,
-      ];
+      if (showSensitiveOnLockScreen) {
+        lines = [
+          `الحساب الافتراضي: ${accName} | نسبة التراجع: ${ddPct}% (الحد: ${threshPct}%)`,
+          `رأس المال الأولي: ${initBal}$ ⬅️ الرصيد الحالي (Equity): ${eqNow}$`,
+          `مقدار التراجع من رأس المال الأولي: -${lossVal}$ USDT`,
+        ];
+      } else {
+        lines = [
+          `الحساب الافتراضي: ${accName} • تجاوز حد التراجع المسموح (${threshPct}%)`,
+          `🔒 افتح التطبيق للاطلاع على التفاصيل المالية الكاملة للرصيد`,
+        ];
+      }
     } else {
       const sideAr = item.side === 'LONG' ? 'شراء Long 🟢' : 'بيع Short 🔴';
       const modeAr = item.executionMode === 'REAL' ? 'حقيقي (KuCoin)' : 'افتراضي (Simulation)';
@@ -349,7 +512,9 @@ class MobileNotificationService {
         `المتداول المصدر: ${item.traderName} • الوضع: ${modeAr}`,
       ];
 
-      if (item.actionType === 'OPEN_TRADE') {
+      if (!showSensitiveOnLockScreen) {
+        lines.push(`🔒 تفاصيل المبالغ والربح/الخسارة مخفية على شاشة القفل للخصوصية`);
+      } else if (item.actionType === 'OPEN_TRADE') {
         lines.push(
           `سعر الدخول: ${this.formatPrice(item.entryPrice)}$ | قيمة الصفقة: ${item.marginUsdt.toFixed(2)}$`,
           `الكمية: ${item.quantity} | العمولة: ${item.commissionUsdt.toFixed(4)}$`
@@ -381,6 +546,25 @@ class MobileNotificationService {
     }
 
     const body = lines.join('\n');
+    const isUrgent =
+      item.actionType === 'DRAWDOWN_ALERT' || Boolean(this.settings.lockScreenNotificationsEnabled);
+
+    // 1. Dispatch to Native Android APK NotificationManager (shows directly on Android Lock Screen)
+    try {
+      if (window.AndroidAppControl?.showNativeNotification) {
+        window.AndroidAppControl.showNativeNotification(title, body, item.id, isUrgent);
+      }
+    } catch {
+      // ignore
+    }
+
+    // 2. Dispatch to Web Notification / Service Worker with Lock Screen persistence
+    if (!('Notification' in window) || Notification.permission !== 'granted') {
+      return;
+    }
+
+    const vibratePattern =
+      item.actionType === 'DRAWDOWN_ALERT' ? [250, 80, 250, 80, 320] : [180, 70, 200];
 
     try {
       if ('serviceWorker' in navigator) {
@@ -393,7 +577,10 @@ class MobileNotificationService {
             dir: 'rtl',
             lang: 'ar',
             tag: item.id,
-          });
+            requireInteraction: Boolean(this.settings.lockScreenNotificationsEnabled ?? true),
+            silent: !this.settings.soundEnabled,
+            vibrate: this.settings.vibrationEnabled ? vibratePattern : undefined,
+          } as NotificationOptions);
           return;
         }
       }
@@ -403,6 +590,8 @@ class MobileNotificationService {
         dir: 'rtl',
         lang: 'ar',
         tag: item.id,
+        requireInteraction: Boolean(this.settings.lockScreenNotificationsEnabled ?? true),
+        silent: !this.settings.soundEnabled,
       });
     } catch {
       // Fallback handled by in-app mobile banner

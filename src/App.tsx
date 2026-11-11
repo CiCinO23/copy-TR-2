@@ -327,15 +327,43 @@ export const App: React.FC = () => {
     refreshCopiedTradersList();
   }, [selectedTab, refreshCopiedTradersList]);
 
-  // Polling every 15 seconds to keep Binance market data fresh
+  // Polling every 15 seconds to keep Binance market data fresh (pauses if Full Exit was triggered)
   useEffect(() => {
     const interval = setInterval(() => {
+      if (mobileNotifications.isAppStoppedByFullExit()) return;
       testConnectionAndFetchData(binanceConfig).then((res) => {
         setConnectionState(res);
       });
     }, 15000);
-    return () => clearInterval(interval);
-  }, [binanceConfig]);
+
+    const handleServiceWorkerMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'SW_BACKGROUND_HEARTBEAT') {
+        if (!mobileNotifications.isAppStoppedByFullExit()) {
+          testConnectionAndFetchData(binanceConfig).then((res) => {
+            setConnectionState(res);
+          });
+        }
+      } else if (data.type === 'NOTIFICATION_CLICKED_FROM_LOCKSCREEN') {
+        if (data.data?.accountId) {
+          handleSelectVirtualAccount(data.data.accountId);
+        }
+        setSelectedTab('Simulation');
+      }
+    };
+
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
+    }
+
+    return () => {
+      clearInterval(interval);
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
+      }
+    };
+  }, [binanceConfig, handleSelectVirtualAccount]);
 
   // Sync a copied trader's Positions and Latest records using the target Account's trade settings
   const handleSyncTraderToEngine = useCallback(
@@ -873,6 +901,8 @@ export const App: React.FC = () => {
           <SettingsTab
             config={binanceConfig}
             connectionState={connectionState}
+            notificationSettings={notificationSettings}
+            onUpdateNotificationSettings={(partial) => mobileNotifications.updateSettings(partial)}
             onLive={() => setShowLiveDialog(true)}
             onOpenApiSetup={handleOpenKucoinApi}
             onOpenNotifications={handleOpenNotificationsCenter}

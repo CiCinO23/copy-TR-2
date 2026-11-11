@@ -23,21 +23,19 @@ android {
     }
 
     signingConfigs {
-        create("appSigning") {
-            storeFile = file("${rootDir}/debug.keystore")
+        create("releaseSigning") {
+            storeFile = file("${rootDir}/release.keystore")
             storePassword = "android"
-            keyAlias = "androiddebugkey"
+            keyAlias = "copytrreleasekey"
             keyPassword = "android"
         }
     }
 
     buildTypes {
-        debug {
-            signingConfig = signingConfigs.getByName("appSigning")
-        }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("appSigning")
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("releaseSigning")
         }
     }
 
@@ -62,6 +60,12 @@ android {
     }
 }
 
+androidComponents {
+    beforeVariants(selector().withBuildType("debug")) { variantBuilder ->
+        variantBuilder.enable = false
+    }
+}
+
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation(platform("androidx.compose:compose-bom:2024.06.00"))
@@ -75,5 +79,4 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
-    debugImplementation("androidx.compose.ui:ui-tooling")
 }
