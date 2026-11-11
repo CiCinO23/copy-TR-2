@@ -139,6 +139,7 @@ export interface PaperVirtualAccountSummary {
   totalCommissionsPaid: number;
   openPositionsCount: number;
   closedPositionsCount: number;
+  drawdownPercent?: number;
   settings: TradeExecutionSettings;
 }
 
@@ -424,13 +425,14 @@ export interface FuturesKlinePoint {
 }
 
 // ==========================================
-// 5. Mobile Trade Notifications (فتح صفقات، التدعيم، الانسحاب الجزئي، والخروج الكامل)
+// 5. Mobile Trade Notifications (فتح صفقات، التدعيم، الانسحاب الجزئي، الخروج الكامل، وتنبيهات التراجع)
 // ==========================================
 export type MobileNotificationActionType =
   | 'OPEN_TRADE'
   | 'SCALE_IN'
   | 'PARTIAL_EXIT'
-  | 'FULL_EXIT';
+  | 'FULL_EXIT'
+  | 'DRAWDOWN_ALERT';
 
 export interface MobileTradeNotification {
   id: string;
@@ -455,6 +457,13 @@ export interface MobileTradeNotification {
   commissionUsdt: number; // العمولة بالدولار
   realizedPnlUsdt?: number; // الربح/الخسارة المحققة بالدولار (عند السحب الجزئي أو الخروج)
   realizedPnlPercent?: number; // نسبة الربح/الخسارة المحققة %
+  accountId?: string; // معرف الحساب الافتراضي
+  accountName?: string; // اسم الحساب الافتراضي
+  drawdownPercent?: number; // نسبة التراجع الحالية من رأس المال الأولي %
+  drawdownThresholdPercent?: number; // حد التنبيه المحدد % (مثلاً 10%)
+  initialBalanceUsdt?: number; // رأس المال الأولي للحساب
+  currentEquityUsdt?: number; // الرصيد الإجمالي الحالي للحساب (Equity)
+  drawdownLossUsdt?: number; // مقدار التراجع بالدولار من رأس المال الأولي
   summaryTextAr: string;
 }
 
@@ -464,6 +473,8 @@ export interface MobileNotificationSettings {
   notifyOnScaleIn: boolean;
   notifyOnPartialExit: boolean;
   notifyOnFullExit: boolean;
+  notifyOnDrawdown: boolean;
+  drawdownThresholdPercent: number;
   soundEnabled: boolean;
   vibrationEnabled: boolean;
   browserPushEnabled: boolean;

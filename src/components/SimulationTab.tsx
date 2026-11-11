@@ -21,6 +21,7 @@ import {
   Download,
   FileSpreadsheet,
   ExternalLink,
+  BellRing,
 } from 'lucide-react';
 import { WhaleIcon } from './WhaleIcon';
 import { CoinIcon } from './CoinIcon';
@@ -48,8 +49,10 @@ import {
   TradeExecutionSettings,
   TradingExecutionMode,
   ActiveCopiedTrader,
+  MobileNotificationSettings,
 } from '../types';
 import { getCachedPrice, fetchSymbolPrice } from '../services/binanceApi';
+import { mobileNotifications } from '../services/mobileNotifications';
 
 interface SimulationTabProps {
   connectionState: BinanceConnectionState;
@@ -91,6 +94,9 @@ interface SimulationTabProps {
     source: 'COPY_TRADING' | 'SMART_MONEY',
     traderName?: string
   ) => void;
+  notificationSettings?: MobileNotificationSettings;
+  onUpdateNotificationSettings?: (partial: Partial<MobileNotificationSettings>) => void;
+  onOpenNotificationsCenter?: () => void;
 }
 
 export const SimulationTab: React.FC<SimulationTabProps> = ({
@@ -114,11 +120,25 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   onRemoveCopiedTrader,
   onNavigateToTab,
   onOpenTraderStats,
+  notificationSettings,
+  onUpdateNotificationSettings,
+  onOpenNotificationsCenter,
 }) => {
   const settings = paperSnapshot.settings;
   const accounts = paperSnapshot.accounts || [];
   const activeAccountId = paperSnapshot.activeAccountId || 'acc_default';
   const activeAccountName = paperSnapshot.activeAccountName || 'الحساب الافتراضي 1';
+  const currentNotifSettings = notificationSettings || mobileNotifications.getSettings();
+  const drawdownThresholdPercent = currentNotifSettings.drawdownThresholdPercent ?? 10;
+  const notifyOnDrawdown = currentNotifSettings.notifyOnDrawdown ?? true;
+
+  const handleUpdateDrawdownNotif = (partial: Partial<MobileNotificationSettings>) => {
+    if (onUpdateNotificationSettings) {
+      onUpdateNotificationSettings(partial);
+    } else {
+      mobileNotifications.updateSettings(partial);
+    }
+  };
 
   // Multi-Account UI State
   const [isCreatingAccount, setIsCreatingAccount] = useState<boolean>(false);
@@ -254,6 +274,47 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   };
 
   const currentPrice = getSymbolPrice(selectedSymbol);
+
+  // Live check of all virtual accounts' drawdown (including live unrealized PNL on the active account)
+  useEffect(() => {
+    if (!accounts || accounts.length === 0) return;
+    let activeUnrealized = 0;
+    let activeMargin = 0;
+    openPositions.forEach((p) => {
+      const m = p.marginUsdt || (p.quantity * p.entryPrice) / p.leverage;
+      activeMargin += m;
+      const liveP = getSymbolPrice(p.symbol);
+      const dir = p.side === 'LONG' ? 1 : -1;
+      activeUnrealized += (liveP - p.entryPrice) * p.quantity * dir;
+    });
+
+    const enrichedAccounts = accounts.map((acc) => {
+      if (acc.id === activeAccountId) {
+        const liveEquity = acc.availableBalance + activeMargin + activeUnrealized;
+        const ddPct =
+          acc.initialBalance > 0 && liveEquity < acc.initialBalance
+            ? parseFloat((((acc.initialBalance - liveEquity) / acc.initialBalance) * 100).toFixed(2))
+            : 0;
+        return {
+          ...acc,
+          totalEquity: parseFloat(liveEquity.toFixed(4)),
+          unrealizedPnl: parseFloat(activeUnrealized.toFixed(4)),
+          drawdownPercent: ddPct,
+        };
+      }
+      return acc;
+    });
+
+    mobileNotifications.checkAccountsDrawdown(enrichedAccounts);
+  }, [
+    accounts,
+    activeAccountId,
+    openPositions,
+    connectionState.allPrices,
+    dynPrices,
+    drawdownThresholdPercent,
+    notifyOnDrawdown,
+  ]);
 
   // Navigate to Trader / Whale statistics page when clicked
   const handleTraderClick = (
@@ -573,6 +634,28 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       .replace(',', '');
   };
 
+  const triggerFileDownload = (content: string, fileName: string, mimeType: string) => {
+    const win = window as unknown as {
+      AndroidDownloader?: {
+        saveFile?: (fileContent: string, name: string, mime: string) => void;
+      };
+    };
+    if (win.AndroidDownloader && typeof win.AndroidDownloader.saveFile === 'function') {
+      win.AndroidDownloader.saveFile(content, fileName, mimeType);
+      return;
+    }
+
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   const getTradeDurationMs = (cp: {
     openTime: number;
     closeTime?: number;
@@ -774,15 +857,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
         .join(',');
 
       const csvContent = '\uFEFF' + [headers.join(','), ...rows, summaryRow].join('\r\n');
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `KuCoin_Closed_Trades_${nowDateStr}.csv`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
+      triggerFileDownload(
+        csvContent,
+        `KuCoin_Closed_Trades_${nowDateStr}.csv`,
+        'text/csv;charset=utf-8;'
+      );
       return;
     }
 
@@ -1015,17 +1094,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       </body>
       </html>`;
 
-    const blob = new Blob(['\uFEFF' + excelHtml], {
-      type: 'application/vnd.ms-excel;charset=utf-8;',
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `KuCoin_Closed_Trades_${nowDateStr}.xls`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    triggerFileDownload(
+      '\uFEFF' + excelHtml,
+      `KuCoin_Closed_Trades_${nowDateStr}.xls`,
+      'application/vnd.ms-excel;charset=utf-8;'
+    );
   };
 
   const isRealMode = settings.mode === 'REAL';
@@ -1197,15 +1270,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       });
 
       const csvContent = '\uFEFF' + [csvHeader, ...csvRows].join('\r\n');
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `KuCoin_30D_Cumulative_PnL_${nowDateStr}.csv`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
+      triggerFileDownload(
+        csvContent,
+        `KuCoin_30D_Cumulative_PnL_${nowDateStr}.csv`,
+        'text/csv;charset=utf-8;'
+      );
       return;
     }
 
@@ -1318,17 +1387,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       </body>
       </html>`;
 
-    const blob = new Blob(['\uFEFF' + excelHtml], {
-      type: 'application/vnd.ms-excel;charset=utf-8;',
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `KuCoin_30D_Cumulative_PnL_${nowDateStr}.xls`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    triggerFileDownload(
+      '\uFEFF' + excelHtml,
+      `KuCoin_30D_Cumulative_PnL_${nowDateStr}.xls`,
+      'application/vnd.ms-excel;charset=utf-8;'
+    );
   };
 
   const winLossPieData =
@@ -1586,6 +1649,16 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 const accCopiedCount = copiedTraders.filter(
                   (ct) => (ct.accountId || 'acc_default') === acc.id
                 ).length;
+                const accDrawdown =
+                  acc.drawdownPercent !== undefined
+                    ? acc.drawdownPercent
+                    : acc.initialBalance > 0 && acc.totalEquity < acc.initialBalance
+                    ? parseFloat(
+                        (((acc.initialBalance - acc.totalEquity) / acc.initialBalance) * 100).toFixed(2)
+                      )
+                    : 0;
+                const isDrawdownBreached =
+                  notifyOnDrawdown && accDrawdown >= drawdownThresholdPercent;
 
                 return (
                   <button
@@ -1594,7 +1667,9 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                     onClick={() => onSelectAccount && onSelectAccount(acc.id)}
                     data-testid={`switch_account_btn_${acc.id}`}
                     className={`text-right rounded-xl p-2.5 border transition-all cursor-pointer flex flex-col justify-between gap-1.5 ${
-                      isSelected
+                      isDrawdownBreached
+                        ? 'bg-[#2B1216]/90 border-[#F6465D] shadow-[0_0_14px_rgba(246,70,93,0.28)]'
+                        : isSelected
                         ? 'bg-[#0D2B24] border-[#01BC8D] shadow-[0_0_12px_rgba(1,188,141,0.18)]'
                         : 'bg-[#12171D] border-[#232E3A] hover:border-[#01BC8D]/40'
                     }`}
@@ -1603,12 +1678,21 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                       <div className="flex items-center gap-1.5 min-w-0">
                         <span
                           className={`w-2 h-2 rounded-full shrink-0 ${
-                            isSelected ? 'bg-[#01BC8D]' : 'bg-[#8A99AD]/50'
+                            isDrawdownBreached
+                              ? 'bg-[#F6465D] animate-pulse'
+                              : isSelected
+                              ? 'bg-[#01BC8D]'
+                              : 'bg-[#8A99AD]/50'
                           }`}
                         />
                         <span className="font-bold text-xs text-white truncate">
                           {acc.name}
                         </span>
+                        {isDrawdownBreached && (
+                          <span className="text-[9px] bg-[#F6465D] text-white px-1.5 py-0.5 rounded font-bold shrink-0">
+                            ⚠️ تراجع {accDrawdown.toFixed(1)}%
+                          </span>
+                        )}
                       </div>
                       <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-[#0B0E11] text-[#01BC8D] border border-[#232E3A] shrink-0">
                         {acc.settings.tradeValueUsdt}$ × {acc.settings.leverage}x
@@ -1620,6 +1704,20 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                         المتاح: <strong className="text-white">{acc.availableBalance.toFixed(0)}$</strong>
                       </span>
                       <span>
+                        التراجع:{' '}
+                        <strong
+                          className={
+                            accDrawdown >= drawdownThresholdPercent
+                              ? 'text-[#F6465D]'
+                              : accDrawdown > 0
+                              ? 'text-[#F59E0B]'
+                              : 'text-[#01BC8D]'
+                          }
+                        >
+                          {accDrawdown.toFixed(1)}%
+                        </strong>
+                      </span>
+                      <span>
                         مفتوحة: <strong className="text-[#01BC8D]">{acc.openPositionsCount}/{acc.settings.maxConcurrentTrades}</strong>
                       </span>
                       <span>
@@ -1629,6 +1727,93 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                   </button>
                 );
               })}
+            </div>
+
+            {/* Instant Drawdown Push Notification Control Bar */}
+            <div
+              data-testid="simulation_drawdown_alert_bar"
+              className="bg-[#12171D] border border-[#232E3A] rounded-xl p-2.5 sm:p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+            >
+              <div className="flex items-center gap-2 flex-wrap">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-testid="sim_toggle_drawdown_alert"
+                    checked={notifyOnDrawdown}
+                    onChange={(e) =>
+                      handleUpdateDrawdownNotif({ notifyOnDrawdown: e.target.checked })
+                    }
+                    className="w-4 h-4 accent-[#F6465D] cursor-pointer"
+                  />
+                  <BellRing
+                    className={`w-4 h-4 shrink-0 ${
+                      notifyOnDrawdown ? 'text-[#F6465D]' : 'text-[#8A99AD]'
+                    }`}
+                  />
+                  <span className="text-xs font-bold text-white">
+                    إشعار فوري (Push Notification) عند وصول نسبة التراجع (Drawdown) في أي حساب افتراضي إلى:
+                  </span>
+                </label>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <div className="flex items-center bg-[#0B0E11] border border-[#232E3A] focus-within:border-[#F6465D] rounded-lg px-2 py-1">
+                  <input
+                    type="number"
+                    min="0.5"
+                    max="95"
+                    step="0.5"
+                    data-testid="sim_drawdown_threshold_input"
+                    value={drawdownThresholdPercent}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      if (!isNaN(val) && val > 0) {
+                        handleUpdateDrawdownNotif({
+                          drawdownThresholdPercent: Math.min(95, Math.max(0.5, val)),
+                        });
+                      }
+                    }}
+                    className="w-12 bg-transparent text-xs font-mono font-bold text-white focus:outline-none text-center"
+                  />
+                  <span className="text-[11px] font-mono font-bold text-[#F6465D]">%</span>
+                </div>
+
+                {[5, 10, 15, 20].map((pct) => (
+                  <button
+                    key={pct}
+                    type="button"
+                    data-testid={`sim_drawdown_preset_${pct}`}
+                    onClick={() => handleUpdateDrawdownNotif({ drawdownThresholdPercent: pct })}
+                    className={`px-2 py-1 rounded-lg text-[11px] font-mono font-bold cursor-pointer transition-colors ${
+                      drawdownThresholdPercent === pct
+                        ? 'bg-[#F6465D] text-white'
+                        : 'bg-[#0B0E11] text-[#8A99AD] border border-[#232E3A] hover:text-white'
+                    }`}
+                  >
+                    {pct}%
+                  </button>
+                ))}
+
+                <button
+                  type="button"
+                  data-testid="sim_test_drawdown_push_btn"
+                  onClick={() => mobileNotifications.triggerTestNotification('DRAWDOWN_ALERT')}
+                  className="bg-[#3A1219] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/40 px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer transition-colors"
+                  title="إرسال إشعار فوري تجريبي لتنبيه التراجع الآن"
+                >
+                  🔔 تجربة الإشعار
+                </button>
+
+                {onOpenNotificationsCenter && (
+                  <button
+                    type="button"
+                    onClick={onOpenNotificationsCenter}
+                    className="bg-[#1A222B] hover:bg-[#232E3A] text-[#8A99AD] hover:text-white border border-[#232E3A] px-2 py-1 rounded-lg text-[11px] cursor-pointer"
+                  >
+                    سجل التنبيهات
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         )}

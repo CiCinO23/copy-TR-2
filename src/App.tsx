@@ -684,6 +684,7 @@ export const App: React.FC = () => {
         onDismiss={() => setActivePushBanner(null)}
         onOpenSimulation={() => setSelectedTab('Simulation')}
         onOpenCenter={handleOpenNotificationsCenter}
+        onSelectAccount={handleSelectVirtualAccount}
       />
 
       {/* Top Header Bar */}
@@ -862,6 +863,9 @@ export const App: React.FC = () => {
               else setSelectedTab(tab);
             }}
             onOpenTraderStats={handleOpenTraderStats}
+            notificationSettings={notificationSettings}
+            onUpdateNotificationSettings={(partial) => mobileNotifications.updateSettings(partial)}
+            onOpenNotificationsCenter={handleOpenNotificationsCenter}
           />
         )}
 
@@ -905,6 +909,7 @@ export const App: React.FC = () => {
         onMarkAllRead={() => mobileNotifications.markAllAsRead()}
         onClearAll={() => mobileNotifications.clearAllNotifications()}
         onNavigateToSimulation={() => setSelectedTab('Simulation')}
+        onSelectAccount={handleSelectVirtualAccount}
       />
     </div>
   );

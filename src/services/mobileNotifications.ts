@@ -3,10 +3,12 @@ import {
   MobileNotificationSettings,
   MobileTradeNotification,
   PaperPosition,
+  PaperVirtualAccountSummary,
 } from '../types';
 
 const NOTIFICATIONS_STORAGE_KEY = 'whale_mobile_notifications_log_v1';
 const NOTIFICATION_SETTINGS_KEY = 'whale_mobile_notification_settings_v1';
+const DRAWDOWN_ALERT_STATE_KEY = 'whale_drawdown_alert_state_v1';
 const MAX_STORED_NOTIFICATIONS = 100;
 
 export const DEFAULT_MOBILE_NOTIFICATION_SETTINGS: MobileNotificationSettings = {
@@ -15,6 +17,8 @@ export const DEFAULT_MOBILE_NOTIFICATION_SETTINGS: MobileNotificationSettings = 
   notifyOnScaleIn: true,
   notifyOnPartialExit: true,
   notifyOnFullExit: true,
+  notifyOnDrawdown: true,
+  drawdownThresholdPercent: 10,
   soundEnabled: true,
   vibrationEnabled: true,
   browserPushEnabled: true,
@@ -23,6 +27,12 @@ export const DEFAULT_MOBILE_NOTIFICATION_SETTINGS: MobileNotificationSettings = 
   telegramBotToken: '',
   telegramChatId: '',
 };
+
+interface AccountDrawdownAlertRecord {
+  alertedAtThreshold: number;
+  peakAlertedDrawdown: number;
+  lastAlertTimestamp: number;
+}
 
 type NotificationListener = (
   latest: MobileTradeNotification | null,
@@ -34,10 +44,12 @@ class MobileNotificationService {
   private notifications: MobileTradeNotification[] = [];
   private settings: MobileNotificationSettings = { ...DEFAULT_MOBILE_NOTIFICATION_SETTINGS };
   private listeners: Set<NotificationListener> = new Set();
+  private drawdownAlertState: Record<string, AccountDrawdownAlertRecord> = {};
 
   constructor() {
     this.settings = this.loadSettings();
     this.notifications = this.loadNotifications();
+    this.drawdownAlertState = this.loadDrawdownAlertState();
   }
 
   private loadSettings(): MobileNotificationSettings {
@@ -84,12 +96,50 @@ class MobileNotificationService {
     }
   }
 
+  private loadDrawdownAlertState(): Record<string, AccountDrawdownAlertRecord> {
+    try {
+      const raw = localStorage.getItem(DRAWDOWN_ALERT_STATE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch {
+      // ignore
+    }
+    return {};
+  }
+
+  private saveDrawdownAlertState(): void {
+    try {
+      localStorage.setItem(DRAWDOWN_ALERT_STATE_KEY, JSON.stringify(this.drawdownAlertState));
+    } catch {
+      // ignore
+    }
+  }
+
+  public resetAccountDrawdownAlert(accountId?: string): void {
+    if (accountId) {
+      delete this.drawdownAlertState[accountId];
+    } else {
+      this.drawdownAlertState = {};
+    }
+    this.saveDrawdownAlertState();
+  }
+
   public getSettings(): MobileNotificationSettings {
     return { ...this.settings };
   }
 
   public updateSettings(partial: Partial<MobileNotificationSettings>): MobileNotificationSettings {
+    const prevThreshold = this.settings.drawdownThresholdPercent;
     this.settings = { ...this.settings, ...partial };
+    if (
+      partial.drawdownThresholdPercent !== undefined &&
+      partial.drawdownThresholdPercent !== prevThreshold
+    ) {
+      // Reset alert memory when user changes the drawdown threshold so accounts meeting the new threshold can alert
+      this.resetAccountDrawdownAlert();
+    }
     this.saveSettings();
     this.emitChange(null);
     return { ...this.settings };
@@ -194,7 +244,12 @@ class MobileNotificationService {
         osc.stop(ctx.currentTime + startOffset + duration);
       };
 
-      if (actionType === 'OPEN_TRADE') {
+      if (actionType === 'DRAWDOWN_ALERT') {
+        // Urgent warning siren / triple descending alert tone
+        playTone(880.0, 0, 0.14, 'sawtooth', 0.16); // A5
+        playTone(659.25, 0.14, 0.14, 'sawtooth', 0.16); // E5
+        playTone(440.0, 0.28, 0.26, 'sawtooth', 0.2); // A4
+      } else if (actionType === 'OPEN_TRADE') {
         // Ascending emerald chime
         playTone(587.33, 0, 0.14, 'triangle', 0.15); // D5
         playTone(880.0, 0.12, 0.22, 'triangle', 0.18); // A5
@@ -231,7 +286,9 @@ class MobileNotificationService {
       return;
     }
     try {
-      if (actionType === 'OPEN_TRADE') {
+      if (actionType === 'DRAWDOWN_ALERT') {
+        navigator.vibrate([250, 80, 250, 80, 320]);
+      } else if (actionType === 'OPEN_TRADE') {
         navigator.vibrate([120, 60, 140]);
       } else if (actionType === 'SCALE_IN') {
         navigator.vibrate([90, 50, 90, 50, 140]);
@@ -267,44 +324,62 @@ class MobileNotificationService {
       return;
     }
 
-    const sideAr = item.side === 'LONG' ? 'شراء Long 🟢' : 'بيع Short 🔴';
-    const modeAr = item.executionMode === 'REAL' ? 'حقيقي (KuCoin)' : 'افتراضي (Simulation)';
-    const lines: string[] = [
-      `العملة: ${item.symbol} | ${sideAr} (${item.leverage}x)`,
-      `المتداول المصدر: ${item.traderName} • الوضع: ${modeAr}`,
-    ];
+    let title = `${item.actionTitleAr} — ${item.symbol}`;
+    let lines: string[] = [];
 
-    if (item.actionType === 'OPEN_TRADE') {
-      lines.push(
-        `سعر الدخول: ${this.formatPrice(item.entryPrice)}$ | قيمة الصفقة: ${item.marginUsdt.toFixed(2)}$`,
-        `الكمية: ${item.quantity} | العمولة: ${item.commissionUsdt.toFixed(4)}$`
-      );
-    } else if (item.actionType === 'SCALE_IN') {
-      const addedUsdt = Math.abs(item.marginDeltaUsdt || 0);
-      lines.push(
-        `قيمة التدعيم: +${addedUsdt.toFixed(2)}$ (+${Math.abs(item.volumePercent)}%) | السعر: ${this.formatPrice(item.price)}$`,
-        `متوسط الدخول الجديد: ${this.formatPrice(item.entryPrice)}$ | إجمالي الهامش: ${item.marginUsdt.toFixed(2)}$ (${item.remainingScalePercent}%)`
-      );
-    } else if (item.actionType === 'PARTIAL_EXIT') {
-      const withdrawnUsdt = Math.abs(item.marginDeltaUsdt || 0);
-      const pnlVal = item.realizedPnlUsdt || 0;
-      const pnlSign = pnlVal >= 0 ? '+' : '';
-      lines.push(
-        `نسبة السحب: -${Math.abs(item.volumePercent)}% (${withdrawnUsdt.toFixed(2)}$) | سعر الخروج: ${this.formatPrice(item.exitPrice || item.price)}$`,
-        `الربح المحقق للجزء: ${pnlSign}${pnlVal.toFixed(2)}$ | المتبقي بالصفقة: ${item.remainingScalePercent}% (${item.marginUsdt.toFixed(2)}$)`
-      );
+    if (item.actionType === 'DRAWDOWN_ALERT') {
+      const accName = item.accountName || item.traderName || 'حساب افتراضي';
+      const ddPct = (item.drawdownPercent ?? 0).toFixed(2);
+      const threshPct = (item.drawdownThresholdPercent ?? this.settings.drawdownThresholdPercent).toFixed(1);
+      const initBal = (item.initialBalanceUsdt ?? item.marginUsdt ?? 0).toFixed(2);
+      const eqNow = (item.currentEquityUsdt ?? item.price ?? 0).toFixed(2);
+      const lossVal = (item.drawdownLossUsdt ?? Math.abs(item.realizedPnlUsdt || 0)).toFixed(2);
+
+      title = `${item.actionTitleAr} — ${accName}`;
+      lines = [
+        `الحساب الافتراضي: ${accName} | نسبة التراجع: ${ddPct}% (الحد: ${threshPct}%)`,
+        `رأس المال الأولي: ${initBal}$ ⬅️ الرصيد الحالي (Equity): ${eqNow}$`,
+        `مقدار التراجع من رأس المال الأولي: -${lossVal}$ USDT`,
+      ];
     } else {
-      // FULL_EXIT
-      const pnlVal = item.realizedPnlUsdt || 0;
-      const pnlPct = item.realizedPnlPercent || 0;
-      const pnlSign = pnlVal >= 0 ? '+' : '';
-      lines.push(
-        `سعر الدخول: ${this.formatPrice(item.entryPrice)}$ ⬅️ سعر الخروج: ${this.formatPrice(item.exitPrice || item.price)}$`,
-        `صافي الربح/الخسارة: ${pnlSign}${pnlVal.toFixed(2)}$ (${pnlSign}${pnlPct.toFixed(2)}%) | العمولة: ${item.commissionUsdt.toFixed(4)}$`
-      );
+      const sideAr = item.side === 'LONG' ? 'شراء Long 🟢' : 'بيع Short 🔴';
+      const modeAr = item.executionMode === 'REAL' ? 'حقيقي (KuCoin)' : 'افتراضي (Simulation)';
+      lines = [
+        `العملة: ${item.symbol} | ${sideAr} (${item.leverage}x)`,
+        `المتداول المصدر: ${item.traderName} • الوضع: ${modeAr}`,
+      ];
+
+      if (item.actionType === 'OPEN_TRADE') {
+        lines.push(
+          `سعر الدخول: ${this.formatPrice(item.entryPrice)}$ | قيمة الصفقة: ${item.marginUsdt.toFixed(2)}$`,
+          `الكمية: ${item.quantity} | العمولة: ${item.commissionUsdt.toFixed(4)}$`
+        );
+      } else if (item.actionType === 'SCALE_IN') {
+        const addedUsdt = Math.abs(item.marginDeltaUsdt || 0);
+        lines.push(
+          `قيمة التدعيم: +${addedUsdt.toFixed(2)}$ (+${Math.abs(item.volumePercent)}%) | السعر: ${this.formatPrice(item.price)}$`,
+          `متوسط الدخول الجديد: ${this.formatPrice(item.entryPrice)}$ | إجمالي الهامش: ${item.marginUsdt.toFixed(2)}$ (${item.remainingScalePercent}%)`
+        );
+      } else if (item.actionType === 'PARTIAL_EXIT') {
+        const withdrawnUsdt = Math.abs(item.marginDeltaUsdt || 0);
+        const pnlVal = item.realizedPnlUsdt || 0;
+        const pnlSign = pnlVal >= 0 ? '+' : '';
+        lines.push(
+          `نسبة السحب: -${Math.abs(item.volumePercent)}% (${withdrawnUsdt.toFixed(2)}$) | سعر الخروج: ${this.formatPrice(item.exitPrice || item.price)}$`,
+          `الربح المحقق للجزء: ${pnlSign}${pnlVal.toFixed(2)}$ | المتبقي بالصفقة: ${item.remainingScalePercent}% (${item.marginUsdt.toFixed(2)}$)`
+        );
+      } else {
+        // FULL_EXIT
+        const pnlVal = item.realizedPnlUsdt || 0;
+        const pnlPct = item.realizedPnlPercent || 0;
+        const pnlSign = pnlVal >= 0 ? '+' : '';
+        lines.push(
+          `سعر الدخول: ${this.formatPrice(item.entryPrice)}$ ⬅️ سعر الخروج: ${this.formatPrice(item.exitPrice || item.price)}$`,
+          `صافي الربح/الخسارة: ${pnlSign}${pnlVal.toFixed(2)}$ (${pnlSign}${pnlPct.toFixed(2)}%) | العمولة: ${item.commissionUsdt.toFixed(4)}$`
+        );
+      }
     }
 
-    const title = `${item.actionTitleAr} — ${item.symbol}`;
     const body = lines.join('\n');
 
     try {
@@ -348,14 +423,52 @@ class MobileNotificationService {
 
     const token = this.settings.telegramBotToken.trim();
     const chatId = this.settings.telegramChatId.trim();
-    const sideBadge = item.side === 'LONG' ? '🟢 LONG (شراء)' : '🔴 SHORT (بيع)';
-    const modeBadge =
-      item.executionMode === 'REAL' ? '⚡ حقيقي (KuCoin Live)' : '🧪 محاكاة (Simulation)';
     const timeStr = new Date(item.timestamp).toLocaleTimeString('ar-EG', {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
     });
+
+    if (item.actionType === 'DRAWDOWN_ALERT') {
+      const accName = item.accountName || item.traderName || 'حساب افتراضي';
+      const ddPct = (item.drawdownPercent ?? 0).toFixed(2);
+      const threshPct = (item.drawdownThresholdPercent ?? this.settings.drawdownThresholdPercent).toFixed(1);
+      const initBal = (item.initialBalanceUsdt ?? item.marginUsdt ?? 0).toFixed(2);
+      const eqNow = (item.currentEquityUsdt ?? item.price ?? 0).toFixed(2);
+      const lossVal = (item.drawdownLossUsdt ?? Math.abs(item.realizedPnlUsdt || 0)).toFixed(2);
+
+      const drawdownHtml = [
+        `🚨 <b>${item.actionTitleAr}</b>`,
+        `━━━━━━━━━━━━━━━━━━`,
+        `🏦 <b>الحساب الافتراضي:</b> <code>${accName}</code>`,
+        `📉 <b>نسبة التراجع الحالية:</b> <code>-${ddPct}%</code> (تجاوزت الحد <code>${threshPct}%</code>)`,
+        `💰 <b>رأس المال الأولي:</b> <code>$${initBal} USDT</code>`,
+        `📊 <b>الرصيد الحالي (Equity):</b> <code>$${eqNow} USDT</code>`,
+        `🔻 <b>قيمة التراجع بالدولار:</b> <code>-$${lossVal} USDT</code>`,
+        `━━━━━━━━━━━━━━━━━━`,
+        `🕒 <b>الوقت:</b> ${timeStr}`,
+      ].join('\n');
+
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: drawdownHtml,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+          }),
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    }
+
+    const sideBadge = item.side === 'LONG' ? '🟢 LONG (شراء)' : '🔴 SHORT (بيع)';
+    const modeBadge =
+      item.executionMode === 'REAL' ? '⚡ حقيقي (KuCoin Live)' : '🧪 محاكاة (Simulation)';
 
     let detailsBlock = '';
     if (item.actionType === 'OPEN_TRADE') {
@@ -549,11 +662,166 @@ class MobileNotificationService {
   }
 
   /**
+   * Dispatch an instant Push Notification when a virtual account's Drawdown reaches or exceeds the threshold
+   */
+  public notifyDrawdownAlert(params: {
+    accountId: string;
+    accountName: string;
+    initialBalanceUsdt: number;
+    currentEquityUsdt: number;
+    drawdownPercent: number;
+    thresholdPercent?: number;
+    openPositionsCount?: number;
+    force?: boolean;
+  }): MobileTradeNotification | null {
+    if (!params.force) {
+      if (!this.settings.enabled || !this.settings.notifyOnDrawdown) return null;
+    }
+
+    const threshold = Math.max(
+      0.5,
+      params.thresholdPercent ?? this.settings.drawdownThresholdPercent ?? 10
+    );
+    const ddPct = parseFloat(Math.max(0, params.drawdownPercent).toFixed(2));
+    const lossUsdt = parseFloat(
+      Math.max(0, params.initialBalanceUsdt - params.currentEquityUsdt).toFixed(2)
+    );
+    const remainingPct = parseFloat(Math.max(0, 100 - ddPct).toFixed(2));
+
+    const notification: MobileTradeNotification = {
+      id: `notif_dd_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      timestamp: Date.now(),
+      read: false,
+      actionType: 'DRAWDOWN_ALERT',
+      actionTitleAr: `⚠️ تنبيه تراجع الرصيد (${ddPct}%)`,
+      symbol: 'USDT',
+      side: 'SHORT',
+      leverage: 1,
+      executionMode: 'VIRTUAL',
+      traderName: params.accountName,
+      sourceType: 'COPY_TRADING',
+      price: params.currentEquityUsdt,
+      entryPrice: params.initialBalanceUsdt,
+      exitPrice: params.currentEquityUsdt,
+      quantity: params.openPositionsCount ?? 0,
+      marginUsdt: params.initialBalanceUsdt,
+      marginDeltaUsdt: -lossUsdt,
+      volumePercent: -ddPct,
+      remainingScalePercent: remainingPct,
+      commissionUsdt: 0,
+      realizedPnlUsdt: -lossUsdt,
+      realizedPnlPercent: -ddPct,
+      accountId: params.accountId,
+      accountName: params.accountName,
+      drawdownPercent: ddPct,
+      drawdownThresholdPercent: threshold,
+      initialBalanceUsdt: params.initialBalanceUsdt,
+      currentEquityUsdt: params.currentEquityUsdt,
+      drawdownLossUsdt: lossUsdt,
+      summaryTextAr: `تنبيه مخاطر فوري: وصلت نسبة التراجع (Drawdown) في "${params.accountName}" إلى ${ddPct}% من رأس المال الأولي (${params.initialBalanceUsdt.toFixed(2)}$ ⬅️ ${params.currentEquityUsdt.toFixed(2)}$ • تراجع -${lossUsdt.toFixed(2)}$) متجاوزة الحد المحدد (${threshold}%).`,
+    };
+
+    this.notifications.unshift(notification);
+    if (this.notifications.length > MAX_STORED_NOTIFICATIONS) {
+      this.notifications = this.notifications.slice(0, MAX_STORED_NOTIFICATIONS);
+    }
+    this.saveNotifications();
+
+    this.playChime('DRAWDOWN_ALERT', false);
+    this.triggerVibration('DRAWDOWN_ALERT');
+    this.sendBrowserSystemNotification(notification);
+    this.sendTelegramPushNotification(notification);
+
+    this.emitChange(notification);
+    return notification;
+  }
+
+  /**
+   * Monitor all virtual accounts and fire an instant Push Notification when any account's drawdown
+   * from initial capital reaches or exceeds the configured threshold (e.g., 10%).
+   */
+  public checkAccountsDrawdown(accounts: PaperVirtualAccountSummary[]): MobileTradeNotification[] {
+    if (!this.settings.enabled || !this.settings.notifyOnDrawdown) return [];
+
+    const threshold = Math.max(0.5, Number(this.settings.drawdownThresholdPercent) || 10);
+    const triggered: MobileTradeNotification[] = [];
+    let stateChanged = false;
+
+    for (const acc of accounts) {
+      if (!acc || acc.initialBalance <= 0) continue;
+
+      const ddPct =
+        acc.drawdownPercent !== undefined
+          ? acc.drawdownPercent
+          : acc.totalEquity < acc.initialBalance
+          ? parseFloat((((acc.initialBalance - acc.totalEquity) / acc.initialBalance) * 100).toFixed(2))
+          : 0;
+
+      const prevRecord = this.drawdownAlertState[acc.id];
+
+      if (ddPct >= threshold) {
+        // Trigger if never alerted for this drawdown wave, or if threshold was lowered, or if drawdown worsened by >= 5% more
+        const shouldAlert =
+          !prevRecord ||
+          prevRecord.alertedAtThreshold > threshold ||
+          ddPct >= prevRecord.peakAlertedDrawdown + 5;
+
+        if (shouldAlert) {
+          this.drawdownAlertState[acc.id] = {
+            alertedAtThreshold: threshold,
+            peakAlertedDrawdown: Math.max(ddPct, prevRecord?.peakAlertedDrawdown || 0),
+            lastAlertTimestamp: Date.now(),
+          };
+          stateChanged = true;
+
+          const notif = this.notifyDrawdownAlert({
+            accountId: acc.id,
+            accountName: acc.name,
+            initialBalanceUsdt: acc.initialBalance,
+            currentEquityUsdt: acc.totalEquity,
+            drawdownPercent: ddPct,
+            thresholdPercent: threshold,
+            openPositionsCount: acc.openPositionsCount,
+          });
+          if (notif) triggered.push(notif);
+        }
+      } else if (prevRecord && ddPct < threshold * 0.9) {
+        // Account recovered below 90% of the threshold — re-arm alert for future drawdowns
+        delete this.drawdownAlertState[acc.id];
+        stateChanged = true;
+      }
+    }
+
+    if (stateChanged) {
+      this.saveDrawdownAlertState();
+    }
+
+    return triggered;
+  }
+
+  /**
    * Trigger a realistic test notification so the user can verify mobile banner, sound, vibration, and Telegram
    */
   public triggerTestNotification(
     actionType: MobileNotificationActionType = 'OPEN_TRADE'
   ): MobileTradeNotification {
+    if (actionType === 'DRAWDOWN_ALERT') {
+      const thresh = Math.max(0.5, Number(this.settings.drawdownThresholdPercent) || 10);
+      const simulatedDd = parseFloat((thresh + 1.45).toFixed(2));
+      const initBal = 1000;
+      const eqNow = parseFloat((initBal * (1 - simulatedDd / 100)).toFixed(2));
+      return this.notifyDrawdownAlert({
+        accountId: 'acc_default',
+        accountName: 'الحساب الافتراضي 1',
+        initialBalanceUsdt: initBal,
+        currentEquityUsdt: eqNow,
+        drawdownPercent: simulatedDd,
+        thresholdPercent: thresh,
+        openPositionsCount: 3,
+        force: true,
+      })!;
+    }
+
     const mockPosition: PaperPosition = {
       id: `test_pos_${Date.now()}`,
       symbol: 'BTCUSDT',

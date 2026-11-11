@@ -260,6 +260,7 @@ export class PaperEngine {
     if (this.accounts.length <= 1) {
       return this.getSnapshot(currentPrices);
     }
+    mobileNotifications.resetAccountDrawdownAlert(accountId);
     this.accounts = this.accounts.filter((a) => a.id !== accountId);
     if (!this.accounts.some((a) => a.id === this.activeAccountId)) {
       this.activeAccountId = this.accounts[0].id;
@@ -289,6 +290,11 @@ export class PaperEngine {
       }
 
       const totalEquity = acc.availableBalance + openPositionsMargin + totalUnrealized;
+      const drawdownPercent =
+        acc.initialBalance > 0 && totalEquity < acc.initialBalance
+          ? parseFloat((((acc.initialBalance - totalEquity) / acc.initialBalance) * 100).toFixed(2))
+          : 0;
+
       return {
         id: acc.id,
         name: acc.name,
@@ -300,6 +306,7 @@ export class PaperEngine {
         totalCommissionsPaid: parseFloat(acc.totalCommissionsPaid.toFixed(4)),
         openPositionsCount: openCount,
         closedPositionsCount: closedCount,
+        drawdownPercent,
         settings: { ...acc.settings },
       };
     });
@@ -327,6 +334,7 @@ export class PaperEngine {
       const diff = partial.virtualInitialBalance - acc.initialBalance;
       acc.initialBalance = partial.virtualInitialBalance;
       acc.availableBalance = Math.max(0, acc.availableBalance + diff);
+      mobileNotifications.resetAccountDrawdownAlert(acc.id);
     }
 
     // Recalculate open copied positions if scale-in or trade size settings were updated
@@ -471,6 +479,7 @@ export class PaperEngine {
       acc.availableBalance = Math.max(0, validBalance - openMargin);
     }
 
+    mobileNotifications.resetAccountDrawdownAlert(acc.id);
     this.saveState();
     return this.getSnapshot({});
   }
@@ -902,6 +911,10 @@ export class PaperEngine {
       realizedPnlDeltaUsdt: Number(netPartialPnl.toFixed(2)),
     });
 
+    mobileNotifications.checkAccountsDrawdown(
+      this.getAccountsSummaries({ [pos.symbol]: safePrice })
+    );
+
     return pos;
   }
 
@@ -961,6 +974,10 @@ export class PaperEngine {
       marginDeltaUsdt: -Number(remainingMargin.toFixed(2)),
       realizedPnlDeltaUsdt: Number((pos.realizedPnl ?? netPnl).toFixed(2)),
     });
+
+    mobileNotifications.checkAccountsDrawdown(
+      this.getAccountsSummaries({ [pos.symbol]: exitPrice })
+    );
 
     return pos;
   }
@@ -1248,6 +1265,9 @@ export class PaperEngine {
 
     const totalEquity = acc.availableBalance + openPositionsMargin + totalUnrealized;
     const summaries = this.getAccountsSummaries(currentPrices);
+
+    // Check if any virtual account reached the configured Drawdown threshold and dispatch an instant Push Notification
+    mobileNotifications.checkAccountsDrawdown(summaries);
 
     return {
       activeAccountId: acc.id,

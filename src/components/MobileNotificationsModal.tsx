@@ -18,6 +18,7 @@ import {
   Sparkles,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   MobileNotificationActionType,
@@ -53,46 +54,51 @@ interface MobilePushToastBannerProps {
   onDismiss: () => void;
   onOpenSimulation: () => void;
   onOpenCenter: () => void;
+  onSelectAccount?: (accountId: string) => void;
 }
 
 /**
- * In-App Mobile Push Banner (drops from top of screen on mobile/desktop when a trade event fires)
+ * In-App Mobile Push Banner (drops from top of screen on mobile/desktop when a trade event or drawdown alert fires)
  */
 export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
   notification,
   onDismiss,
   onOpenSimulation,
   onOpenCenter,
+  onSelectAccount,
 }) => {
   if (!notification) return null;
 
+  const isDrawdownAlert = notification.actionType === 'DRAWDOWN_ALERT';
   const isLong = notification.side === 'LONG';
   const hasPnl = notification.realizedPnlUsdt !== undefined;
   const pnlVal = notification.realizedPnlUsdt || 0;
   const pnlPct = notification.realizedPnlPercent || 0;
   const isProfit = pnlVal >= 0;
 
-  const actionColorClass =
-    notification.actionType === 'OPEN_TRADE'
-      ? 'border-[#01BC8D] shadow-[0_10px_35px_rgba(1,188,141,0.35)]'
-      : notification.actionType === 'SCALE_IN'
-      ? 'border-[#38BDF8] shadow-[0_10px_35px_rgba(56,189,248,0.3)]'
-      : notification.actionType === 'PARTIAL_EXIT'
-      ? 'border-[#F59E0B] shadow-[0_10px_35px_rgba(245,158,11,0.3)]'
-      : isProfit
-      ? 'border-[#01BC8D] shadow-[0_10px_35px_rgba(1,188,141,0.38)]'
-      : 'border-[#F6465D] shadow-[0_10px_35px_rgba(246,70,93,0.35)]';
+  const actionColorClass = isDrawdownAlert
+    ? 'border-[#F6465D] shadow-[0_10px_40px_rgba(246,70,93,0.45)]'
+    : notification.actionType === 'OPEN_TRADE'
+    ? 'border-[#01BC8D] shadow-[0_10px_35px_rgba(1,188,141,0.35)]'
+    : notification.actionType === 'SCALE_IN'
+    ? 'border-[#38BDF8] shadow-[0_10px_35px_rgba(56,189,248,0.3)]'
+    : notification.actionType === 'PARTIAL_EXIT'
+    ? 'border-[#F59E0B] shadow-[0_10px_35px_rgba(245,158,11,0.3)]'
+    : isProfit
+    ? 'border-[#01BC8D] shadow-[0_10px_35px_rgba(1,188,141,0.38)]'
+    : 'border-[#F6465D] shadow-[0_10px_35px_rgba(246,70,93,0.35)]';
 
-  const headerBadgeClass =
-    notification.actionType === 'OPEN_TRADE'
-      ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/50'
-      : notification.actionType === 'SCALE_IN'
-      ? 'bg-[#0C2D48] text-[#38BDF8] border-[#38BDF8]/50'
-      : notification.actionType === 'PARTIAL_EXIT'
-      ? 'bg-[#3B2606] text-[#FBBF24] border-[#F59E0B]/50'
-      : isProfit
-      ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/50'
-      : 'bg-[#3A1219] text-[#F6465D] border-[#F6465D]/50';
+  const headerBadgeClass = isDrawdownAlert
+    ? 'bg-[#3A1219] text-[#F6465D] border-[#F6465D]/60'
+    : notification.actionType === 'OPEN_TRADE'
+    ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/50'
+    : notification.actionType === 'SCALE_IN'
+    ? 'bg-[#0C2D48] text-[#38BDF8] border-[#38BDF8]/50'
+    : notification.actionType === 'PARTIAL_EXIT'
+    ? 'bg-[#3B2606] text-[#FBBF24] border-[#F59E0B]/50'
+    : isProfit
+    ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/50'
+    : 'bg-[#3A1219] text-[#F6465D] border-[#F6465D]/50';
 
   return (
     <div
@@ -106,12 +112,18 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
         {/* Top Header Row */}
         <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-[#232E3A]">
           <div className="flex items-center gap-2.5">
-            <div className="relative shrink-0">
-              <CoinIcon symbol={notification.symbol} size="md" />
-              <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-[#0B0E11] border border-[#01BC8D] flex items-center justify-center">
-                <BellRing className="w-2.5 h-2.5 text-[#01BC8D]" />
-              </span>
-            </div>
+            {isDrawdownAlert ? (
+              <div className="w-9 h-9 rounded-xl bg-[#3A1219] border border-[#F6465D]/60 flex items-center justify-center text-[#F6465D] shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+            ) : (
+              <div className="relative shrink-0">
+                <CoinIcon symbol={notification.symbol} size="md" />
+                <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-[#0B0E11] border border-[#01BC8D] flex items-center justify-center">
+                  <BellRing className="w-2.5 h-2.5 text-[#01BC8D]" />
+                </span>
+              </div>
+            )}
             <div>
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span
@@ -119,26 +131,45 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
                 >
                   {notification.actionTitleAr}
                 </span>
-                <span className="font-mono font-extrabold text-sm text-white">
-                  {notification.symbol}
-                </span>
-                <span
-                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
-                    isLong
-                      ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
-                      : 'bg-[#3A1219] text-[#F6465D] border border-[#F6465D]/40'
-                  }`}
-                >
-                  {notification.side} {notification.leverage}x
-                </span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#1A222B] text-[#8A99AD] border border-[#232E3A]">
-                  {notification.executionMode === 'REAL' ? 'حقيقي KuCoin' : 'افتراضي'}
-                </span>
+                {isDrawdownAlert ? (
+                  <>
+                    <span className="font-extrabold text-xs sm:text-sm text-white">
+                      {notification.accountName || notification.traderName}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-[#3A1219] text-[#F6465D] border border-[#F6465D]/40">
+                      الحد: {notification.drawdownThresholdPercent ?? 10}%
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="font-mono font-extrabold text-sm text-white">
+                      {notification.symbol}
+                    </span>
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
+                        isLong
+                          ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
+                          : 'bg-[#3A1219] text-[#F6465D] border border-[#F6465D]/40'
+                      }`}
+                    >
+                      {notification.side} {notification.leverage}x
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#1A222B] text-[#8A99AD] border border-[#232E3A]">
+                      {notification.executionMode === 'REAL' ? 'حقيقي KuCoin' : 'افتراضي'}
+                    </span>
+                  </>
+                )}
               </div>
               <div className="flex items-center gap-2 text-[11px] text-[#8A99AD] mt-1">
-                <span>
-                  المتداول المصدر: <strong className="text-white">{notification.traderName}</strong>
-                </span>
+                {isDrawdownAlert ? (
+                  <span>
+                    تنبيه مخاطر فوري (Push Notification) • تجاوز نسبة التراجع المحددة من رأس المال الأولي
+                  </span>
+                ) : (
+                  <span>
+                    المتداول المصدر: <strong className="text-white">{notification.traderName}</strong>
+                  </span>
+                )}
                 <span>•</span>
                 <span className="font-mono">{formatDateTimeAr(notification.timestamp)}</span>
               </div>
@@ -155,72 +186,102 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
           </button>
         </div>
 
-        {/* Full Trade Info Metrics Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 my-2.5 text-[11px]">
-          <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
-            <span className="text-[#8A99AD] block text-[10px]">
-              {notification.actionType === 'OPEN_TRADE'
-                ? 'سعر الدخول'
-                : notification.actionType === 'SCALE_IN'
-                ? 'سعر التدعيم / المتوسط'
-                : 'سعر الدخول ⬅️ الخروج'}
-            </span>
-            <span className="font-mono font-bold text-white text-xs block mt-0.5">
-              {notification.actionType === 'OPEN_TRADE'
-                ? `$${formatPriceClean(notification.entryPrice)}`
-                : notification.actionType === 'SCALE_IN'
-                ? `$${formatPriceClean(notification.price)} / $${formatPriceClean(notification.entryPrice)}`
-                : `$${formatPriceClean(notification.entryPrice)} ⬅️ $${formatPriceClean(
-                    notification.exitPrice || notification.price
-                  )}`}
-            </span>
-          </div>
-
-          <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
-            <span className="text-[#8A99AD] block text-[10px]">
-              {notification.actionType === 'SCALE_IN'
-                ? 'المضاف / إجمالي الصفقة'
-                : notification.actionType === 'PARTIAL_EXIT'
-                ? 'المسحوب / المتبقي'
-                : 'قيمة الصفقة (الهامش)'}
-            </span>
-            <span className="font-mono font-bold text-[#01BC8D] text-xs block mt-0.5">
-              {notification.actionType === 'SCALE_IN'
-                ? `+$${Math.abs(notification.marginDeltaUsdt || 0).toFixed(2)} ($${notification.marginUsdt.toFixed(2)})`
-                : notification.actionType === 'PARTIAL_EXIT'
-                ? `-$${Math.abs(notification.marginDeltaUsdt || 0).toFixed(2)} ($${notification.marginUsdt.toFixed(2)})`
-                : `$${notification.marginUsdt.toFixed(2)} USDT`}
-            </span>
-          </div>
-
-          <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
-            <span className="text-[#8A99AD] block text-[10px]">الكمية والحجم الحالي</span>
-            <span className="font-mono font-bold text-white text-xs block mt-0.5">
-              {notification.quantity} •{' '}
-              <span className="text-[#01BC8D]">{notification.remainingScalePercent}%</span>
-            </span>
-          </div>
-
-          <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
-            <span className="text-[#8A99AD] block text-[10px]">
-              {hasPnl ? 'صافي الربح / الخسارة' : 'العمولة المقتطعة'}
-            </span>
-            {hasPnl ? (
-              <span
-                className={`font-mono font-extrabold text-xs block mt-0.5 ${
-                  isProfit ? 'text-[#01BC8D]' : 'text-[#F6465D]'
-                }`}
-              >
-                {isProfit ? '+' : ''}${pnlVal.toFixed(2)} ({isProfit ? '+' : ''}
-                {pnlPct.toFixed(2)}%)
+        {/* Metrics Grid */}
+        {isDrawdownAlert ? (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 my-2.5 text-[11px]">
+            <div className="bg-[#0B0E11] border border-[#F6465D]/40 rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">نسبة التراجع الحالية</span>
+              <span className="font-mono font-extrabold text-[#F6465D] text-xs block mt-0.5">
+                -{(notification.drawdownPercent ?? Math.abs(pnlPct)).toFixed(2)}%
               </span>
-            ) : (
+            </div>
+            <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">حد التنبيه المفعّل</span>
               <span className="font-mono font-bold text-[#F59E0B] text-xs block mt-0.5">
-                ${notification.commissionUsdt.toFixed(4)} USDT
+                {(notification.drawdownThresholdPercent ?? 10).toFixed(1)}% من رأس المال
               </span>
-            )}
+            </div>
+            <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">رأس المال الأولي ⬅️ الحالي</span>
+              <span className="font-mono font-bold text-white text-xs block mt-0.5">
+                ${(notification.initialBalanceUsdt ?? notification.entryPrice).toFixed(0)} ⬅️ $
+                {(notification.currentEquityUsdt ?? notification.price).toFixed(2)}
+              </span>
+            </div>
+            <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">مقدار التراجع بالدولار</span>
+              <span className="font-mono font-extrabold text-[#F6465D] text-xs block mt-0.5">
+                -${(notification.drawdownLossUsdt ?? Math.abs(pnlVal)).toFixed(2)} USDT
+              </span>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 my-2.5 text-[11px]">
+            <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">
+                {notification.actionType === 'OPEN_TRADE'
+                  ? 'سعر الدخول'
+                  : notification.actionType === 'SCALE_IN'
+                  ? 'سعر التدعيم / المتوسط'
+                  : 'سعر الدخول ⬅️ الخروج'}
+              </span>
+              <span className="font-mono font-bold text-white text-xs block mt-0.5">
+                {notification.actionType === 'OPEN_TRADE'
+                  ? `$${formatPriceClean(notification.entryPrice)}`
+                  : notification.actionType === 'SCALE_IN'
+                  ? `$${formatPriceClean(notification.price)} / $${formatPriceClean(notification.entryPrice)}`
+                  : `$${formatPriceClean(notification.entryPrice)} ⬅️ $${formatPriceClean(
+                      notification.exitPrice || notification.price
+                    )}`}
+              </span>
+            </div>
+
+            <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">
+                {notification.actionType === 'SCALE_IN'
+                  ? 'المضاف / إجمالي الصفقة'
+                  : notification.actionType === 'PARTIAL_EXIT'
+                  ? 'المسحوب / المتبقي'
+                  : 'قيمة الصفقة (الهامش)'}
+              </span>
+              <span className="font-mono font-bold text-[#01BC8D] text-xs block mt-0.5">
+                {notification.actionType === 'SCALE_IN'
+                  ? `+$${Math.abs(notification.marginDeltaUsdt || 0).toFixed(2)} ($${notification.marginUsdt.toFixed(2)})`
+                  : notification.actionType === 'PARTIAL_EXIT'
+                  ? `-$${Math.abs(notification.marginDeltaUsdt || 0).toFixed(2)} ($${notification.marginUsdt.toFixed(2)})`
+                  : `$${notification.marginUsdt.toFixed(2)} USDT`}
+              </span>
+            </div>
+
+            <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">الكمية والحجم الحالي</span>
+              <span className="font-mono font-bold text-white text-xs block mt-0.5">
+                {notification.quantity} •{' '}
+                <span className="text-[#01BC8D]">{notification.remainingScalePercent}%</span>
+              </span>
+            </div>
+
+            <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">
+                {hasPnl ? 'صافي الربح / الخسارة' : 'العمولة المقتطعة'}
+              </span>
+              {hasPnl ? (
+                <span
+                  className={`font-mono font-extrabold text-xs block mt-0.5 ${
+                    isProfit ? 'text-[#01BC8D]' : 'text-[#F6465D]'
+                  }`}
+                >
+                  {isProfit ? '+' : ''}${pnlVal.toFixed(2)} ({isProfit ? '+' : ''}
+                  {pnlPct.toFixed(2)}%)
+                </span>
+              ) : (
+                <span className="font-mono font-bold text-[#F59E0B] text-xs block mt-0.5">
+                  ${notification.commissionUsdt.toFixed(4)} USDT
+                </span>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Bottom Actions */}
         <div className="flex items-center justify-between gap-2 pt-1">
@@ -230,11 +291,18 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
               type="button"
               onClick={() => {
                 onDismiss();
+                if (isDrawdownAlert && notification.accountId && onSelectAccount) {
+                  onSelectAccount(notification.accountId);
+                }
                 onOpenSimulation();
               }}
-              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-2.5 py-1 rounded-lg text-[11px] cursor-pointer"
+              className={`${
+                isDrawdownAlert
+                  ? 'bg-[#F6465D] hover:bg-[#ff5a70] text-white'
+                  : 'bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11]'
+              } font-bold px-2.5 py-1 rounded-lg text-[11px] cursor-pointer`}
             >
-              عرض الصفقة
+              {isDrawdownAlert ? 'فحص الحساب الآن' : 'عرض الصفقة'}
             </button>
             <button
               type="button"
@@ -262,6 +330,7 @@ interface MobileNotificationsCenterModalProps {
   onMarkAllRead: () => void;
   onClearAll: () => void;
   onNavigateToSimulation: () => void;
+  onSelectAccount?: (accountId: string) => void;
 }
 
 export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterModalProps> = ({
@@ -273,6 +342,7 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
   onMarkAllRead,
   onClearAll,
   onNavigateToSimulation,
+  onSelectAccount,
 }) => {
   const [activeTab, setActiveTab] = useState<'HISTORY' | 'SETTINGS'>('HISTORY');
   const [filterType, setFilterType] = useState<'ALL' | MobileNotificationActionType>('ALL');
@@ -390,7 +460,7 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                     <span>تجربة إرسال تنبيه فوري للموبايل (مع الصوت والاهتزاز وكامل البيانات):</span>
                   </span>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
                   <button
                     type="button"
                     onClick={() => mobileNotifications.triggerTestNotification('OPEN_TRADE')}
@@ -419,6 +489,14 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                   >
                     🏆 تجربة خروج وإغلاق
                   </button>
+                  <button
+                    type="button"
+                    data-testid="test_drawdown_alert_btn"
+                    onClick={() => mobileNotifications.triggerTestNotification('DRAWDOWN_ALERT')}
+                    className="col-span-2 sm:col-span-1 bg-[#3A1219] hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/50 rounded-lg py-1.5 px-2 text-[11px] font-bold cursor-pointer transition-colors"
+                  >
+                    ⚠️ تجربة تنبيه التراجع ({settings.drawdownThresholdPercent || 10}%)
+                  </button>
                 </div>
               </div>
 
@@ -427,6 +505,7 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {[
                     { key: 'ALL', label: 'الكل' },
+                    { key: 'DRAWDOWN_ALERT', label: '⚠️ تنبيهات التراجع' },
                     { key: 'OPEN_TRADE', label: 'فتح صفقات' },
                     { key: 'SCALE_IN', label: 'التدعيم' },
                     { key: 'PARTIAL_EXIT', label: 'سحب جزئي' },
@@ -440,7 +519,9 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                       }
                       className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
                         filterType === tab.key
-                          ? 'bg-[#01BC8D] text-[#0B0E11]'
+                          ? tab.key === 'DRAWDOWN_ALERT'
+                            ? 'bg-[#F6465D] text-white'
+                            : 'bg-[#01BC8D] text-[#0B0E11]'
                           : 'bg-[#0B0E11] text-[#8A99AD] border border-[#232E3A] hover:text-white'
                       }`}
                     >
@@ -479,34 +560,38 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                     لا توجد تنبيهات مسجلة في هذا القسم حتى الآن
                   </div>
                   <p className="text-xs text-[#8A99AD]">
-                    سيتم إرسال تنبيه فوري على الموبايل تلقائياً فور فتح أي صفقة أو تدعيمها أو السحب الجزئي أو الخروج الكامل منها.
+                    سيتم إرسال تنبيه فوري على الموبايل تلقائياً فور فتح أي صفقة أو تدعيمها أو السحب الجزئي أو الخروج الكامل منها أو عند وصول نسبة التراجع (Drawdown) للحد المحدد.
                   </p>
                 </div>
               ) : (
                 <div className="space-y-2.5">
                   {filteredNotifications.map((item) => {
+                    const isDrawdownAlert = item.actionType === 'DRAWDOWN_ALERT';
                     const isLong = item.side === 'LONG';
                     const hasPnl = item.realizedPnlUsdt !== undefined;
                     const pnlVal = item.realizedPnlUsdt || 0;
                     const pnlPct = item.realizedPnlPercent || 0;
                     const isProfit = pnlVal >= 0;
 
-                    const badgeStyle =
-                      item.actionType === 'OPEN_TRADE'
-                        ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/40'
-                        : item.actionType === 'SCALE_IN'
-                        ? 'bg-[#0C2D48] text-[#38BDF8] border-[#38BDF8]/40'
-                        : item.actionType === 'PARTIAL_EXIT'
-                        ? 'bg-[#3B2606] text-[#FBBF24] border-[#F59E0B]/40'
-                        : isProfit
-                        ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/40'
-                        : 'bg-[#3A1219] text-[#F6465D] border-[#F6465D]/40';
+                    const badgeStyle = isDrawdownAlert
+                      ? 'bg-[#3A1219] text-[#F6465D] border-[#F6465D]/50'
+                      : item.actionType === 'OPEN_TRADE'
+                      ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/40'
+                      : item.actionType === 'SCALE_IN'
+                      ? 'bg-[#0C2D48] text-[#38BDF8] border-[#38BDF8]/40'
+                      : item.actionType === 'PARTIAL_EXIT'
+                      ? 'bg-[#3B2606] text-[#FBBF24] border-[#F59E0B]/40'
+                      : isProfit
+                      ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/40'
+                      : 'bg-[#3A1219] text-[#F6465D] border-[#F6465D]/40';
 
                     return (
                       <div
                         key={item.id}
                         className={`bg-[#0B0E11] border rounded-2xl p-3.5 space-y-2.5 transition-all ${
-                          !item.read
+                          isDrawdownAlert
+                            ? 'border-[#F6465D]/70 shadow-[0_0_15px_rgba(246,70,93,0.12)]'
+                            : !item.read
                             ? 'border-[#01BC8D]/60 shadow-[0_0_15px_rgba(1,188,141,0.1)]'
                             : 'border-[#232E3A]'
                         }`}
@@ -514,7 +599,13 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                         {/* Card Top */}
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex items-center gap-2.5">
-                            <CoinIcon symbol={item.symbol} size="md" />
+                            {isDrawdownAlert ? (
+                              <div className="w-9 h-9 rounded-xl bg-[#3A1219] border border-[#F6465D]/50 flex items-center justify-center text-[#F6465D] shrink-0">
+                                <AlertTriangle className="w-5 h-5" />
+                              </div>
+                            ) : (
+                              <CoinIcon symbol={item.symbol} size="md" />
+                            )}
                             <div>
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <span
@@ -522,34 +613,56 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                                 >
                                   {item.actionTitleAr}
                                 </span>
-                                <span className="font-mono font-extrabold text-sm text-white">
-                                  {item.symbol}
-                                </span>
-                                <span
-                                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold flex items-center gap-0.5 ${
-                                    isLong
-                                      ? 'bg-[#0D2B24] text-[#01BC8D]'
-                                      : 'bg-[#3A1219] text-[#F6465D]'
-                                  }`}
-                                >
-                                  {isLong ? (
-                                    <ArrowUpRight className="w-3 h-3" />
-                                  ) : (
-                                    <ArrowDownRight className="w-3 h-3" />
-                                  )}
-                                  {item.side} {item.leverage}x
-                                </span>
-                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#1A222B] text-[#8A99AD]">
-                                  {item.executionMode === 'REAL'
-                                    ? 'حقيقي (KuCoin)'
-                                    : 'افتراضي (Simulation)'}
-                                </span>
+                                {isDrawdownAlert ? (
+                                  <>
+                                    <span className="font-extrabold text-sm text-white">
+                                      {item.accountName || item.traderName}
+                                    </span>
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#3A1219] text-[#F6465D] font-mono font-bold">
+                                      تجاوز حد {item.drawdownThresholdPercent ?? 10}%
+                                    </span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className="font-mono font-extrabold text-sm text-white">
+                                      {item.symbol}
+                                    </span>
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold flex items-center gap-0.5 ${
+                                        isLong
+                                          ? 'bg-[#0D2B24] text-[#01BC8D]'
+                                          : 'bg-[#3A1219] text-[#F6465D]'
+                                      }`}
+                                    >
+                                      {isLong ? (
+                                        <ArrowUpRight className="w-3 h-3" />
+                                      ) : (
+                                        <ArrowDownRight className="w-3 h-3" />
+                                      )}
+                                      {item.side} {item.leverage}x
+                                    </span>
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#1A222B] text-[#8A99AD]">
+                                      {item.executionMode === 'REAL'
+                                        ? 'حقيقي (KuCoin)'
+                                        : 'افتراضي (Simulation)'}
+                                    </span>
+                                  </>
+                                )}
                               </div>
                               <div className="text-[11px] text-[#8A99AD] mt-1 flex items-center gap-2 flex-wrap">
-                                <span>
-                                  المتداول المصدر:{' '}
-                                  <strong className="text-[#EAECEF]">{item.traderName}</strong>
-                                </span>
+                                {isDrawdownAlert ? (
+                                  <span>
+                                    الحساب المتأثر:{' '}
+                                    <strong className="text-[#EAECEF]">
+                                      {item.accountName || item.traderName}
+                                    </strong>
+                                  </span>
+                                ) : (
+                                  <span>
+                                    المتداول المصدر:{' '}
+                                    <strong className="text-[#EAECEF]">{item.traderName}</strong>
+                                  </span>
+                                )}
                                 <span>•</span>
                                 <span className="font-mono">{formatDateTimeAr(item.timestamp)}</span>
                               </div>
@@ -560,83 +673,126 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                             type="button"
                             onClick={() => {
                               onClose();
+                              if (isDrawdownAlert && item.accountId && onSelectAccount) {
+                                onSelectAccount(item.accountId);
+                              }
                               onNavigateToSimulation();
                             }}
-                            className="text-[11px] text-[#01BC8D] hover:underline font-bold shrink-0 cursor-pointer"
+                            className={`text-[11px] hover:underline font-bold shrink-0 cursor-pointer ${
+                              isDrawdownAlert ? 'text-[#F6465D]' : 'text-[#01BC8D]'
+                            }`}
                           >
-                            عرض بالمحاكاة
+                            {isDrawdownAlert ? 'فحص الحساب' : 'عرض بالمحاكاة'}
                           </button>
                         </div>
 
                         {/* Complete Details Grid */}
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-[#12171D] border border-[#232E3A] rounded-xl p-2.5 text-[11px]">
-                          <div>
-                            <span className="text-[#8A99AD] block text-[10px]">
-                              {item.actionType === 'OPEN_TRADE'
-                                ? 'سعر الدخول'
-                                : item.actionType === 'SCALE_IN'
-                                ? 'سعر التدعيم / المتوسط'
-                                : 'سعر الدخول ⬅️ الخروج'}
-                            </span>
-                            <span className="font-mono font-bold text-white">
-                              {item.actionType === 'OPEN_TRADE'
-                                ? `$${formatPriceClean(item.entryPrice)}`
-                                : item.actionType === 'SCALE_IN'
-                                ? `$${formatPriceClean(item.price)} / $${formatPriceClean(
-                                    item.entryPrice
-                                  )}`
-                                : `$${formatPriceClean(item.entryPrice)} ⬅️ $${formatPriceClean(
-                                    item.exitPrice || item.price
-                                  )}`}
-                            </span>
-                          </div>
-
-                          <div>
-                            <span className="text-[#8A99AD] block text-[10px]">
-                              {item.actionType === 'SCALE_IN'
-                                ? 'قيمة التدعيم / الإجمالي'
-                                : item.actionType === 'PARTIAL_EXIT'
-                                ? 'قيمة السحب / المتبقي'
-                                : 'قيمة الصفقة (الهامش)'}
-                            </span>
-                            <span className="font-mono font-bold text-[#01BC8D]">
-                              {item.actionType === 'SCALE_IN'
-                                ? `+$${Math.abs(item.marginDeltaUsdt || 0).toFixed(2)} ($${item.marginUsdt.toFixed(2)})`
-                                : item.actionType === 'PARTIAL_EXIT'
-                                ? `-$${Math.abs(item.marginDeltaUsdt || 0).toFixed(2)} ($${item.marginUsdt.toFixed(2)})`
-                                : `$${item.marginUsdt.toFixed(2)} USDT`}
-                            </span>
-                          </div>
-
-                          <div>
-                            <span className="text-[#8A99AD] block text-[10px]">
-                              الكمية وحجم المركز
-                            </span>
-                            <span className="font-mono font-bold text-white">
-                              {item.quantity} ({item.remainingScalePercent}%)
-                            </span>
-                          </div>
-
-                          <div>
-                            <span className="text-[#8A99AD] block text-[10px]">
-                              {hasPnl ? 'الربح/الخسارة والعمولة' : 'العمولة المقتطعة'}
-                            </span>
-                            {hasPnl ? (
-                              <span
-                                className={`font-mono font-bold ${
-                                  isProfit ? 'text-[#01BC8D]' : 'text-[#F6465D]'
-                                }`}
-                              >
-                                {isProfit ? '+' : ''}${pnlVal.toFixed(2)} ({isProfit ? '+' : ''}
-                                {pnlPct.toFixed(2)}%) • عمولة ${item.commissionUsdt.toFixed(3)}
+                        {isDrawdownAlert ? (
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-[#12171D] border border-[#F6465D]/30 rounded-xl p-2.5 text-[11px]">
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                نسبة التراجع (من رأس المال)
                               </span>
-                            ) : (
+                              <span className="font-mono font-extrabold text-[#F6465D]">
+                                -{(item.drawdownPercent ?? Math.abs(pnlPct)).toFixed(2)}%
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                حد التنبيه المضبوط
+                              </span>
                               <span className="font-mono font-bold text-[#F59E0B]">
-                                ${item.commissionUsdt.toFixed(4)} USDT
+                                {(item.drawdownThresholdPercent ?? 10).toFixed(1)}%
                               </span>
-                            )}
+                            </div>
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                رأس المال الأولي ⬅️ الحالي
+                              </span>
+                              <span className="font-mono font-bold text-white">
+                                ${(item.initialBalanceUsdt ?? item.entryPrice).toFixed(0)} ⬅️ $
+                                {(item.currentEquityUsdt ?? item.price).toFixed(2)}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                قيمة التراجع بالدولار
+                              </span>
+                              <span className="font-mono font-bold text-[#F6465D]">
+                                -${(item.drawdownLossUsdt ?? Math.abs(pnlVal)).toFixed(2)} USDT
+                              </span>
+                            </div>
                           </div>
-                        </div>
+                        ) : (
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-[#12171D] border border-[#232E3A] rounded-xl p-2.5 text-[11px]">
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                {item.actionType === 'OPEN_TRADE'
+                                  ? 'سعر الدخول'
+                                  : item.actionType === 'SCALE_IN'
+                                  ? 'سعر التدعيم / المتوسط'
+                                  : 'سعر الدخول ⬅️ الخروج'}
+                              </span>
+                              <span className="font-mono font-bold text-white">
+                                {item.actionType === 'OPEN_TRADE'
+                                  ? `$${formatPriceClean(item.entryPrice)}`
+                                  : item.actionType === 'SCALE_IN'
+                                  ? `$${formatPriceClean(item.price)} / $${formatPriceClean(
+                                      item.entryPrice
+                                    )}`
+                                  : `$${formatPriceClean(item.entryPrice)} ⬅️ $${formatPriceClean(
+                                      item.exitPrice || item.price
+                                    )}`}
+                              </span>
+                            </div>
+
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                {item.actionType === 'SCALE_IN'
+                                  ? 'قيمة التدعيم / الإجمالي'
+                                  : item.actionType === 'PARTIAL_EXIT'
+                                  ? 'قيمة السحب / المتبقي'
+                                  : 'قيمة الصفقة (الهامش)'}
+                              </span>
+                              <span className="font-mono font-bold text-[#01BC8D]">
+                                {item.actionType === 'SCALE_IN'
+                                  ? `+$${Math.abs(item.marginDeltaUsdt || 0).toFixed(2)} ($${item.marginUsdt.toFixed(2)})`
+                                  : item.actionType === 'PARTIAL_EXIT'
+                                  ? `-$${Math.abs(item.marginDeltaUsdt || 0).toFixed(2)} ($${item.marginUsdt.toFixed(2)})`
+                                  : `$${item.marginUsdt.toFixed(2)} USDT`}
+                              </span>
+                            </div>
+
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                الكمية وحجم المركز
+                              </span>
+                              <span className="font-mono font-bold text-white">
+                                {item.quantity} ({item.remainingScalePercent}%)
+                              </span>
+                            </div>
+
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                {hasPnl ? 'الربح/الخسارة والعمولة' : 'العمولة المقتطعة'}
+                              </span>
+                              {hasPnl ? (
+                                <span
+                                  className={`font-mono font-bold ${
+                                    isProfit ? 'text-[#01BC8D]' : 'text-[#F6465D]'
+                                  }`}
+                                >
+                                  {isProfit ? '+' : ''}${pnlVal.toFixed(2)} ({isProfit ? '+' : ''}
+                                  {pnlPct.toFixed(2)}%) • عمولة ${item.commissionUsdt.toFixed(3)}
+                                </span>
+                              ) : (
+                                <span className="font-mono font-bold text-[#F59E0B]">
+                                  ${item.commissionUsdt.toFixed(4)} USDT
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
 
                         {/* Summary Line */}
                         <div className="text-[11px] text-[#8A99AD] flex items-center justify-between">
@@ -651,6 +807,100 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
           ) : (
             /* SETTINGS TAB */
             <div className="space-y-4">
+              {/* Drawdown Push Notification Alert Settings Block */}
+              <div
+                data-testid="drawdown_alert_settings_card"
+                className="bg-[#0B0E11] border border-[#F6465D]/50 rounded-2xl p-4 space-y-3"
+              >
+                <div className="flex items-start justify-between gap-3 pb-2.5 border-b border-[#232E3A]">
+                  <div className="flex items-start gap-2.5">
+                    <div className="w-8 h-8 rounded-xl bg-[#3A1219] border border-[#F6465D]/40 flex items-center justify-center text-[#F6465D] shrink-0 mt-0.5">
+                      <AlertTriangle className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+                        <span>تنبيه التراجع الفوري (Drawdown Push Notification)</span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#3A1219] text-[#F6465D] font-mono font-bold">
+                          الحد الحالي: {settings.drawdownThresholdPercent ?? 10}%
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-[#8A99AD] mt-0.5">
+                        إرسال إشعار فوري (Push Notification) عند وصول نسبة التراجع (Drawdown) في أي حساب افتراضي إلى الحد المحدد من رأس المال الأولي
+                      </div>
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    data-testid="toggle_notify_on_drawdown"
+                    checked={settings.notifyOnDrawdown ?? true}
+                    onChange={(e) => onUpdateSettings({ notifyOnDrawdown: e.target.checked })}
+                    className="w-5 h-5 accent-[#F6465D] cursor-pointer shrink-0"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end pt-1">
+                  <div className="sm:col-span-5">
+                    <label className="block text-[11px] text-[#EAECEF] font-bold mb-1">
+                      نسبة التراجع للتنبيه (% من رأس المال الأولي):
+                    </label>
+                    <div className="relative flex items-center">
+                      <input
+                        type="number"
+                        min="0.5"
+                        max="95"
+                        step="0.5"
+                        data-testid="drawdown_threshold_input"
+                        value={settings.drawdownThresholdPercent ?? 10}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          if (!isNaN(val) && val > 0) {
+                            onUpdateSettings({
+                              drawdownThresholdPercent: Math.min(95, Math.max(0.5, val)),
+                            });
+                          }
+                        }}
+                        className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#F6465D] rounded-xl px-3 py-2 text-xs text-white font-mono font-bold focus:outline-none"
+                      />
+                      <span className="absolute left-3 text-xs font-mono font-bold text-[#F6465D]">
+                        %
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="sm:col-span-7 space-y-1.5">
+                    <span className="block text-[10px] text-[#8A99AD]">
+                      نسب تراجع سريعة (من رأس المال الأولي):
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {[5, 10, 15, 20, 25, 30].map((pct) => {
+                        const isCurrent = (settings.drawdownThresholdPercent ?? 10) === pct;
+                        return (
+                          <button
+                            key={pct}
+                            type="button"
+                            data-testid={`drawdown_preset_${pct}`}
+                            onClick={() => onUpdateSettings({ drawdownThresholdPercent: pct })}
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors cursor-pointer ${
+                              isCurrent
+                                ? 'bg-[#F6465D] text-white shadow-sm'
+                                : 'bg-[#12171D] text-[#8A99AD] border border-[#232E3A] hover:text-white'
+                            }`}
+                          >
+                            {pct}%
+                          </button>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        onClick={() => mobileNotifications.triggerTestNotification('DRAWDOWN_ALERT')}
+                        className="bg-[#3A1219] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/50 px-2.5 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer mr-auto"
+                      >
+                        🔔 اختبار الإشعار الآن
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
               {/* Master Toggle & Event Toggles */}
               <div className="bg-[#0B0E11] border border-[#232E3A] rounded-2xl p-4 space-y-3">
                 <div className="flex items-center justify-between pb-2.5 border-b border-[#232E3A]">
