@@ -319,40 +319,54 @@ export class PaperEngine {
 
   public updateSettings(
     partial: Partial<TradeExecutionSettings>,
-    accountId?: string
+    accountId?: string,
+    applyToAllAccounts: boolean = false
   ): TradeExecutionSettings {
-    const acc = this.getAccount(accountId);
-    const prevInitial = acc.settings.virtualInitialBalance;
-    acc.settings = { ...acc.settings, ...partial };
+    const targetAccounts = applyToAllAccounts ? this.accounts : [this.getAccount(accountId)];
 
-    // If virtualInitialBalance was changed, adjust initialBalance & availableBalance by the difference
-    if (
-      partial.virtualInitialBalance !== undefined &&
-      partial.virtualInitialBalance > 0 &&
-      partial.virtualInitialBalance !== prevInitial
-    ) {
-      const diff = partial.virtualInitialBalance - acc.initialBalance;
-      acc.initialBalance = partial.virtualInitialBalance;
-      acc.availableBalance = Math.max(0, acc.availableBalance + diff);
-      mobileNotifications.resetAccountDrawdownAlert(acc.id);
-    }
+    for (const acc of targetAccounts) {
+      const prevInitial = acc.settings.virtualInitialBalance;
+      acc.settings = { ...acc.settings, ...partial };
 
-    // Recalculate open copied positions if scale-in or trade size settings were updated
-    if (
-      partial.scaleInSamePercentAsTrader !== undefined ||
-      partial.scaleInFixedValueUsdt !== undefined ||
-      partial.tradeValueUsdt !== undefined ||
-      partial.leverage !== undefined
-    ) {
-      this.recalculateOpenCopiedPositions(acc);
+      // If virtualInitialBalance was changed, adjust initialBalance & availableBalance by the difference
+      if (
+        partial.virtualInitialBalance !== undefined &&
+        partial.virtualInitialBalance > 0 &&
+        partial.virtualInitialBalance !== prevInitial
+      ) {
+        const diff = partial.virtualInitialBalance - acc.initialBalance;
+        acc.initialBalance = partial.virtualInitialBalance;
+        acc.availableBalance = Math.max(0, acc.availableBalance + diff);
+        mobileNotifications.resetAccountDrawdownAlert(acc.id);
+      }
+
+      // Recalculate open copied positions if scale-in or trade size settings were updated
+      if (
+        partial.scaleInSamePercentAsTrader !== undefined ||
+        partial.scaleInFixedValueUsdt !== undefined ||
+        partial.tradeValueUsdt !== undefined ||
+        partial.leverage !== undefined
+      ) {
+        this.recalculateOpenCopiedPositions(acc);
+      }
     }
 
     this.saveState();
-    return { ...acc.settings };
+    return { ...this.getAccount(accountId).settings };
   }
 
   private recalculateOpenCopiedPositions(acc: StoredVirtualAccount): void {
-    let totalMarginUsed = 0;
+    const openPositions = acc.positions.filter((p) => p.status === 'OPEN');
+    if (openPositions.length === 0) {
+      return;
+    }
+
+    let oldMarginUsed = 0;
+    for (const p of openPositions) {
+      oldMarginUsed += p.marginUsdt || (p.quantity * p.entryPrice) / p.leverage;
+    }
+
+    let newMarginUsed = 0;
     const baseTradeVal = Math.max(1, acc.settings.tradeValueUsdt || 25);
     const lev = Math.max(1, acc.settings.leverage || 5);
     const samePctMode = acc.settings.scaleInSamePercentAsTrader !== false;
@@ -441,12 +455,13 @@ export class PaperEngine {
       }
 
       if (pos.status === 'OPEN') {
-        totalMarginUsed += pos.marginUsdt || (pos.quantity * pos.entryPrice) / pos.leverage;
+        newMarginUsed += pos.marginUsdt || (pos.quantity * pos.entryPrice) / pos.leverage;
       }
     }
 
     if (acc.settings.mode === 'VIRTUAL') {
-      acc.availableBalance = Math.max(0, acc.initialBalance - totalMarginUsed - acc.totalCommissionsPaid);
+      const marginDiff = oldMarginUsed - newMarginUsed;
+      acc.availableBalance = Math.max(0, acc.availableBalance + marginDiff);
     }
     this.saveState();
   }
@@ -488,6 +503,64 @@ export class PaperEngine {
     const acc = this.getAccount(accountId);
     const targetBal = balance !== undefined ? balance : acc.settings.virtualInitialBalance;
     return this.setVirtualBalance(targetBal, true, acc.id);
+  }
+
+  /**
+   * Clear closed positions history only (keeping open positions intact)
+   */
+  public clearClosedPositions(accountId?: string, allAccounts: boolean = false): PaperAccountSnapshot {
+    const targets = allAccounts ? this.accounts : [this.getAccount(accountId)];
+    for (const acc of targets) {
+      acc.positions = acc.positions.filter((p) => p.status === 'OPEN');
+      let openCommissions = 0;
+      let openMargin = 0;
+      for (const p of acc.positions) {
+        openCommissions += p.commissionUsdt || 0;
+        openMargin += p.marginUsdt || (p.quantity * p.entryPrice) / p.leverage;
+      }
+      acc.totalCommissionsPaid = openCommissions;
+      acc.availableBalance = Math.max(0, acc.initialBalance - openMargin - openCommissions);
+      mobileNotifications.resetAccountDrawdownAlert(acc.id);
+    }
+    this.saveState();
+    return this.getSnapshot({});
+  }
+
+  /**
+   * Clear all previous operations, open & closed trades, and reset balances to initial capital
+   * while preserving user's saved Trade Settings.
+   */
+  public clearAllDataAndReset(options?: {
+    scope?: 'ACTIVE_ACCOUNT' | 'ALL_ACCOUNTS';
+    removeExtraAccounts?: boolean;
+  }): PaperAccountSnapshot {
+    const scope = options?.scope || 'ALL_ACCOUNTS';
+    const removeExtra = options?.removeExtraAccounts || false;
+
+    if (removeExtra && this.accounts.length > 1) {
+      const primary = this.accounts[0];
+      this.accounts.forEach((a) => mobileNotifications.resetAccountDrawdownAlert(a.id));
+      primary.positions = [];
+      primary.totalCommissionsPaid = 0;
+      primary.initialBalance = Math.max(1, primary.settings.virtualInitialBalance || primary.initialBalance || 1000);
+      primary.availableBalance = primary.initialBalance;
+      this.accounts = [primary];
+      this.activeAccountId = primary.id;
+      this.saveState();
+      return this.getSnapshot({});
+    }
+
+    const targets = scope === 'ALL_ACCOUNTS' ? this.accounts : [this.getAccount()];
+    for (const acc of targets) {
+      acc.positions = [];
+      acc.totalCommissionsPaid = 0;
+      acc.initialBalance = Math.max(1, acc.settings.virtualInitialBalance || acc.initialBalance || 1000);
+      acc.availableBalance = acc.initialBalance;
+      mobileNotifications.resetAccountDrawdownAlert(acc.id);
+    }
+
+    this.saveState();
+    return this.getSnapshot({});
   }
 
   public getOpenPositionsCount(accountId?: string): number {

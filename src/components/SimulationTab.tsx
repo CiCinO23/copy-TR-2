@@ -64,7 +64,11 @@ interface SimulationTabProps {
   onCreateAccount?: (name: string, initialBalance?: number) => string;
   onRenameAccount?: (accountId: string, newName: string) => void;
   onDeleteAccount?: (accountId: string) => void;
-  onUpdateTradeSettings: (partial: Partial<TradeExecutionSettings>) => void;
+  onUpdateTradeSettings: (
+    partial: Partial<TradeExecutionSettings>,
+    accountId?: string,
+    applyToAllAccounts?: boolean
+  ) => void;
   onSetVirtualBalance: (newBalance: number, resetPositions: boolean) => void;
   onOpenOrder: (
     symbol: string,
@@ -82,6 +86,12 @@ interface SimulationTabProps {
   ) => void;
   onPartialExitPosition?: (positionId: string, withdrawPercent: number, price: number) => void;
   onResetPaper: () => void;
+  onClearAllPaperData?: (options?: {
+    scope?: 'ACTIVE_ACCOUNT' | 'ALL_ACCOUNTS';
+    removeExtraAccounts?: boolean;
+    clearCopiedTraders?: boolean;
+  }) => void;
+  onClearClosedHistory?: (allAccounts?: boolean) => void;
   onSyncAllCopiedTraders: () => void;
   onRemoveCopiedTrader: (
     traderId: string,
@@ -116,6 +126,8 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   onScaleInPosition,
   onPartialExitPosition,
   onResetPaper,
+  onClearAllPaperData,
+  onClearClosedHistory,
   onSyncAllCopiedTraders,
   onRemoveCopiedTrader,
   onNavigateToTab,
@@ -154,20 +166,26 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   );
   const [isEditingBalance, setIsEditingBalance] = useState<boolean>(false);
 
-  // Trade Settings Form State
-  const [tradeValueInput, setTradeValueInput] = useState<number>(settings.tradeValueUsdt);
-  const [leverageInput, setLeverageInput] = useState<number>(settings.leverage);
-  const [commissionInput, setCommissionInput] = useState<number>(settings.commissionPercent);
-  const [maxConcurrentInput, setMaxConcurrentInput] = useState<number>(
-    settings.maxConcurrentTrades
+  // Clear All Data & Reset UI State
+  const [isConfirmingWipeAll, setIsConfirmingWipeAll] = useState<boolean>(false);
+  const [wipeSuccessMsg, setWipeSuccessMsg] = useState<string | null>(null);
+
+  // Trade Settings Form State (stored as strings while editing so inputs never snap to auto-entered defaults)
+  const [tradeValueInput, setTradeValueInput] = useState<string>(String(settings.tradeValueUsdt));
+  const [leverageInput, setLeverageInput] = useState<string>(String(settings.leverage));
+  const [commissionInput, setCommissionInput] = useState<string>(
+    String(settings.commissionPercent)
   );
-  const [tpInput, setTpInput] = useState<number>(settings.takeProfitPercent || 0);
-  const [slInput, setSlInput] = useState<number>(settings.stopLossPercent || 0);
+  const [maxConcurrentInput, setMaxConcurrentInput] = useState<string>(
+    String(settings.maxConcurrentTrades)
+  );
+  const [tpInput, setTpInput] = useState<string>(String(settings.takeProfitPercent || 0));
+  const [slInput, setSlInput] = useState<string>(String(settings.stopLossPercent || 0));
   const [enforceUserSize, setEnforceUserSize] = useState<boolean>(
     settings.enforceUserSizeOnCopy
   );
-  const [scaleInFixedValueInput, setScaleInFixedValueInput] = useState<number>(
-    settings.scaleInFixedValueUsdt ?? 10
+  const [scaleInFixedValueInput, setScaleInFixedValueInput] = useState<string>(
+    String(settings.scaleInFixedValueUsdt ?? 10)
   );
   const [scaleInSamePercentInput, setScaleInSamePercentInput] = useState<boolean>(
     settings.scaleInSamePercentAsTrader ?? true
@@ -186,20 +204,26 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   const [orderSide, setOrderSide] = useState<'LONG' | 'SHORT'>('LONG');
   const [orderError, setOrderError] = useState<string | null>(null);
 
+  // Sync form inputs ONLY when the user switches to a different virtual account
   useEffect(() => {
-    setTradeValueInput(settings.tradeValueUsdt);
-    setLeverageInput(settings.leverage);
-    setCommissionInput(settings.commissionPercent);
-    setMaxConcurrentInput(settings.maxConcurrentTrades);
-    setTpInput(settings.takeProfitPercent || 0);
-    setSlInput(settings.stopLossPercent || 0);
+    setTradeValueInput(String(settings.tradeValueUsdt));
+    setLeverageInput(String(settings.leverage));
+    setCommissionInput(String(settings.commissionPercent));
+    setMaxConcurrentInput(String(settings.maxConcurrentTrades));
+    setTpInput(String(settings.takeProfitPercent || 0));
+    setSlInput(String(settings.stopLossPercent || 0));
     setEnforceUserSize(settings.enforceUserSizeOnCopy);
-    setScaleInFixedValueInput(settings.scaleInFixedValueUsdt ?? 10);
+    setScaleInFixedValueInput(String(settings.scaleInFixedValueUsdt ?? 10));
     setScaleInSamePercentInput(settings.scaleInSamePercentAsTrader ?? true);
     setPartialExitSamePercentInput(settings.partialExitSamePercentAsTrader ?? true);
     setBalanceInput(String(settings.virtualInitialBalance || paperSnapshot.initialBalance || 1000));
     setRenameAccountInput(activeAccountName);
-  }, [settings, activeAccountId, activeAccountName, paperSnapshot.initialBalance]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeAccountId]);
+
+  useEffect(() => {
+    setRenameAccountInput(activeAccountName);
+  }, [activeAccountName]);
 
   const openPositions = paperSnapshot.positions.filter((p) => p.status === 'OPEN');
   const closedPositions = paperSnapshot.positions.filter((p) => p.status === 'CLOSED');
@@ -563,44 +587,122 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
     connectionState.tickers,
   ]);
 
-  const handleModeSwitch = (mode: TradingExecutionMode) => {
-    onUpdateTradeSettings({ mode });
+  const normalizeNumberInput = (raw: string): string => {
+    return String(raw)
+      .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+      .replace(/,/g, '.');
   };
 
-  const handleSaveTradeSettings = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanValue = Math.max(1, Number(tradeValueInput) || 25);
-    const cleanLev = Math.min(Math.max(1, Number(leverageInput) || 5), 100);
-    const cleanComm = Math.max(0, Number(commissionInput) || 0);
-    const cleanMaxTrades = Math.min(Math.max(1, Math.round(Number(maxConcurrentInput) || 5)), 100);
-    const cleanScaleInFixed = Math.max(1, Number(scaleInFixedValueInput) || 10);
+  const parseNumInput = (
+    raw: string,
+    fallback: number,
+    min: number,
+    max?: number
+  ): number => {
+    const cleanStr = normalizeNumberInput(raw).trim();
+    if (!cleanStr) return fallback;
+    const parsed = parseFloat(cleanStr);
+    if (isNaN(parsed)) return fallback;
+    const clampedMin = Math.max(min, parsed);
+    return max !== undefined ? Math.min(clampedMin, max) : clampedMin;
+  };
 
-    onUpdateTradeSettings({
+  const previewTradeValue = parseNumInput(tradeValueInput, settings.tradeValueUsdt, 0.1, 1000000);
+  const previewLeverage = Math.round(parseNumInput(leverageInput, settings.leverage, 1, 125));
+  const previewScaleInFixed = parseNumInput(
+    scaleInFixedValueInput,
+    settings.scaleInFixedValueUsdt ?? 10,
+    0.5,
+    1000000
+  );
+
+  const buildCurrentSettingsPayload = (
+    overrides?: Partial<TradeExecutionSettings>
+  ): Partial<TradeExecutionSettings> => {
+    const cleanValue = parseNumInput(tradeValueInput, settings.tradeValueUsdt, 0.1, 1000000);
+    const cleanLev = Math.round(parseNumInput(leverageInput, settings.leverage, 1, 125));
+    const cleanComm = parseNumInput(commissionInput, settings.commissionPercent, 0, 20);
+    const cleanMaxTrades = Math.round(
+      parseNumInput(maxConcurrentInput, settings.maxConcurrentTrades, 1, 500)
+    );
+    const cleanTp = parseNumInput(tpInput, settings.takeProfitPercent || 0, 0, 10000);
+    const cleanSl = parseNumInput(slInput, settings.stopLossPercent || 0, 0, 100);
+    const cleanScaleInFixed = parseNumInput(
+      scaleInFixedValueInput,
+      settings.scaleInFixedValueUsdt ?? 10,
+      0.5,
+      1000000
+    );
+
+    return {
       tradeValueUsdt: cleanValue,
       leverage: cleanLev,
       commissionPercent: cleanComm,
       maxConcurrentTrades: cleanMaxTrades,
-      takeProfitPercent: Math.max(0, Number(tpInput) || 0),
-      stopLossPercent: Math.max(0, Number(slInput) || 0),
+      takeProfitPercent: cleanTp,
+      stopLossPercent: cleanSl,
       enforceUserSizeOnCopy: enforceUserSize,
       scaleInFixedValueUsdt: cleanScaleInFixed,
       scaleInSamePercentAsTrader: scaleInSamePercentInput,
       partialExitSamePercentAsTrader: partialExitSamePercentInput,
-    });
+      ...overrides,
+    };
+  };
 
-    const scaleModeText = scaleInSamePercentInput
+  const handleModeSwitch = (mode: TradingExecutionMode) => {
+    onUpdateTradeSettings({ mode }, activeAccountId, false);
+  };
+
+  const handleSaveTradeSettings = (e: React.FormEvent) => {
+    e.preventDefault();
+    const payload = buildCurrentSettingsPayload();
+
+    // Update form inputs to reflect the normalized saved values (never reverting to defaults)
+    setTradeValueInput(String(payload.tradeValueUsdt));
+    setLeverageInput(String(payload.leverage));
+    setCommissionInput(String(payload.commissionPercent));
+    setMaxConcurrentInput(String(payload.maxConcurrentTrades));
+    setTpInput(String(payload.takeProfitPercent ?? 0));
+    setSlInput(String(payload.stopLossPercent ?? 0));
+    setScaleInFixedValueInput(String(payload.scaleInFixedValueUsdt));
+
+    onUpdateTradeSettings(payload, activeAccountId, false);
+
+    const scaleModeText = payload.scaleInSamePercentAsTrader
       ? 'التدعيم آلياً بنفس النسبة المئوية من قيمة الصفقة الأصلية'
-      : `التدعيم بالقيمة المحددة (+${cleanScaleInFixed} USDT)`;
+      : `التدعيم بالقيمة المحددة (+${payload.scaleInFixedValueUsdt} USDT)`;
 
     setSettingsSavedMsg(
-      `تم حفظ إعدادات الصفقات: قيمة الصفقة (${cleanValue} USDT) • الرافعة (${cleanLev}x) • ${scaleModeText} • سحب جزئي بنفس النسبة المئوية`
+      `تم حفظ وتثبيت الإعدادات الخاصة بحساب «${activeAccountName}» فقط بنجاح: قيمة الصفقة (${payload.tradeValueUsdt} USDT) • الرافعة (${payload.leverage}x) • العمولة (${payload.commissionPercent}%) • أقصى صفقات (${payload.maxConcurrentTrades}) • ${scaleModeText}`
     );
-    setTimeout(() => setSettingsSavedMsg(null), 6000);
+    setTimeout(() => setSettingsSavedMsg(null), 7000);
+  };
+
+  const handleExecuteWipeAll = (options: {
+    scope: 'ACTIVE_ACCOUNT' | 'ALL_ACCOUNTS';
+    removeExtraAccounts?: boolean;
+    clearCopiedTraders?: boolean;
+  }) => {
+    if (onClearAllPaperData) {
+      onClearAllPaperData(options);
+    } else {
+      onResetPaper();
+    }
+    setIsConfirmingWipeAll(false);
+    const msg =
+      options.clearCopiedTraders
+        ? 'تم مسح جميع البيانات والعمليات والصفقات السابقة وإلغاء نسخ المتداولين وإعادة ضبط التداول الافتراضي بالكامل.'
+        : options.scope === 'ACTIVE_ACCOUNT'
+        ? `تم مسح جميع العمليات والصفقات السابقة وتصفير بيانات الحساب «${activeAccountName}» بنجاح مع الاحتفاظ بإعدادات الصفقات.`
+        : 'تم مسح جميع العمليات والصفقات السابقة وتصفير جميع الحسابات الافتراضية بنجاح مع الاحتفاظ بإعدادات الصفقات.';
+    setWipeSuccessMsg(msg);
+    setTimeout(() => setWipeSuccessMsg(null), 7000);
   };
 
   const handleApplyVirtualBalance = (resetAll: boolean) => {
-    const val = parseFloat(balanceInput);
+    const val = parseNumInput(balanceInput, paperSnapshot.initialBalance || 1000, 1);
     if (isNaN(val) || val <= 0) return;
+    setBalanceInput(String(val));
     onSetVirtualBalance(val, resetAll);
     setIsEditingBalance(false);
   };
@@ -1494,9 +1596,25 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    setIsConfirmingWipeAll(!isConfirmingWipeAll);
+                    setIsRenamingAccount(false);
+                    setIsCreatingAccount(false);
+                  }}
+                  data-testid="open_clear_all_data_panel_btn"
+                  className="text-[11px] bg-[#2B1216] hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/40 px-2.5 py-1.5 rounded-lg flex items-center gap-1 font-bold cursor-pointer transition-colors"
+                  title="مسح كل البيانات وتصفيرها (مسح كل العمليات والصفقات السابقة)"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>مسح كل البيانات وتصفيرها</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
                     setRenameAccountInput(activeAccountName);
                     setIsRenamingAccount(!isRenamingAccount);
                     setIsCreatingAccount(false);
+                    setIsConfirmingWipeAll(false);
                   }}
                   data-testid="rename_virtual_account_btn"
                   className="text-[11px] bg-[#1A222B] hover:bg-[#232E3A] text-white border border-[#232E3A] px-2.5 py-1.5 rounded-lg flex items-center gap-1 font-semibold cursor-pointer transition-colors"
@@ -1525,6 +1643,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                     setNewAccountBalance(String(settings.virtualInitialBalance || 1000));
                     setIsCreatingAccount(!isCreatingAccount);
                     setIsRenamingAccount(false);
+                    setIsConfirmingWipeAll(false);
                   }}
                   data-testid="create_virtual_account_btn"
                   className="text-[11px] bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] px-3 py-1.5 rounded-lg flex items-center gap-1 font-bold cursor-pointer shadow-sm transition-colors"
@@ -1534,6 +1653,104 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 </button>
               </div>
             </div>
+
+            {wipeSuccessMsg && (
+              <div
+                data-testid="wipe_data_success_banner"
+                className="bg-[#0D2B24] border border-[#01BC8D]/50 rounded-xl p-3 flex items-center justify-between gap-2 text-xs text-[#01BC8D]"
+              >
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span className="font-bold">{wipeSuccessMsg}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setWipeSuccessMsg(null)}
+                  className="text-[11px] text-[#8A99AD] hover:text-white cursor-pointer"
+                >
+                  إغلاق
+                </button>
+              </div>
+            )}
+
+            {/* Inline Clear All Data & Reset Panel (مسح كل البيانات وتصفيرها - مسح كل العمليات والصفقات السابقة) */}
+            {isConfirmingWipeAll && (
+              <div
+                data-testid="clear_all_data_confirmation_panel"
+                className="bg-[#1A1115] border border-[#F6465D]/60 rounded-xl p-3.5 space-y-3 shadow-lg"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-[#F6465D] shrink-0 mt-0.5" />
+                    <div>
+                      <h4 className="text-xs sm:text-sm font-bold text-white">
+                        مسح كل البيانات وتصفير التداول الافتراضي (مسح كل العمليات والصفقات السابقة)
+                      </h4>
+                      <p className="text-[11px] text-[#8A99AD] mt-0.5 leading-relaxed">
+                        اختر نوع التصفير المطلوب. سيتم مسح الصفقات المفتوحة والمغلقة وسجل عمليات التدعيم والانسحاب الجزئي والعمولات وإعادة الرصيد المتاح إلى رأس المال الأولي مع <strong className="text-[#01BC8D]">الحفاظ التام على إعدادات الصفقات المحفوظة</strong>:
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsConfirmingWipeAll(false)}
+                    className="text-[11px] text-[#8A99AD] hover:text-white cursor-pointer shrink-0"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleExecuteWipeAll({
+                        scope: 'ALL_ACCOUNTS',
+                        removeExtraAccounts: false,
+                        clearCopiedTraders: false,
+                      })
+                    }
+                    data-testid="confirm_wipe_all_trades_btn"
+                    className="bg-[#F6465D] hover:bg-[#D9384E] text-white font-bold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-sm transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>مسح كل العمليات والصفقات السابقة وتصفير البيانات</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleExecuteWipeAll({
+                        scope: 'ACTIVE_ACCOUNT',
+                        removeExtraAccounts: false,
+                        clearCopiedTraders: false,
+                      })
+                    }
+                    data-testid="confirm_wipe_active_account_only_btn"
+                    className="bg-[#2B1216] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/50 font-bold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                    <span>تصفير صفقات الحساب الحالي فقط («{activeAccountName}»)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleExecuteWipeAll({
+                        scope: 'ALL_ACCOUNTS',
+                        removeExtraAccounts: true,
+                        clearCopiedTraders: true,
+                      })
+                    }
+                    data-testid="confirm_wipe_everything_with_traders_btn"
+                    className="bg-[#12171D] hover:bg-[#232E3A] text-[#8A99AD] hover:text-white border border-[#232E3A] font-semibold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                    <span>تصفير شامل + إلغاء نسخ جميع المتداولين</span>
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Inline Rename Active Account Form */}
             {isRenamingAccount && onRenameAccount && (
@@ -2360,21 +2577,24 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             <Sliders className="w-5 h-5 text-[#01BC8D]" />
             <div>
               <h3 className="font-bold text-sm sm:text-base text-white">
-                إعدادات الصفقات الموحدة (تُطبق على جميع المتداولين المنسوخين)
+                إعدادات الصفقات الخاصة بحساب «{activeAccountName}» (مستقلة لكل حساب افتراضي)
               </h3>
               <p className="text-[11px] text-[#8A99AD]">
-                عند نسخ أي متداول من Copy Trading أو Whales، سيتم فتح الصفقات بالحجم والرافعة والعمولة التي تعينها أنت هنا وليس بحجم المتداول المنسوخ.
+                لكل حساب افتراضي إعداداته المستقلة تماماً؛ عند نسخ أي متداول أو حوت إلى هذا الحساب سيتم فتح الصفقات بالحجم والرافعة والعمولة المحددة هنا فقط.
               </p>
             </div>
           </div>
 
           <span className="text-[11px] bg-[#1A222B] text-[#01BC8D] border border-[#01BC8D]/30 px-3 py-1 rounded-lg font-mono shrink-0">
-            حجم الصفقة الفعلي: {(tradeValueInput * leverageInput).toFixed(0)} USDT
+            حجم الصفقة الفعلي: {(previewTradeValue * previewLeverage).toFixed(0)} USDT
           </span>
         </div>
 
         {settingsSavedMsg && (
-          <div className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl p-3 flex items-center gap-2 text-xs text-[#01BC8D]">
+          <div
+            data-testid="trade_settings_saved_banner"
+            className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl p-3 flex items-center gap-2 text-xs text-[#01BC8D]"
+          >
             <CheckCircle2 className="w-4 h-4 shrink-0" />
             <span>{settingsSavedMsg}</span>
           </div>
@@ -2388,17 +2608,16 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 قيمة الصفقة الواحدة (USDT)
               </label>
               <input
-                type="number"
-                min="1"
-                max="100000"
-                step="any"
+                type="text"
+                inputMode="decimal"
                 value={tradeValueInput}
-                onChange={(e) => setTradeValueInput(parseFloat(e.target.value) || 0)}
+                onChange={(e) => setTradeValueInput(normalizeNumberInput(e.target.value))}
+                placeholder="مثال: 25"
                 data-testid="setting_trade_value_input"
                 className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none"
               />
               <span className="text-[10px] text-[#8A99AD] mt-0.5 block">
-                الهامش المخصوم لكل صفقة
+                الهامش المخصوم لكل صفقة (الحالي: {settings.tradeValueUsdt}$)
               </span>
             </div>
 
@@ -2407,24 +2626,17 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
               <label className="block text-[11px] text-[#8A99AD] mb-1 font-semibold">
                 الرافعة المالية (Leverage)
               </label>
-              <select
+              <input
+                type="text"
+                inputMode="numeric"
                 value={leverageInput}
-                onChange={(e) => setLeverageInput(parseInt(e.target.value, 10))}
-                data-testid="setting_leverage_select"
+                onChange={(e) => setLeverageInput(normalizeNumberInput(e.target.value))}
+                placeholder="مثال: 5"
+                data-testid="setting_leverage_input"
                 className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none"
-              >
-                <option value={1}>1x (بدون رافعة)</option>
-                <option value={2}>2x</option>
-                <option value={3}>3x</option>
-                <option value={5}>5x</option>
-                <option value={10}>10x</option>
-                <option value={15}>15x</option>
-                <option value={20}>20x</option>
-                <option value={25}>25x</option>
-                <option value={50}>50x</option>
-              </select>
+              />
               <span className="text-[10px] text-[#8A99AD] mt-0.5 block">
-                تُفرض على الصفقات المنسوخة
+                تُفرض على الصفقات المنسوخة (الحالي: {settings.leverage}x)
               </span>
             </div>
 
@@ -2434,17 +2646,16 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 عمولة المنصة لكل صفقة (%)
               </label>
               <input
-                type="number"
-                min="0"
-                max="5"
-                step="0.01"
+                type="text"
+                inputMode="decimal"
                 value={commissionInput}
-                onChange={(e) => setCommissionInput(parseFloat(e.target.value) || 0)}
+                onChange={(e) => setCommissionInput(normalizeNumberInput(e.target.value))}
+                placeholder="0.06"
                 data-testid="setting_commission_input"
                 className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none"
               />
               <span className="text-[10px] text-[#8A99AD] mt-0.5 block">
-                الافتراضي: 0.06% (Taker Fee)
+                الحالي: {settings.commissionPercent}% (Taker Fee)
               </span>
             </div>
 
@@ -2454,16 +2665,16 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 أقصى عدد صفقات مفتوحة معاً
               </label>
               <input
-                type="number"
-                min="1"
-                max="100"
+                type="text"
+                inputMode="numeric"
                 value={maxConcurrentInput}
-                onChange={(e) => setMaxConcurrentInput(parseInt(e.target.value, 10) || 1)}
+                onChange={(e) => setMaxConcurrentInput(normalizeNumberInput(e.target.value))}
+                placeholder="5"
                 data-testid="setting_max_concurrent_input"
                 className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none"
               />
               <span className="text-[10px] text-[#8A99AD] mt-0.5 block">
-                يمنع تجاوز هذا العدد بنفس الوقت
+                يمنع تجاوز هذا العدد (الحالي: {settings.maxConcurrentTrades})
               </span>
             </div>
           </div>
@@ -2475,12 +2686,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 جني الأرباح التلقائي Take Profit (%)
               </label>
               <input
-                type="number"
-                min="0"
-                max="500"
-                step="0.5"
+                type="text"
+                inputMode="decimal"
                 value={tpInput}
-                onChange={(e) => setTpInput(parseFloat(e.target.value) || 0)}
+                onChange={(e) => setTpInput(normalizeNumberInput(e.target.value))}
                 placeholder="0 = بدون حد"
                 className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none"
               />
@@ -2491,12 +2700,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 وقف الخسارة التلقائي Stop Loss (%)
               </label>
               <input
-                type="number"
-                min="0"
-                max="100"
-                step="0.5"
+                type="text"
+                inputMode="decimal"
                 value={slInput}
-                onChange={(e) => setSlInput(parseFloat(e.target.value) || 0)}
+                onChange={(e) => setSlInput(normalizeNumberInput(e.target.value))}
                 placeholder="0 = بدون حد"
                 className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none"
               />
@@ -2534,7 +2741,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
               <span className="text-[10px] font-mono font-bold px-2.5 py-1 rounded-lg bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 shrink-0">
                 {scaleInSamePercentInput
                   ? 'وضع التدعيم: نفس النسبة المئوية من الأصل (%)'
-                  : `وضع التدعيم: قيمة ثابتة (+${scaleInFixedValueInput}$)`}
+                  : `وضع التدعيم: قيمة ثابتة (+${previewScaleInFixed}$)`}
               </span>
             </div>
 
@@ -2558,10 +2765,13 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                     onChange={(e) => {
                       const next = e.target.checked;
                       setScaleInSamePercentInput(next);
-                      onUpdateTradeSettings({
-                        scaleInSamePercentAsTrader: next,
-                        scaleInFixedValueUsdt: Math.max(1, Number(scaleInFixedValueInput) || 10),
-                      });
+                      onUpdateTradeSettings(
+                        buildCurrentSettingsPayload({
+                          scaleInSamePercentAsTrader: next,
+                        }),
+                        activeAccountId,
+                        false
+                      );
                     }}
                     data-testid="setting_scale_in_same_pct_checkbox"
                     className="accent-[#01BC8D] w-4 h-4 mt-0.5 shrink-0 cursor-pointer"
@@ -2588,14 +2798,14 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                           <strong className="text-[#01BC8D] font-mono">+25%</strong>)، يقوم النظام
                           آلياً بالدعم بنفس النسبة من قيمة صفقتك الأصلية (
                           <strong className="text-white font-mono">
-                            {tradeValueInput}$ × 25% = +{(tradeValueInput * 0.25).toFixed(2)}$
+                            {previewTradeValue}$ × 25% = +{(previewTradeValue * 0.25).toFixed(2)}$
                           </strong>
                           )، ويتم إخفاء خيار التدعيم اليدوي.
                         </>
                       ) : (
                         <>
                           تم إلغاء التدعيم الآلي بالنسبة المئوية: يمكنك الآن تحديد قيمة التدعيم
-                          اليدوية/المحددة (<strong className="text-[#01BC8D] font-mono">+{scaleInFixedValueInput}$</strong>) ليتم إضافتها.
+                          اليدوية/المحددة (<strong className="text-[#01BC8D] font-mono">+{previewScaleInFixed}$</strong>) ليتم إضافتها.
                         </>
                       )}
                     </p>
@@ -2615,15 +2825,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                     </span>
                   </div>
                   <input
-                    type="number"
-                    min="1"
-                    max="100000"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
                     value={scaleInFixedValueInput}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value) || 0;
-                      setScaleInFixedValueInput(val);
-                    }}
+                    onChange={(e) => setScaleInFixedValueInput(normalizeNumberInput(e.target.value))}
                     data-testid="setting_scale_in_fixed_input"
                     className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none"
                   />
@@ -2633,11 +2838,15 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                         key={presetVal}
                         type="button"
                         onClick={() => {
-                          setScaleInFixedValueInput(presetVal);
-                          onUpdateTradeSettings({ scaleInFixedValueUsdt: presetVal });
+                          setScaleInFixedValueInput(String(presetVal));
+                          onUpdateTradeSettings(
+                            buildCurrentSettingsPayload({ scaleInFixedValueUsdt: presetVal }),
+                            activeAccountId,
+                            false
+                          );
                         }}
                         className={`px-2 py-0.5 rounded text-[10px] font-mono border cursor-pointer transition-colors ${
-                          scaleInFixedValueInput === presetVal
+                          previewScaleInFixed === presetVal
                             ? 'bg-[#01BC8D] text-[#0B0E11] border-[#01BC8D] font-bold'
                             : 'bg-[#0B0E11] text-[#8A99AD] border-[#232E3A] hover:text-white'
                         }`}
@@ -2661,7 +2870,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                     onChange={(e) => {
                       const next = e.target.checked;
                       setPartialExitSamePercentInput(next);
-                      onUpdateTradeSettings({ partialExitSamePercentAsTrader: next });
+                      onUpdateTradeSettings(
+                        buildCurrentSettingsPayload({ partialExitSamePercentAsTrader: next }),
+                        activeAccountId,
+                        false
+                      );
                     }}
                     data-testid="setting_partial_exit_same_pct_checkbox"
                     className="accent-[#01BC8D] w-4 h-4 mt-0.5 shrink-0 cursor-pointer"
@@ -2689,7 +2902,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             data-testid="save_trade_settings_btn"
             className="w-full bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2.5 rounded-xl text-xs sm:text-sm transition-colors cursor-pointer"
           >
-            حفظ وتطبيق إعدادات الصفقات والتدعيم على جميع عمليات النسخ
+            حفظ وتطبيق إعدادات الصفقات لحساب «{activeAccountName}» فقط
           </button>
         </form>
       </div>
@@ -2883,20 +3096,39 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
 
       {/* Open Positions Card */}
       <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5">
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-[#01BC8D]" />
             <h3 className="font-bold text-sm sm:text-base text-white">
               الصفقات المفتوحة حالياً ({openPositions.length} من أصل {settings.maxConcurrentTrades})
             </h3>
           </div>
-          <button
-            onClick={onResetPaper}
-            className="text-[11px] text-[#8A99AD] hover:text-[#F6465D] flex items-center gap-1 cursor-pointer"
-          >
-            <RotateCcw className="w-3 h-3" />
-            <span>إغلاق وتصفير الكل</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                handleExecuteWipeAll({
+                  scope: 'ALL_ACCOUNTS',
+                  removeExtraAccounts: false,
+                  clearCopiedTraders: false,
+                })
+              }
+              data-testid="wipe_all_positions_and_history_btn"
+              className="text-[11px] bg-[#2B1216] hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/40 px-2.5 py-1 rounded-lg flex items-center gap-1 font-bold cursor-pointer transition-colors"
+              title="مسح كل البيانات وتصفيرها (مسح كل العمليات والصفقات السابقة المفتوحة والمغلقة)"
+            >
+              <Trash2 className="w-3 h-3" />
+              <span>مسح كل البيانات وتصفيرها</span>
+            </button>
+            <button
+              type="button"
+              onClick={onResetPaper}
+              className="text-[11px] text-[#8A99AD] hover:text-[#F6465D] flex items-center gap-1 cursor-pointer"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span>تصفير الحساب الحالي</span>
+            </button>
+          </div>
         </div>
 
         {openPositions.length >= settings.maxConcurrentTrades && (
@@ -3612,6 +3844,23 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {closedPositions.length > 0 && onClearClosedHistory && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClearClosedHistory(true);
+                  setWipeSuccessMsg('تم مسح سجل الصفقات المغلقة السابقة بنجاح.');
+                  setTimeout(() => setWipeSuccessMsg(null), 5000);
+                }}
+                data-testid="clear_closed_trades_history_btn"
+                className="px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 bg-[#2B1216] hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/40 transition-all cursor-pointer"
+                title="مسح جميع الصفقات المغلقة السابقة من السجل"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>مسح سجل الصفقات المغلقة</span>
+              </button>
+            )}
+
             <button
               type="button"
               disabled={closedPositions.length === 0}

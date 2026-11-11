@@ -68,6 +68,15 @@ export function saveKuCoinOrderRecord(record: KuCoinOrderRecord): void {
   }
 }
 
+export function clearKuCoinOrderHistory(): KuCoinOrderRecord[] {
+  try {
+    localStorage.removeItem(KUCOIN_ORDERS_STORAGE_KEY);
+  } catch (e) {
+    console.warn('Failed to clear KuCoin order history:', e);
+  }
+  return [];
+}
+
 /**
  * Native Web Crypto HMAC-SHA256 signature generation (Base64 encoded)
  * KuCoin requires: Base64(HmacSHA256(endpoint_string, apiSecret))

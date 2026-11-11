@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Header } from './components/Header';
 import { Navigation, TabId } from './components/Navigation';
 import { DashboardTab } from './components/DashboardTab';
@@ -41,6 +41,7 @@ import {
   testKuCoinConnectionAndFetchData,
   executeKuCoinOrder,
   loadKuCoinOrderHistory,
+  clearKuCoinOrderHistory,
 } from './services/kucoinApi';
 import {
   fetchCopyTraderFullData,
@@ -283,23 +284,59 @@ export const App: React.FC = () => {
 
   // Update Trade Execution Settings (size, leverage, commission, maxConcurrentTrades, VIRTUAL/REAL mode)
   const handleUpdateTradeSettings = useCallback(
-    (partial: Partial<TradeExecutionSettings>, accountId?: string) => {
-      const updated = paperEngine.updateSettings(partial, accountId);
+    (
+      partial: Partial<TradeExecutionSettings>,
+      accountId?: string,
+      applyToAllAccounts: boolean = false
+    ) => {
+      const targetAccId = accountId || paperEngine.getActiveAccountId();
+      const updated = paperEngine.updateSettings(partial, targetAccId, applyToAllAccounts);
+
+      // Keep copied traders' stored marginUsdt synchronized with the updated tradeValueUsdt
+      if (partial.tradeValueUsdt !== undefined && partial.tradeValueUsdt > 0) {
+        const newTradeVal = partial.tradeValueUsdt;
+        ['whale_copied_traders_ct', 'whale_copied_traders_sm'].forEach((key) => {
+          try {
+            const raw = localStorage.getItem(key);
+            if (raw) {
+              const arr: ActiveCopiedTrader[] = JSON.parse(raw);
+              const synced = arr.map((ct) => {
+                const ctAccId = ct.accountId || 'acc_default';
+                if (applyToAllAccounts || ctAccId === targetAccId) {
+                  return { ...ct, marginUsdt: newTradeVal };
+                }
+                return ct;
+              });
+              localStorage.setItem(key, JSON.stringify(synced));
+            }
+          } catch {
+            // ignore
+          }
+        });
+        refreshCopiedTradersList();
+      }
+
       updatePaperSnapshot();
 
       // Keep KuCoin config synchronized with mode & leverage
-      if (partial.mode !== undefined || partial.leverage !== undefined || partial.tradeValueUsdt !== undefined) {
-        const nextKucoin: KuCoinConfig = {
-          ...kucoinConfig,
-          enableLiveExecution: updated.mode === 'REAL',
-          defaultLeverage: updated.leverage,
-          maxOrderUsdt: updated.tradeValueUsdt,
-        };
-        setKucoinConfig(nextKucoin);
-        saveKuCoinConfig(nextKucoin);
+      if (
+        partial.mode !== undefined ||
+        partial.leverage !== undefined ||
+        partial.tradeValueUsdt !== undefined
+      ) {
+        setKucoinConfig((prev) => {
+          const nextKucoin: KuCoinConfig = {
+            ...prev,
+            enableLiveExecution: updated.mode === 'REAL',
+            defaultLeverage: updated.leverage,
+            maxOrderUsdt: updated.tradeValueUsdt,
+          };
+          saveKuCoinConfig(nextKucoin);
+          return nextKucoin;
+        });
       }
     },
-    [kucoinConfig, updatePaperSnapshot]
+    [refreshCopiedTradersList, updatePaperSnapshot]
   );
 
   // Set or reset Virtual Balance
@@ -311,8 +348,11 @@ export const App: React.FC = () => {
     [updatePaperSnapshot]
   );
 
-  // Initial load
+  // Initial load (run once on mount)
+  const hasInitializedRef = useRef(false);
   useEffect(() => {
+    if (hasInitializedRef.current) return;
+    hasInitializedRef.current = true;
     handleTestBinanceConnection(binanceConfig);
     handleTestKuCoinConnection(kucoinConfig);
   }, [binanceConfig, kucoinConfig, handleTestBinanceConnection, handleTestKuCoinConnection]);
@@ -627,9 +667,71 @@ export const App: React.FC = () => {
   };
 
   const handleResetPaper = () => {
-    const fresh = paperEngine.reset();
-    setPaperSnapshot(fresh);
+    paperEngine.reset();
+    updatePaperSnapshot();
   };
+
+  const handleClearClosedHistory = useCallback(
+    (allAccounts: boolean = false) => {
+      paperEngine.clearClosedPositions(undefined, allAccounts);
+      updatePaperSnapshot();
+    },
+    [updatePaperSnapshot]
+  );
+
+  const handleClearAllPaperData = useCallback(
+    (options?: {
+      scope?: 'ACTIVE_ACCOUNT' | 'ALL_ACCOUNTS';
+      removeExtraAccounts?: boolean;
+      clearCopiedTraders?: boolean;
+    }) => {
+      paperEngine.clearAllDataAndReset({
+        scope: options?.scope || 'ALL_ACCOUNTS',
+        removeExtraAccounts: options?.removeExtraAccounts || false,
+      });
+
+      clearKuCoinOrderHistory();
+      setKucoinConnectionState((prev) => ({
+        ...prev,
+        recentOrders: [],
+      }));
+
+      mobileNotifications.clearAllNotifications();
+
+      if (options?.clearCopiedTraders) {
+        try {
+          localStorage.removeItem('whale_copied_traders_ct');
+          localStorage.removeItem('whale_copied_traders_sm');
+        } catch {
+          // ignore
+        }
+        refreshCopiedTradersList();
+      } else if (options?.removeExtraAccounts) {
+        const activeId = paperEngine.getActiveAccountId();
+        const activeName = paperEngine.getActiveAccountName();
+        ['whale_copied_traders_ct', 'whale_copied_traders_sm'].forEach((key) => {
+          try {
+            const raw = localStorage.getItem(key);
+            if (raw) {
+              const arr: ActiveCopiedTrader[] = JSON.parse(raw);
+              const updated = arr.map((ct) => ({
+                ...ct,
+                accountId: activeId,
+                accountName: activeName,
+              }));
+              localStorage.setItem(key, JSON.stringify(updated));
+            }
+          } catch {
+            // ignore
+          }
+        });
+        refreshCopiedTradersList();
+      }
+
+      updatePaperSnapshot();
+    },
+    [refreshCopiedTradersList, updatePaperSnapshot]
+  );
 
   const [apiSubTab, setApiSubTab] = useState<'KUCOIN' | 'BINANCE'>('KUCOIN');
 
@@ -884,6 +986,8 @@ export const App: React.FC = () => {
             onScaleInPosition={handleScaleInPaperPosition}
             onPartialExitPosition={handlePartialExitPaperPosition}
             onResetPaper={handleResetPaper}
+            onClearAllPaperData={handleClearAllPaperData}
+            onClearClosedHistory={handleClearClosedHistory}
             onSyncAllCopiedTraders={handleSyncAllCopiedTraders}
             onRemoveCopiedTrader={handleRemoveCopiedTrader}
             onNavigateToTab={(tab) => {
