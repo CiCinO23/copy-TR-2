@@ -595,7 +595,7 @@ export const App: React.FC = () => {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#0B0E11] text-white flex flex-col font-sans selection:bg-[#01BC8D]/30 pb-20">
+    <div className="min-h-screen bg-[#0B0E11] text-white flex flex-col font-sans selection:bg-[#01BC8D]/30 content-safe pl-safe pr-safe">
       {/* Top In-App Mobile Push Notification Banner */}
       <MobilePushToastBanner
         notification={activePushBanner}

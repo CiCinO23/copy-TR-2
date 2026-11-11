@@ -98,7 +98,7 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
     <div
       dir="rtl"
       data-testid="mobile_push_toast_banner"
-      className="fixed top-2 inset-x-2 sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 sm:w-[500px] z-50 animate-in slide-in-from-top duration-200"
+      className="fixed top-[calc(0.5rem+env(safe-area-inset-top,0px))] inset-x-2 sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 sm:w-[500px] z-50 animate-in slide-in-from-top duration-200"
     >
       <div
         className={`bg-[#12171D]/98 backdrop-blur-xl border-2 rounded-2xl p-3.5 text-white ${actionColorClass}`}
@@ -315,7 +315,7 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
       dir="rtl"
       className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in duration-150"
     >
-      <div className="bg-[#12171D] border border-[#232E3A] w-full max-w-2xl rounded-t-3xl sm:rounded-2xl max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
+      <div className="bg-[#12171D] border border-[#232E3A] w-full max-w-2xl rounded-t-3xl sm:rounded-2xl max-h-[90vh] flex flex-col overflow-hidden shadow-2xl pb-safe">
         {/* Modal Header */}
         <div className="px-4 py-3.5 bg-[#1A222B] border-b border-[#232E3A] flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
