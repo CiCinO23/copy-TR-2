@@ -1,6 +1,7 @@
 import {
   PaperPosition,
   PaperAccountSnapshot,
+  PaperVirtualAccountSummary,
   TradeExecutionSettings,
   TraderOpenPosition,
   TraderLatestRecord,
@@ -10,6 +11,8 @@ import { mobileNotifications } from './mobileNotifications';
 
 const PAPER_STORAGE_KEY = 'whale_copy_paper_state_v3';
 const TRADE_SETTINGS_STORAGE_KEY = 'whale_copy_trade_settings_v1';
+const MULTI_ACCOUNTS_STORAGE_KEY = 'whale_copy_multi_accounts_v1';
+const ACTIVE_ACCOUNT_ID_STORAGE_KEY = 'whale_copy_active_account_id_v1';
 
 export const DEFAULT_TRADE_SETTINGS: TradeExecutionSettings = {
   mode: 'VIRTUAL',
@@ -33,23 +36,26 @@ interface StoredPaperState {
   positions: PaperPosition[];
 }
 
+export interface StoredVirtualAccount {
+  id: string;
+  name: string;
+  createdAt: number;
+  initialBalance: number;
+  availableBalance: number;
+  totalCommissionsPaid: number;
+  positions: PaperPosition[];
+  settings: TradeExecutionSettings;
+}
+
 export class PaperEngine {
-  private initialBalance: number;
-  private availableBalance: number;
-  private totalCommissionsPaid: number;
-  private positions: PaperPosition[];
-  private settings: TradeExecutionSettings;
+  private accounts: StoredVirtualAccount[] = [];
+  private activeAccountId: string = 'acc_default';
 
   constructor() {
-    this.settings = this.loadSettings();
-    const loaded = this.loadState();
-    this.initialBalance = loaded.initialBalance;
-    this.availableBalance = loaded.availableBalance;
-    this.totalCommissionsPaid = loaded.totalCommissionsPaid;
-    this.positions = loaded.positions;
+    this.loadMultiAccounts();
   }
 
-  private loadSettings(): TradeExecutionSettings {
+  private loadLegacySettings(): TradeExecutionSettings {
     try {
       const raw = localStorage.getItem(TRADE_SETTINGS_STORAGE_KEY);
       if (raw) {
@@ -61,22 +67,14 @@ export class PaperEngine {
     return { ...DEFAULT_TRADE_SETTINGS };
   }
 
-  private saveSettings(): void {
-    try {
-      localStorage.setItem(TRADE_SETTINGS_STORAGE_KEY, JSON.stringify(this.settings));
-    } catch (e) {
-      console.warn('Failed to save trade settings:', e);
-    }
-  }
-
-  private loadState(): StoredPaperState {
+  private loadLegacyState(settings: TradeExecutionSettings): StoredPaperState {
     try {
       const raw = localStorage.getItem(PAPER_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
         return {
-          initialBalance: Number(parsed.initialBalance ?? this.settings.virtualInitialBalance),
-          availableBalance: Number(parsed.availableBalance ?? this.settings.virtualInitialBalance),
+          initialBalance: Number(parsed.initialBalance ?? settings.virtualInitialBalance),
+          availableBalance: Number(parsed.availableBalance ?? settings.virtualInitialBalance),
           totalCommissionsPaid: Number(parsed.totalCommissionsPaid ?? 0),
           positions: Array.isArray(parsed.positions) ? parsed.positions : [],
         };
@@ -85,35 +83,240 @@ export class PaperEngine {
       console.warn('Failed to load paper state', e);
     }
     return {
-      initialBalance: this.settings.virtualInitialBalance,
-      availableBalance: this.settings.virtualInitialBalance,
+      initialBalance: settings.virtualInitialBalance,
+      availableBalance: settings.virtualInitialBalance,
       totalCommissionsPaid: 0,
       positions: [],
     };
   }
 
+  private loadMultiAccounts(): void {
+    try {
+      const rawAccounts = localStorage.getItem(MULTI_ACCOUNTS_STORAGE_KEY);
+      const rawActiveId = localStorage.getItem(ACTIVE_ACCOUNT_ID_STORAGE_KEY);
+
+      if (rawAccounts) {
+        const parsed = JSON.parse(rawAccounts);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          this.accounts = parsed.map((acc: any, index: number) => {
+            const mergedSettings: TradeExecutionSettings = {
+              ...DEFAULT_TRADE_SETTINGS,
+              ...(acc.settings || {}),
+            };
+            const accId = acc.id || `acc_${index + 1}`;
+            const accName = acc.name || `الحساب الافتراضي ${index + 1}`;
+            return {
+              id: accId,
+              name: accName,
+              createdAt: Number(acc.createdAt || Date.now()),
+              initialBalance: Number(acc.initialBalance ?? mergedSettings.virtualInitialBalance),
+              availableBalance: Number(acc.availableBalance ?? mergedSettings.virtualInitialBalance),
+              totalCommissionsPaid: Number(acc.totalCommissionsPaid ?? 0),
+              positions: Array.isArray(acc.positions)
+                ? acc.positions.map((p: PaperPosition) => ({
+                    ...p,
+                    accountId: p.accountId || accId,
+                    accountName: p.accountName || accName,
+                  }))
+                : [],
+              settings: mergedSettings,
+            };
+          });
+
+          if (rawActiveId && this.accounts.some((a) => a.id === rawActiveId)) {
+            this.activeAccountId = rawActiveId;
+          } else {
+            this.activeAccountId = this.accounts[0].id;
+          }
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load multi-accounts state:', e);
+    }
+
+    // Migrate legacy single-account data into the first virtual account
+    const legacySettings = this.loadLegacySettings();
+    const legacyState = this.loadLegacyState(legacySettings);
+    const defaultId = 'acc_default';
+    const defaultName = 'الحساب الافتراضي 1';
+
+    const initialAccount: StoredVirtualAccount = {
+      id: defaultId,
+      name: defaultName,
+      createdAt: Date.now(),
+      initialBalance: legacyState.initialBalance,
+      availableBalance: legacyState.availableBalance,
+      totalCommissionsPaid: legacyState.totalCommissionsPaid,
+      positions: legacyState.positions.map((p) => ({
+        ...p,
+        accountId: defaultId,
+        accountName: defaultName,
+      })),
+      settings: legacySettings,
+    };
+
+    this.accounts = [initialAccount];
+    this.activeAccountId = defaultId;
+    this.saveState();
+  }
+
   private saveState(): void {
     try {
-      const state: StoredPaperState = {
-        initialBalance: this.initialBalance,
-        availableBalance: this.availableBalance,
-        totalCommissionsPaid: this.totalCommissionsPaid,
-        positions: this.positions,
+      localStorage.setItem(MULTI_ACCOUNTS_STORAGE_KEY, JSON.stringify(this.accounts));
+      localStorage.setItem(ACTIVE_ACCOUNT_ID_STORAGE_KEY, this.activeAccountId);
+
+      // Keep legacy keys in sync with the active account for backward compatibility
+      const activeAcc = this.getAccount();
+      localStorage.setItem(TRADE_SETTINGS_STORAGE_KEY, JSON.stringify(activeAcc.settings));
+      const legacyState: StoredPaperState = {
+        initialBalance: activeAcc.initialBalance,
+        availableBalance: activeAcc.availableBalance,
+        totalCommissionsPaid: activeAcc.totalCommissionsPaid,
+        positions: activeAcc.positions,
       };
-      localStorage.setItem(PAPER_STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(PAPER_STORAGE_KEY, JSON.stringify(legacyState));
     } catch (e) {
-      console.warn('Failed to save paper state', e);
+      console.warn('Failed to save multi-account paper state', e);
     }
   }
 
-  public getSettings(): TradeExecutionSettings {
-    return { ...this.settings };
+  public getAccount(accountId?: string): StoredVirtualAccount {
+    if (accountId) {
+      const found = this.accounts.find((a) => a.id === accountId);
+      if (found) return found;
+    }
+    const active = this.accounts.find((a) => a.id === this.activeAccountId);
+    if (active) return active;
+    return this.accounts[0];
   }
 
-  public updateSettings(partial: Partial<TradeExecutionSettings>): TradeExecutionSettings {
-    const prevInitial = this.settings.virtualInitialBalance;
-    this.settings = { ...this.settings, ...partial };
-    this.saveSettings();
+  public getActiveAccountId(): string {
+    return this.getAccount().id;
+  }
+
+  public getActiveAccountName(): string {
+    return this.getAccount().name;
+  }
+
+  public setActiveAccount(accountId: string, currentPrices: Record<string, number> = {}): PaperAccountSnapshot {
+    const target = this.accounts.find((a) => a.id === accountId);
+    if (target) {
+      this.activeAccountId = target.id;
+      this.saveState();
+    }
+    return this.getSnapshot(currentPrices);
+  }
+
+  public createAccount(
+    name: string,
+    initialBalance?: number,
+    copySettingsFromActive: boolean = true
+  ): StoredVirtualAccount {
+    const activeAcc = this.getAccount();
+    const cleanName = name.trim() || `حساب افتراضي ${this.accounts.length + 1}`;
+    const baseSettings: TradeExecutionSettings = copySettingsFromActive
+      ? { ...activeAcc.settings, mode: 'VIRTUAL' }
+      : { ...DEFAULT_TRADE_SETTINGS, mode: 'VIRTUAL' };
+
+    const validBal =
+      initialBalance !== undefined && initialBalance > 0
+        ? Number(initialBalance)
+        : Number(baseSettings.virtualInitialBalance || 1000);
+
+    baseSettings.virtualInitialBalance = validBal;
+
+    const newAcc: StoredVirtualAccount = {
+      id: `acc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: cleanName,
+      createdAt: Date.now(),
+      initialBalance: validBal,
+      availableBalance: validBal,
+      totalCommissionsPaid: 0,
+      positions: [],
+      settings: baseSettings,
+    };
+
+    this.accounts.push(newAcc);
+    this.activeAccountId = newAcc.id;
+    this.saveState();
+    return newAcc;
+  }
+
+  public renameAccount(accountId: string, newName: string): void {
+    const clean = newName.trim();
+    if (!clean) return;
+    const target = this.accounts.find((a) => a.id === accountId);
+    if (target) {
+      target.name = clean;
+      target.positions.forEach((p) => {
+        p.accountName = clean;
+      });
+      this.saveState();
+    }
+  }
+
+  public deleteAccount(accountId: string, currentPrices: Record<string, number> = {}): PaperAccountSnapshot {
+    if (this.accounts.length <= 1) {
+      return this.getSnapshot(currentPrices);
+    }
+    this.accounts = this.accounts.filter((a) => a.id !== accountId);
+    if (!this.accounts.some((a) => a.id === this.activeAccountId)) {
+      this.activeAccountId = this.accounts[0].id;
+    }
+    this.saveState();
+    return this.getSnapshot(currentPrices);
+  }
+
+  public getAccountsSummaries(currentPrices: Record<string, number> = {}): PaperVirtualAccountSummary[] {
+    return this.accounts.map((acc) => {
+      let totalUnrealized = 0;
+      let openPositionsMargin = 0;
+      let openCount = 0;
+      let closedCount = 0;
+
+      for (const p of acc.positions) {
+        if (p.status === 'OPEN') {
+          openCount++;
+          const margin = p.marginUsdt || (p.quantity * p.entryPrice) / p.leverage;
+          openPositionsMargin += margin;
+          const currentPrice = currentPrices[p.symbol] || p.entryPrice;
+          const dir = p.side === 'LONG' ? 1 : -1;
+          totalUnrealized += (currentPrice - p.entryPrice) * p.quantity * dir;
+        } else {
+          closedCount++;
+        }
+      }
+
+      const totalEquity = acc.availableBalance + openPositionsMargin + totalUnrealized;
+      return {
+        id: acc.id,
+        name: acc.name,
+        createdAt: acc.createdAt,
+        initialBalance: acc.initialBalance,
+        availableBalance: parseFloat(acc.availableBalance.toFixed(4)),
+        totalEquity: parseFloat(totalEquity.toFixed(4)),
+        unrealizedPnl: parseFloat(totalUnrealized.toFixed(4)),
+        totalCommissionsPaid: parseFloat(acc.totalCommissionsPaid.toFixed(4)),
+        openPositionsCount: openCount,
+        closedPositionsCount: closedCount,
+        settings: { ...acc.settings },
+      };
+    });
+  }
+
+  public getSettings(accountId?: string): TradeExecutionSettings {
+    const acc = this.getAccount(accountId);
+    return { ...acc.settings };
+  }
+
+  public updateSettings(
+    partial: Partial<TradeExecutionSettings>,
+    accountId?: string
+  ): TradeExecutionSettings {
+    const acc = this.getAccount(accountId);
+    const prevInitial = acc.settings.virtualInitialBalance;
+    acc.settings = { ...acc.settings, ...partial };
 
     // If virtualInitialBalance was changed, adjust initialBalance & availableBalance by the difference
     if (
@@ -121,10 +324,9 @@ export class PaperEngine {
       partial.virtualInitialBalance > 0 &&
       partial.virtualInitialBalance !== prevInitial
     ) {
-      const diff = partial.virtualInitialBalance - this.initialBalance;
-      this.initialBalance = partial.virtualInitialBalance;
-      this.availableBalance = Math.max(0, this.availableBalance + diff);
-      this.saveState();
+      const diff = partial.virtualInitialBalance - acc.initialBalance;
+      acc.initialBalance = partial.virtualInitialBalance;
+      acc.availableBalance = Math.max(0, acc.availableBalance + diff);
     }
 
     // Recalculate open copied positions if scale-in or trade size settings were updated
@@ -134,20 +336,21 @@ export class PaperEngine {
       partial.tradeValueUsdt !== undefined ||
       partial.leverage !== undefined
     ) {
-      this.recalculateOpenCopiedPositions();
+      this.recalculateOpenCopiedPositions(acc);
     }
 
-    return { ...this.settings };
+    this.saveState();
+    return { ...acc.settings };
   }
 
-  private recalculateOpenCopiedPositions(): void {
+  private recalculateOpenCopiedPositions(acc: StoredVirtualAccount): void {
     let totalMarginUsed = 0;
-    const baseTradeVal = Math.max(1, this.settings.tradeValueUsdt || 25);
-    const lev = Math.max(1, this.settings.leverage || 5);
-    const samePctMode = this.settings.scaleInSamePercentAsTrader !== false;
-    const fixedScaleVal = Math.max(1, this.settings.scaleInFixedValueUsdt || 10);
+    const baseTradeVal = Math.max(1, acc.settings.tradeValueUsdt || 25);
+    const lev = Math.max(1, acc.settings.leverage || 5);
+    const samePctMode = acc.settings.scaleInSamePercentAsTrader !== false;
+    const fixedScaleVal = Math.max(1, acc.settings.scaleInFixedValueUsdt || 10);
 
-    for (const pos of this.positions) {
+    for (const pos of acc.positions) {
       if (pos.status === 'OPEN' && pos.sourceType && pos.sourceType !== 'MANUAL') {
         const initialMargin = baseTradeVal;
         pos.initialMarginUsdt = initialMargin;
@@ -173,7 +376,6 @@ export class PaperEngine {
             }
 
             if (adj.actionType === 'SCALE_IN') {
-              // Store original trader % in a safe fallback if needed
               const origPct = Math.max(5, Math.abs(adj.volumePercent || 25));
               if (samePctMode) {
                 const addedMargin = Number((initialMargin * (origPct / 100)).toFixed(2));
@@ -235,8 +437,8 @@ export class PaperEngine {
       }
     }
 
-    if (this.settings.mode === 'VIRTUAL') {
-      this.availableBalance = Math.max(0, this.initialBalance - totalMarginUsed - this.totalCommissionsPaid);
+    if (acc.settings.mode === 'VIRTUAL') {
+      acc.availableBalance = Math.max(0, acc.initialBalance - totalMarginUsed - acc.totalCommissionsPaid);
     }
     this.saveState();
   }
@@ -244,39 +446,60 @@ export class PaperEngine {
   /**
    * Explicitly set or reset the Virtual Balance to a user-specified amount
    */
-  public setVirtualBalance(newBalance: number, closeAllPositions: boolean = false): PaperAccountSnapshot {
+  public setVirtualBalance(
+    newBalance: number,
+    closeAllPositions: boolean = false,
+    accountId?: string
+  ): PaperAccountSnapshot {
+    const acc = this.getAccount(accountId);
     const validBalance = Math.max(1, Number(newBalance) || 1000);
-    this.settings.virtualInitialBalance = validBalance;
-    this.saveSettings();
+    acc.settings.virtualInitialBalance = validBalance;
 
     if (closeAllPositions) {
-      this.initialBalance = validBalance;
-      this.availableBalance = validBalance;
-      this.totalCommissionsPaid = 0;
-      this.positions = [];
+      acc.initialBalance = validBalance;
+      acc.availableBalance = validBalance;
+      acc.totalCommissionsPaid = 0;
+      acc.positions = [];
     } else {
-      // Keep open positions intact and set available balance based on new initial balance minus open margin
       let openMargin = 0;
-      for (const p of this.positions) {
+      for (const p of acc.positions) {
         if (p.status === 'OPEN') {
           openMargin += p.marginUsdt || (p.quantity * p.entryPrice) / p.leverage;
         }
       }
-      this.initialBalance = validBalance;
-      this.availableBalance = Math.max(0, validBalance - openMargin);
+      acc.initialBalance = validBalance;
+      acc.availableBalance = Math.max(0, validBalance - openMargin);
     }
 
     this.saveState();
     return this.getSnapshot({});
   }
 
-  public reset(balance?: number): PaperAccountSnapshot {
-    const targetBal = balance !== undefined ? balance : this.settings.virtualInitialBalance;
-    return this.setVirtualBalance(targetBal, true);
+  public reset(balance?: number, accountId?: string): PaperAccountSnapshot {
+    const acc = this.getAccount(accountId);
+    const targetBal = balance !== undefined ? balance : acc.settings.virtualInitialBalance;
+    return this.setVirtualBalance(targetBal, true, acc.id);
   }
 
-  public getOpenPositionsCount(): number {
-    return this.positions.filter((p) => p.status === 'OPEN').length;
+  public getOpenPositionsCount(accountId?: string): number {
+    const acc = this.getAccount(accountId);
+    return acc.positions.filter((p) => p.status === 'OPEN').length;
+  }
+
+  private findAccountAndPosition(
+    positionId: string,
+    accountId?: string
+  ): { acc: StoredVirtualAccount; pos: PaperPosition } {
+    if (accountId) {
+      const targetAcc = this.getAccount(accountId);
+      const pos = targetAcc.positions.find((p) => p.id === positionId && p.status === 'OPEN');
+      if (pos) return { acc: targetAcc, pos };
+    }
+    for (const acc of this.accounts) {
+      const pos = acc.positions.find((p) => p.id === positionId && p.status === 'OPEN');
+      if (pos) return { acc, pos };
+    }
+    throw new Error('الصفقة غير موجودة أو مغلقة');
   }
 
   public openPosition(
@@ -291,31 +514,33 @@ export class PaperEngine {
     traderEntryTime?: number,
     initialScaleAdjustments?: PaperPosition['scaleAdjustments'],
     currentScalePercent?: number,
-    initialMarginOverride?: number
+    initialMarginOverride?: number,
+    accountId?: string
   ): PaperPosition {
-    const openCount = this.getOpenPositionsCount();
-    if (openCount >= this.settings.maxConcurrentTrades) {
+    const acc = this.getAccount(accountId);
+    const openCount = this.getOpenPositionsCount(acc.id);
+    if (openCount >= acc.settings.maxConcurrentTrades) {
       throw new Error(
-        `تم الوصول للحد الأقصى لعدد الصفقات المفتوحة بنفس الوقت (${this.settings.maxConcurrentTrades} صفقات). يمكنك زيادة الحد من إعدادات الصفقات أو إغلاق صفقة مفتوحة.`
+        `تم الوصول للحد الأقصى لعدد الصفقات المفتوحة بنفس الوقت في "${acc.name}" (${acc.settings.maxConcurrentTrades} صفقات). يمكنك زيادة الحد من إعدادات الصفقات أو إغلاق صفقة مفتوحة.`
       );
     }
 
-    const safeLeverage = Math.max(1, leverage || this.settings.leverage || 5);
+    const safeLeverage = Math.max(1, leverage || acc.settings.leverage || 5);
     const notional = quantity * entryPrice;
     const margin = notional / safeLeverage;
-    const entryCommission = notional * (Math.max(0, this.settings.commissionPercent) / 100);
+    const entryCommission = notional * (Math.max(0, acc.settings.commissionPercent) / 100);
     const totalRequired = margin + entryCommission;
 
-    if (this.settings.mode === 'VIRTUAL' && totalRequired > this.availableBalance) {
+    if (acc.settings.mode === 'VIRTUAL' && totalRequired > acc.availableBalance) {
       throw new Error(
-        `رصيد التداول الافتراضي غير كافٍ. المطلوب (شامل العمولة): ${totalRequired.toFixed(2)} USDT، المتاح: ${this.availableBalance.toFixed(2)} USDT`
+        `رصيد "${acc.name}" غير كافٍ. المطلوب (شامل العمولة): ${totalRequired.toFixed(2)} USDT، المتاح: ${acc.availableBalance.toFixed(2)} USDT`
       );
     }
 
-    if (this.settings.mode === 'VIRTUAL') {
-      this.availableBalance -= totalRequired;
+    if (acc.settings.mode === 'VIRTUAL') {
+      acc.availableBalance -= totalRequired;
     }
-    this.totalCommissionsPaid += entryCommission;
+    acc.totalCommissionsPaid += entryCommission;
 
     const now = Date.now();
     const posId = `trade_${now}_${Math.random().toString(36).substring(2, 7)}`;
@@ -361,10 +586,12 @@ export class PaperEngine {
       sourceTraderId,
       sourceTraderName,
       sourceType: sourceType || 'MANUAL',
-      executionMode: this.settings.mode,
+      executionMode: acc.settings.mode,
+      accountId: acc.id,
+      accountName: acc.name,
     };
 
-    this.positions.unshift(newPos);
+    acc.positions.unshift(newPos);
     this.saveState();
 
     mobileNotifications.notifyTradeEvent({
@@ -379,8 +606,7 @@ export class PaperEngine {
   }
 
   /**
-   * Open a position using the User's Fixed Trade Settings (قيمة الصفقة والرافعة والعمولة المحددة من المستخدم)
-   * and apply the user's Scale-In (نفس النسبة المئوية من الأصل أو قيمة ثابتة بالدولار) and Partial Exit (نفس النسبة المئوية) rules.
+   * Open a position using the target Account's Fixed Trade Settings
    */
   public openPositionWithUserSettings(params: {
     symbol: string;
@@ -395,20 +621,26 @@ export class PaperEngine {
     traderEntryTime?: number;
     traderScaleAdjustments?: PaperPosition['scaleAdjustments'];
     currentScalePercent?: number;
+    accountId?: string;
   }): PaperPosition {
+    const acc = this.getAccount(params.accountId);
+    const accSettings = acc.settings;
+
     const baseMarginUsdt =
-      params.customMarginUsdt !== undefined && params.customMarginUsdt > 0
+      accSettings.enforceUserSizeOnCopy
+        ? accSettings.tradeValueUsdt
+        : params.customMarginUsdt !== undefined && params.customMarginUsdt > 0
         ? params.customMarginUsdt
-        : this.settings.tradeValueUsdt;
+        : accSettings.tradeValueUsdt;
 
     const leverage =
-      this.settings.enforceUserSizeOnCopy
-        ? params.customLeverage || this.settings.leverage
-        : params.traderLeverage || this.settings.leverage;
+      accSettings.enforceUserSizeOnCopy
+        ? accSettings.leverage
+        : params.traderLeverage || params.customLeverage || accSettings.leverage;
 
     const safePrice = params.entryPrice > 0 ? params.entryPrice : 50;
-    const samePctMode = this.settings.scaleInSamePercentAsTrader !== false;
-    const fixedScaleVal = Math.max(1, this.settings.scaleInFixedValueUsdt || 10);
+    const samePctMode = accSettings.scaleInSamePercentAsTrader !== false;
+    const fixedScaleVal = Math.max(1, accSettings.scaleInFixedValueUsdt || 10);
 
     let finalMarginUsdt = baseMarginUsdt;
     let finalScalePercent = params.currentScalePercent || 100;
@@ -437,7 +669,6 @@ export class PaperEngine {
         if (adj.actionType === 'SCALE_IN') {
           const traderPct = Math.max(5, Math.abs(adj.volumePercent || 25));
           if (samePctMode) {
-            // التدعيم آلياً بنفس النسبة المئوية من قيمة الصفقة الأصلية
             const addedMargin = Number((baseMarginUsdt * (traderPct / 100)).toFixed(2));
             runningMargin = Number((runningMargin + addedMargin).toFixed(2));
             runningScalePct += traderPct;
@@ -450,7 +681,6 @@ export class PaperEngine {
               actionLabelAr: `تدعيم آلي بنفس النسبة (+${traderPct}% من الأصل • +${addedMargin.toFixed(2)}$)`,
             };
           } else {
-            // التدعيم بالقيمة الثابتة المحددة من المستخدم
             const addedMargin = Number(fixedScaleVal.toFixed(2));
             const equivPct = Math.max(1, Math.round((addedMargin / baseMarginUsdt) * 100));
             runningMargin = Number((runningMargin + addedMargin).toFixed(2));
@@ -467,7 +697,6 @@ export class PaperEngine {
         }
 
         if (adj.actionType === 'PARTIAL_EXIT') {
-          // عندما يسحب المتداول جزءاً من الصفقة يتم سحب نفس النسبة المئوية من الصفقة
           const withdrawPct = Math.min(95, Math.max(5, Math.abs(adj.volumePercent || 25)));
           const withdrawnMargin = Number((runningMargin * (withdrawPct / 100)).toFixed(2));
           runningMargin = Number(Math.max(0.5, runningMargin - withdrawnMargin).toFixed(2));
@@ -507,26 +736,25 @@ export class PaperEngine {
       params.traderEntryTime,
       mappedAdjustments,
       finalScalePercent,
-      baseMarginUsdt
+      baseMarginUsdt,
+      acc.id
     );
   }
 
   /**
-   * Reinforce / Scale-In (تدعيم الصفقة إما بنسبة مئوية من قيمة الصفقة الأصلية أو بقيمة ثابتة بالدولار USDT)
+   * Reinforce / Scale-In
    */
   public scaleInPosition(
     positionId: string,
     addPercent: number,
     executionPrice: number,
     actionTimestamp?: number,
-    customAddedMarginUsdt?: number
+    customAddedMarginUsdt?: number,
+    accountId?: string
   ): PaperPosition {
-    const pos = this.positions.find((p) => p.id === positionId && p.status === 'OPEN');
-    if (!pos) {
-      throw new Error('الصفقة غير موجودة أو مغلقة');
-    }
+    const { acc, pos } = this.findAccountAndPosition(positionId, accountId);
 
-    const baseMargin = pos.initialMarginUsdt || pos.marginUsdt || this.settings.tradeValueUsdt;
+    const baseMargin = pos.initialMarginUsdt || pos.marginUsdt || acc.settings.tradeValueUsdt;
     const isFixedUsdtMode = customAddedMarginUsdt !== undefined && customAddedMarginUsdt > 0;
 
     const addedMargin = isFixedUsdtMode
@@ -540,21 +768,20 @@ export class PaperEngine {
     const addedNotional = addedMargin * pos.leverage;
     const safePrice = executionPrice > 0 ? executionPrice : pos.entryPrice;
     const addedQty = addedNotional / safePrice;
-    const scaleCommission = addedNotional * (Math.max(0, this.settings.commissionPercent) / 100);
+    const scaleCommission = addedNotional * (Math.max(0, acc.settings.commissionPercent) / 100);
     const totalRequired = addedMargin + scaleCommission;
 
-    if (pos.executionMode !== 'REAL' && totalRequired > this.availableBalance) {
+    if (pos.executionMode !== 'REAL' && totalRequired > acc.availableBalance) {
       throw new Error(
-        `الرصيد الافتراضي غير كافٍ لتدعيم الصفقة (+${addedMargin.toFixed(2)} USDT). المطلوب: ${totalRequired.toFixed(2)} USDT`
+        `الرصيد الافتراضي في "${acc.name}" غير كافٍ لتدعيم الصفقة (+${addedMargin.toFixed(2)} USDT). المطلوب: ${totalRequired.toFixed(2)} USDT`
       );
     }
 
     if (pos.executionMode !== 'REAL') {
-      this.availableBalance -= totalRequired;
+      acc.availableBalance -= totalRequired;
     }
-    this.totalCommissionsPaid += scaleCommission;
+    acc.totalCommissionsPaid += scaleCommission;
 
-    // Weighted average entry price
     const oldNotional = pos.quantity * pos.entryPrice;
     const newTotalQty = pos.quantity + addedQty;
     const newAvgEntry = newTotalQty > 0 ? (oldNotional + addedNotional) / newTotalQty : safePrice;
@@ -594,39 +821,34 @@ export class PaperEngine {
     return pos;
   }
 
-  /**
-   * Automatic Scale-In triggered when a copied trader reinforces their position:
-   * - If `scaleInSamePercentAsTrader` is true: reinforces by the same % of original trade value.
-   * - If `scaleInSamePercentAsTrader` is false: reinforces by the user's fixed `scaleInFixedValueUsdt`.
-   */
   public scaleInFromTraderSignal(
     positionId: string,
     traderVolumePercent: number,
     executionPrice: number,
-    actionTimestamp?: number
+    actionTimestamp?: number,
+    accountId?: string
   ): PaperPosition {
-    if (this.settings.scaleInSamePercentAsTrader !== false) {
+    const { acc } = this.findAccountAndPosition(positionId, accountId);
+    if (acc.settings.scaleInSamePercentAsTrader !== false) {
       const pct = Math.max(5, Math.abs(traderVolumePercent || 25));
-      return this.scaleInPosition(positionId, pct, executionPrice, actionTimestamp);
+      return this.scaleInPosition(positionId, pct, executionPrice, actionTimestamp, undefined, acc.id);
     } else {
-      const fixedVal = Math.max(1, this.settings.scaleInFixedValueUsdt || 10);
-      return this.scaleInPosition(positionId, 0, executionPrice, actionTimestamp, fixedVal);
+      const fixedVal = Math.max(1, acc.settings.scaleInFixedValueUsdt || 10);
+      return this.scaleInPosition(positionId, 0, executionPrice, actionTimestamp, fixedVal, acc.id);
     }
   }
 
   /**
-   * Partial Withdrawal / Reduction (الانسحاب الجزئي بنفس النسبة المئوية من الصفقة عندما يسحب المتداول جزءاً من صفقته)
+   * Partial Withdrawal / Reduction
    */
   public partialExitPosition(
     positionId: string,
     withdrawPercent: number,
     executionPrice: number,
-    actionTimestamp?: number
+    actionTimestamp?: number,
+    accountId?: string
   ): PaperPosition {
-    const pos = this.positions.find((p) => p.id === positionId && p.status === 'OPEN');
-    if (!pos) {
-      throw new Error('الصفقة غير موجودة أو مغلقة');
-    }
+    const { acc, pos } = this.findAccountAndPosition(positionId, accountId);
 
     const cleanPct = Math.min(Math.max(5, Math.round(Math.abs(withdrawPercent))), 95);
     const fraction = cleanPct / 100;
@@ -637,13 +859,13 @@ export class PaperEngine {
     const direction = pos.side === 'LONG' ? 1 : -1;
     const grossPnl = (safePrice - pos.entryPrice) * closedQty * direction;
     const exitNotional = closedQty * safePrice;
-    const exitCommission = exitNotional * (Math.max(0, this.settings.commissionPercent) / 100);
+    const exitCommission = exitNotional * (Math.max(0, acc.settings.commissionPercent) / 100);
     const netPartialPnl = grossPnl - exitCommission;
 
     if (pos.executionMode !== 'REAL') {
-      this.availableBalance = Math.max(0, this.availableBalance + releasedMargin + netPartialPnl);
+      acc.availableBalance = Math.max(0, acc.availableBalance + releasedMargin + netPartialPnl);
     }
-    this.totalCommissionsPaid += exitCommission;
+    acc.totalCommissionsPaid += exitCommission;
 
     pos.quantity = Number(Math.max(0.00001, pos.quantity - closedQty).toFixed(5));
     pos.marginUsdt = Number(Math.max(0.5, pos.marginUsdt - releasedMargin).toFixed(2));
@@ -683,28 +905,31 @@ export class PaperEngine {
     return pos;
   }
 
-  public closePosition(positionId: string, exitPrice: number, exitTimestamp?: number): PaperPosition {
-    const pos = this.positions.find((p) => p.id === positionId && p.status === 'OPEN');
-    if (!pos) {
-      throw new Error('الصفقة غير موجودة أو تم إغلاقها مسبقاً');
-    }
+  public closePosition(
+    positionId: string,
+    exitPrice: number,
+    exitTimestamp?: number,
+    accountId?: string
+  ): PaperPosition {
+    const { acc, pos } = this.findAccountAndPosition(positionId, accountId);
 
     const direction = pos.side === 'LONG' ? 1 : -1;
     const grossPnl = (exitPrice - pos.entryPrice) * pos.quantity * direction;
     const exitNotional = pos.quantity * exitPrice;
-    const exitCommission = exitNotional * (Math.max(0, this.settings.commissionPercent) / 100);
+    const exitCommission = exitNotional * (Math.max(0, acc.settings.commissionPercent) / 100);
     const netPnl = grossPnl - exitCommission;
     const remainingMargin = pos.marginUsdt || (pos.quantity * pos.entryPrice) / pos.leverage;
 
     if (pos.executionMode !== 'REAL') {
-      this.availableBalance = Math.max(0, this.availableBalance + remainingMargin + netPnl);
+      acc.availableBalance = Math.max(0, acc.availableBalance + remainingMargin + netPnl);
     }
-    this.totalCommissionsPaid += exitCommission;
+    acc.totalCommissionsPaid += exitCommission;
 
-    const closeTs = exitTimestamp || Date.now();
+    const rawCloseTs = exitTimestamp || Date.now();
+    const closeTs = rawCloseTs >= pos.openTime ? rawCloseTs : Date.now();
     pos.status = 'CLOSED';
     pos.closeTime = closeTs;
-    pos.traderExitTime = closeTs;
+    pos.traderExitTime = rawCloseTs;
     pos.exitPrice = exitPrice;
     pos.currentScalePercent = 0;
     pos.commissionUsdt = Number(((pos.commissionUsdt || 0) + exitCommission).toFixed(4));
@@ -741,9 +966,7 @@ export class PaperEngine {
   }
 
   /**
-   * Synchronize a trader's open Positions and Latest records (Entry, Scale-In, Partial Exit, Full Exit)
-   * into the engine strictly using the USER's configured Trade Value (قيمة الصفقة), Leverage (الرافعة),
-   * Commission (العمولة), Scale-In rule, Partial-Exit rule, and Max Concurrent Open Trades.
+   * Synchronize a trader's open Positions and Latest records into a specific virtual account
    */
   public syncTraderPositionsAndRecords(params: {
     traderId: string;
@@ -752,18 +975,20 @@ export class PaperEngine {
     positions: TraderOpenPosition[];
     latestRecords: TraderLatestRecord[];
     marginPerTradeUsdt?: number;
+    accountId?: string;
   }): CopiedSyncLog[] {
+    const acc = this.getAccount(params.accountId);
     const logs: CopiedSyncLog[] = [];
     const userMarginUsdt =
-      this.settings.enforceUserSizeOnCopy
-        ? this.settings.tradeValueUsdt
-        : params.marginPerTradeUsdt || this.settings.tradeValueUsdt;
-    const userLeverage = this.settings.leverage;
+      acc.settings.enforceUserSizeOnCopy
+        ? acc.settings.tradeValueUsdt
+        : params.marginPerTradeUsdt || acc.settings.tradeValueUsdt;
+    const userLeverage = acc.settings.leverage;
 
-    // 1. Process EXIT, PARTIAL_EXIT, and SCALE_IN records on already open copied positions
+    // 1. Process EXIT, PARTIAL_EXIT, and SCALE_IN records on already open copied positions in this account
     const recentRecords = params.latestRecords.slice(0, 10);
     for (const rec of recentRecords) {
-      const matchingOpen = this.positions.find(
+      const matchingOpen = acc.positions.find(
         (p) =>
           p.status === 'OPEN' &&
           p.symbol === rec.symbol.toUpperCase() &&
@@ -773,7 +998,7 @@ export class PaperEngine {
       if (matchingOpen && rec.avgPrice > 0) {
         if (rec.actionType === 'EXIT') {
           try {
-            const closed = this.closePosition(matchingOpen.id, rec.avgPrice, rec.orderTime);
+            const closed = this.closePosition(matchingOpen.id, rec.avgPrice, rec.orderTime, acc.id);
             logs.push({
               id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               timestamp: rec.orderTime || Date.now(),
@@ -787,7 +1012,9 @@ export class PaperEngine {
               price: rec.avgPrice,
               quantity: closed.quantity,
               leverage: closed.leverage,
-              messageAr: `خروج كامل (-100%) من ${closed.symbol} بسعر ${rec.avgPrice.toFixed(2)} USDT (الصافي: ${(closed.realizedPnl || 0).toFixed(2)} USDT)`,
+              accountId: acc.id,
+              accountName: acc.name,
+              messageAr: `[${acc.name}] خروج كامل (-100%) من ${closed.symbol} بسعر ${rec.avgPrice.toFixed(2)} USDT (الصافي: ${(closed.realizedPnl || 0).toFixed(2)} USDT)`,
             });
           } catch (e) {
             console.warn('Exit sync skipped:', e);
@@ -803,7 +1030,8 @@ export class PaperEngine {
                 matchingOpen.id,
                 withdrawPct,
                 rec.avgPrice,
-                rec.orderTime
+                rec.orderTime,
+                acc.id
               );
               logs.push({
                 id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -818,7 +1046,9 @@ export class PaperEngine {
                 price: rec.avgPrice,
                 quantity: updated.quantity,
                 leverage: updated.leverage,
-                messageAr: `انسحاب جزئي بنفس النسبة (-${withdrawPct}%) من ${updated.symbol} بسعر ${rec.avgPrice.toFixed(2)} USDT (متبقي ${updated.currentScalePercent}%)`,
+                accountId: acc.id,
+                accountName: acc.name,
+                messageAr: `[${acc.name}] انسحاب جزئي بنفس النسبة (-${withdrawPct}%) من ${updated.symbol} بسعر ${rec.avgPrice.toFixed(2)} USDT (متبقي ${updated.currentScalePercent}%)`,
               });
             } catch (e) {
               console.warn('Partial exit sync skipped:', e);
@@ -835,13 +1065,14 @@ export class PaperEngine {
                 matchingOpen.id,
                 addPct,
                 rec.avgPrice,
-                rec.orderTime
+                rec.orderTime,
+                acc.id
               );
               const lastAdj = updated.scaleAdjustments?.[updated.scaleAdjustments.length - 1];
               const modeLabel =
-                this.settings.scaleInSamePercentAsTrader !== false
+                acc.settings.scaleInSamePercentAsTrader !== false
                   ? `بنفس النسبة (+${addPct}% من الأصل • +${(lastAdj?.marginDeltaUsdt || 0).toFixed(2)}$)`
-                  : `بالقيمة المحددة (+${(this.settings.scaleInFixedValueUsdt || 10).toFixed(2)}$)`;
+                  : `بالقيمة المحددة (+${(acc.settings.scaleInFixedValueUsdt || 10).toFixed(2)}$)`;
               logs.push({
                 id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
                 timestamp: rec.orderTime || Date.now(),
@@ -855,7 +1086,9 @@ export class PaperEngine {
                 price: rec.avgPrice,
                 quantity: updated.quantity,
                 leverage: updated.leverage,
-                messageAr: `تدعيم الصفقة ${modeLabel} على ${updated.symbol} بسعر ${rec.avgPrice.toFixed(2)} USDT (الحجم الحالي ${updated.currentScalePercent}%)`,
+                accountId: acc.id,
+                accountName: acc.name,
+                messageAr: `[${acc.name}] تدعيم الصفقة ${modeLabel} على ${updated.symbol} بسعر ${rec.avgPrice.toFixed(2)} USDT (الحجم الحالي ${updated.currentScalePercent}%)`,
               });
             } catch (e) {
               console.warn('Scale-in sync skipped:', e);
@@ -865,9 +1098,9 @@ export class PaperEngine {
       }
     }
 
-    // 2. Copy Open Positions from `Positions` tab using USER's tradeValueUsdt and leverage
+    // 2. Copy Open Positions from `Positions` tab using target account's tradeValueUsdt and leverage
     for (const pos of params.positions) {
-      if (this.getOpenPositionsCount() >= this.settings.maxConcurrentTrades) {
+      if (this.getOpenPositionsCount(acc.id) >= acc.settings.maxConcurrentTrades) {
         logs.push({
           id: `log_limit_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
           timestamp: Date.now(),
@@ -880,12 +1113,14 @@ export class PaperEngine {
           price: pos.markPrice || pos.entryPrice,
           quantity: 0,
           leverage: userLeverage,
-          messageAr: `توقف فتح ${pos.symbol}: تم بلوغ الحد الأقصى للصفقات المفتوحة بنفس الوقت (${this.settings.maxConcurrentTrades} صفقات)`,
+          accountId: acc.id,
+          accountName: acc.name,
+          messageAr: `[${acc.name}] توقف فتح ${pos.symbol}: تم بلوغ الحد الأقصى للصفقات المفتوحة بنفس الوقت (${acc.settings.maxConcurrentTrades} صفقات)`,
         });
         break;
       }
 
-      const alreadyOpen = this.positions.find(
+      const alreadyOpen = acc.positions.find(
         (p) =>
           p.status === 'OPEN' &&
           p.symbol === pos.symbol.toUpperCase() &&
@@ -909,6 +1144,7 @@ export class PaperEngine {
             traderEntryTime: pos.entryTime,
             traderScaleAdjustments: pos.scaleAdjustments,
             currentScalePercent: pos.currentScalePercent,
+            accountId: acc.id,
           });
           logs.push({
             id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -923,7 +1159,9 @@ export class PaperEngine {
             price: opened.entryPrice,
             quantity: opened.quantity,
             leverage: opened.leverage,
-            messageAr: `نسخ مركز (${opened.symbol} ${opened.side}) بقيمة ${opened.marginUsdt.toFixed(2)}$ (${opened.leverage}x) • نسبة الحجم الحالية ${opened.currentScalePercent || 100}%`,
+            accountId: acc.id,
+            accountName: acc.name,
+            messageAr: `[${acc.name}] نسخ مركز (${opened.symbol} ${opened.side}) بقيمة ${opened.marginUsdt.toFixed(2)}$ (${opened.leverage}x) • نسبة الحجم الحالية ${opened.currentScalePercent || 100}%`,
           });
         } catch (err: any) {
           console.warn('Could not open synced position:', err);
@@ -935,7 +1173,7 @@ export class PaperEngine {
     if (params.positions.length === 0) {
       for (const rec of recentRecords) {
         if (rec.actionType === 'ENTRY' || rec.actionType === 'SCALE_IN') {
-          if (this.getOpenPositionsCount() >= this.settings.maxConcurrentTrades) {
+          if (this.getOpenPositionsCount(acc.id) >= acc.settings.maxConcurrentTrades) {
             break;
           }
           const targetSide: 'LONG' | 'SHORT' =
@@ -943,7 +1181,7 @@ export class PaperEngine {
               ? 'SHORT'
               : 'LONG';
 
-          const existingOpen = this.positions.find(
+          const existingOpen = acc.positions.find(
             (p) =>
               p.status === 'OPEN' &&
               p.symbol === rec.symbol.toUpperCase() &&
@@ -961,6 +1199,7 @@ export class PaperEngine {
                 sourceTraderName: params.traderName,
                 sourceType: params.source,
                 traderEntryTime: rec.entryTime || rec.orderTime,
+                accountId: acc.id,
               });
               logs.push({
                 id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -975,7 +1214,9 @@ export class PaperEngine {
                 price: opened.entryPrice,
                 quantity: opened.quantity,
                 leverage: opened.leverage,
-                messageAr: `دخول من Latest records (${opened.symbol} ${opened.side}) بحجمك المحدد (${userMarginUsdt}$ × ${opened.leverage}x)`,
+                accountId: acc.id,
+                accountName: acc.name,
+                messageAr: `[${acc.name}] دخول من Latest records (${opened.symbol} ${opened.side}) بحجمك المحدد (${userMarginUsdt}$ × ${opened.leverage}x)`,
               });
             } catch (e) {
               console.warn('Entry sync skipped:', e);
@@ -988,11 +1229,12 @@ export class PaperEngine {
     return logs;
   }
 
-  public getSnapshot(currentPrices: Record<string, number>): PaperAccountSnapshot {
+  public getSnapshot(currentPrices: Record<string, number>, accountId?: string): PaperAccountSnapshot {
+    const acc = this.getAccount(accountId);
     let totalUnrealized = 0;
     let openPositionsMargin = 0;
 
-    for (const p of this.positions) {
+    for (const p of acc.positions) {
       if (p.status === 'OPEN') {
         const margin = p.marginUsdt || (p.quantity * p.entryPrice) / p.leverage;
         openPositionsMargin += margin;
@@ -1004,16 +1246,20 @@ export class PaperEngine {
       }
     }
 
-    const totalEquity = this.availableBalance + openPositionsMargin + totalUnrealized;
+    const totalEquity = acc.availableBalance + openPositionsMargin + totalUnrealized;
+    const summaries = this.getAccountsSummaries(currentPrices);
 
     return {
-      initialBalance: this.initialBalance,
-      availableBalance: parseFloat(this.availableBalance.toFixed(4)),
+      activeAccountId: acc.id,
+      activeAccountName: acc.name,
+      accounts: summaries,
+      initialBalance: acc.initialBalance,
+      availableBalance: parseFloat(acc.availableBalance.toFixed(4)),
       totalEquity: parseFloat(totalEquity.toFixed(4)),
       unrealizedPnl: parseFloat(totalUnrealized.toFixed(4)),
-      totalCommissionsPaid: parseFloat(this.totalCommissionsPaid.toFixed(4)),
-      positions: [...this.positions],
-      settings: { ...this.settings },
+      totalCommissionsPaid: parseFloat(acc.totalCommissionsPaid.toFixed(4)),
+      positions: [...acc.positions],
+      settings: { ...acc.settings },
     };
   }
 }

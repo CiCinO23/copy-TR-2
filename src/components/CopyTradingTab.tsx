@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { SparklineSvg, QuickTradeBar } from './SparklineSvg';
 import { CoinIcon } from './CoinIcon';
+import { AccountCopyPickerModal } from './AccountCopyPickerModal';
 import {
   BinanceConnectionState,
   CopyTraderItem,
@@ -36,6 +37,7 @@ import {
   KuCoinConfig,
   KuCoinConnectionState,
   TradeExecutionSettings,
+  PaperVirtualAccountSummary,
 } from '../types';
 import {
   fetchCopyTradersList,
@@ -48,6 +50,9 @@ interface CopyTradingTabProps {
   kucoinConnectionState?: KuCoinConnectionState;
   tradeSettings?: TradeExecutionSettings;
   openPositionsCount?: number;
+  accounts?: PaperVirtualAccountSummary[];
+  activeAccountId?: string;
+  onCreateAccount?: (name: string, initialBalance?: number) => string;
   auto: boolean;
   onAutoChange: (val: boolean) => void;
   onOpenApi: () => void;
@@ -59,11 +64,13 @@ interface CopyTradingTabProps {
     positions: TraderOpenPosition[];
     latestRecords: TraderLatestRecord[];
     marginPerTradeUsdt: number;
+    accountId?: string;
   }) => CopiedSyncLog[];
   onCopySinglePosition: (
     pos: TraderOpenPosition,
     traderName: string,
-    marginUsdt: number
+    marginUsdt: number,
+    accountId?: string
   ) => void;
   onOpenSimulationTab: () => void;
   targetTraderId?: string | null;
@@ -90,6 +97,9 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
   connectionState,
   tradeSettings,
   openPositionsCount = 0,
+  accounts = [],
+  activeAccountId = 'acc_default',
+  onCreateAccount,
   auto,
   onAutoChange,
   onSyncTraderToEngine,
@@ -124,6 +134,18 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
   const [recordsFilter, setRecordsFilter] = useState<
     'ALL' | 'ENTRY' | 'SCALE_IN' | 'PARTIAL_EXIT' | 'EXIT'
   >('ALL');
+
+  // Pending Copy Action Modal State (اختيار الحساب الافتراضي عند الضغط على زر النسخ)
+  const [pendingCopyTarget, setPendingCopyTarget] = useState<
+    | { type: 'TRADER'; trader: CopyTraderItem }
+    | {
+        type: 'SINGLE_POSITION';
+        pos: TraderOpenPosition;
+        traderName: string;
+        customBanner?: string;
+      }
+    | null
+  >(null);
 
   // Copy configuration & active copied traders
   const marginPerTrade = tradeSettings?.tradeValueUsdt || 25;
@@ -218,10 +240,16 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
     }
   }, [targetTraderId, traders, handleSelectTrader, onClearTargetTraderId]);
 
-  // Copy a Trader: fetches `Positions` (if available) and `Latest records` (entry & exit) and syncs to engine
-  const handleCopyTrader = useCallback(
-    async (trader: CopyTraderItem) => {
-      setFeedbackBanner(`جاري جلب Positions وسجل الدخول والخروج Latest records للمتداول ${trader.nickname}...`);
+  // Execute Copy Trader into a chosen Virtual Account
+  const executeCopyTraderToAccount = useCallback(
+    async (trader: CopyTraderItem, targetAccountId: string) => {
+      const targetAcc = accounts.find((a) => a.id === targetAccountId);
+      const targetAccName = targetAcc?.name || 'الحساب الافتراضي';
+      const accMarginPerTrade = targetAcc?.settings.tradeValueUsdt || marginPerTrade;
+
+      setFeedbackBanner(
+        `جاري جلب Positions وسجل الدخول والخروج Latest records للمتداول ${trader.nickname} ونسخه إلى «${targetAccName}»...`
+      );
 
       const fullData = await fetchCopyTraderFullData(
         trader.leadPortfolioId,
@@ -229,7 +257,6 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
         connectionState.tickers
       );
 
-      // Update detail state if currently viewing this trader
       if (selectedTraderId === trader.leadPortfolioId) {
         setTraderDetail(fullData.detail);
         setOpenPositions(fullData.positions);
@@ -243,18 +270,26 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
         source: 'COPY_TRADING',
         positions: fullData.positions,
         latestRecords: fullData.latestRecords,
-        marginPerTradeUsdt: marginPerTrade,
+        marginPerTradeUsdt: accMarginPerTrade,
+        accountId: targetAccountId,
       });
 
       setSyncLogs((prev) => [...logs, ...prev].slice(0, 30));
 
-      const exists = copiedTraders.find((c) => c.traderId === trader.leadPortfolioId);
+      const existsInAccount = copiedTraders.find(
+        (c) =>
+          c.traderId === trader.leadPortfolioId &&
+          (c.accountId || 'acc_default') === targetAccountId
+      );
       let updatedList: ActiveCopiedTrader[];
-      if (exists) {
+      if (existsInAccount) {
         updatedList = copiedTraders.map((c) =>
-          c.traderId === trader.leadPortfolioId
+          c.traderId === trader.leadPortfolioId &&
+          (c.accountId || 'acc_default') === targetAccountId
             ? {
                 ...c,
+                accountId: targetAccountId,
+                accountName: targetAccName,
                 syncedPositionsCount: fullData.positions.length,
                 syncedRecordsCount: fullData.latestRecords.length,
               }
@@ -267,12 +302,14 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
             nickname: trader.nickname,
             avatarUrl: trader.avatarUrl,
             source: 'COPY_TRADING',
-            copyBudgetUsdt: marginPerTrade,
+            copyBudgetUsdt: accMarginPerTrade,
             leverageOverride: null,
             startedAt: Date.now(),
             syncedPositionsCount: fullData.positions.length,
             syncedRecordsCount: fullData.latestRecords.length,
             autoFollowRecords: true,
+            accountId: targetAccountId,
+            accountName: targetAccName,
           },
           ...copiedTraders,
         ];
@@ -280,14 +317,30 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
       saveCopiedTraders(updatedList);
 
       setFeedbackBanner(
-        `تم تفعيل نسخ المتداول "${trader.nickname}" بنجاح! تم سحب (${fullData.positions.length}) مراكز من Positions و (${fullData.latestRecords.length}) حركات دخول/خروج من Latest records.`
+        `تم تفعيل نسخ المتداول "${trader.nickname}" في حساب «${targetAccName}» بنجاح! تم سحب (${fullData.positions.length}) مراكز من Positions و (${fullData.latestRecords.length}) حركات دخول/خروج.`
       );
     },
-    [connectionState.tickers, selectedTraderId, onSyncTraderToEngine, marginPerTrade, copiedTraders]
+    [
+      accounts,
+      connectionState.tickers,
+      selectedTraderId,
+      onSyncTraderToEngine,
+      marginPerTrade,
+      copiedTraders,
+    ]
   );
 
-  const handleStopCopyTrader = (traderId: string) => {
-    const updated = copiedTraders.filter((c) => c.traderId !== traderId);
+  // Open Account Picker Modal when user clicks "نسخ المتداول"
+  const handleCopyTrader = useCallback((trader: CopyTraderItem) => {
+    setPendingCopyTarget({ type: 'TRADER', trader });
+  }, []);
+
+  const handleStopCopyTrader = (traderId: string, accountId?: string) => {
+    const updated = copiedTraders.filter((c) => {
+      if (c.traderId !== traderId) return true;
+      if (accountId && (c.accountId || 'acc_default') !== accountId) return true;
+      return false;
+    });
     saveCopiedTraders(updated);
     setFeedbackBanner('تم إيقاف النسخ التلقائي لهذا المتداول.');
   };
@@ -673,14 +726,12 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
 
                                 <button
                                   onClick={() => {
-                                    onCopySinglePosition(
+                                    setPendingCopyTarget({
+                                      type: 'SINGLE_POSITION',
                                       pos,
-                                      traderDetail.nickname,
-                                      marginPerTrade
-                                    );
-                                    setFeedbackBanner(
-                                      `تم نسخ الصفقة ${pos.symbol} (${pos.side} ${pos.leverage}x) مع سجل أوقات ونسب التدعيم للمتداول ${traderDetail.nickname}`
-                                    );
+                                      traderName: traderDetail.nickname,
+                                      customBanner: `تم نسخ الصفقة ${pos.symbol} (${pos.side} ${pos.leverage}x) للمتداول ${traderDetail.nickname}`,
+                                    });
                                   }}
                                   className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-1.5 rounded-lg text-xs transition-colors cursor-pointer shrink-0 whitespace-nowrap"
                                 >
@@ -932,8 +983,9 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                                       (rec.positionSide === 'BOTH' && rec.side === 'SELL')
                                         ? 'SHORT'
                                         : 'LONG';
-                                    onCopySinglePosition(
-                                      {
+                                    setPendingCopyTarget({
+                                      type: 'SINGLE_POSITION',
+                                      pos: {
                                         id: rec.id,
                                         symbol: rec.symbol,
                                         collateral: 'USDT',
@@ -964,12 +1016,9 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                                           },
                                         ],
                                       },
-                                      traderDetail.nickname,
-                                      marginPerTrade
-                                    );
-                                    setFeedbackBanner(
-                                      `تم نسخ حركة ${isScaleIn ? `التدعيم (+${rec.volumePercent}%)` : 'الدخول'} (${rec.symbol} ${side}) من نافذة Latest records للمتداول ${traderDetail.nickname}`
-                                    );
+                                      traderName: traderDetail.nickname,
+                                      customBanner: `تم نسخ حركة ${isScaleIn ? `التدعيم (+${rec.volumePercent}%)` : 'الدخول'} (${rec.symbol} ${side}) من نافذة Latest records للمتداول ${traderDetail.nickname}`,
+                                    });
                                   }}
                                   className="bg-[#01BC8D]/20 hover:bg-[#01BC8D]/30 text-[#01BC8D] border border-[#01BC8D]/40 px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer whitespace-nowrap shrink-0"
                                 >
@@ -1201,9 +1250,10 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
               {traders.map((trader) => {
-                const isCopied = copiedTraders.some(
+                const traderCopiedEntries = copiedTraders.filter(
                   (c) => c.traderId === trader.leadPortfolioId
                 );
+                const isCopied = traderCopiedEntries.length > 0;
                 const isPositiveRoi = trader.roi >= 0;
 
                 return (
@@ -1263,7 +1313,9 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                         {isCopied && (
                           <span className="bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/50 px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center gap-1.5 shadow-[0_0_10px_rgba(1,188,141,0.25)]">
                             <span className="w-2 h-2 rounded-full bg-[#01BC8D] animate-pulse" />
-                            <span>يتم النسخ الآن</span>
+                            <span>
+                              منسوخ ({traderCopiedEntries.length > 1 ? `${traderCopiedEntries.length} حسابات` : traderCopiedEntries[0]?.accountName || 'يتم النسخ'})
+                            </span>
                           </span>
                         )}
                       </div>
@@ -1340,13 +1392,23 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                       </button>
 
                       {isCopied ? (
-                        <button
-                          onClick={() => handleStopCopyTrader(trader.leadPortfolioId)}
-                          className="bg-[#0D2B24] hover:bg-[#2B1216] text-[#01BC8D] hover:text-[#F6465D] border border-[#01BC8D]/50 hover:border-[#F6465D]/50 font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                        >
-                          <Square className="w-3.5 h-3.5" />
-                          <span>إيقاف النسخ</span>
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleCopyTrader(trader)}
+                            className="flex-1 bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2 px-2 rounded-xl text-[11px] flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                            title="نسخ هذا المتداول إلى حساب افتراضي آخر"
+                          >
+                            <Copy className="w-3 h-3" />
+                            <span>نسخ لحساب آخر</span>
+                          </button>
+                          <button
+                            onClick={() => handleStopCopyTrader(trader.leadPortfolioId)}
+                            className="bg-[#2B1216] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/40 font-bold py-2 px-2.5 rounded-xl text-[11px] flex items-center justify-center cursor-pointer"
+                            title="إيقاف النسخ"
+                          >
+                            <Square className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       ) : (
                         <button
                           onClick={() => handleCopyTrader(trader)}
@@ -1364,6 +1426,57 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
           )}
         </>
       )}
+
+      {/* Account Selection Modal when clicking any Copy button */}
+      <AccountCopyPickerModal
+        isOpen={pendingCopyTarget !== null}
+        onClose={() => setPendingCopyTarget(null)}
+        titleAr={
+          pendingCopyTarget?.type === 'SINGLE_POSITION'
+            ? `اختيار الحساب الافتراضي لنسخ صفقة ${pendingCopyTarget.pos.symbol}`
+            : 'اختيار الحساب الافتراضي لنسخ المتداول إليه'
+        }
+        targetName={
+          pendingCopyTarget?.type === 'TRADER'
+            ? pendingCopyTarget.trader.nickname
+            : pendingCopyTarget?.type === 'SINGLE_POSITION'
+            ? `${pendingCopyTarget.pos.symbol} (${pendingCopyTarget.traderName})`
+            : ''
+        }
+        accounts={accounts}
+        activeAccountId={activeAccountId}
+        copiedAccountIdsForTarget={
+          pendingCopyTarget?.type === 'TRADER'
+            ? copiedTraders
+                .filter((ct) => ct.traderId === pendingCopyTarget.trader.leadPortfolioId)
+                .map((ct) => ct.accountId || 'acc_default')
+            : []
+        }
+        onCreateNewAccount={onCreateAccount}
+        onConfirmCopyToAccount={(chosenAccountId) => {
+          const target = pendingCopyTarget;
+          setPendingCopyTarget(null);
+          if (!target) return;
+
+          const chosenAcc = accounts.find((a) => a.id === chosenAccountId);
+          const chosenAccName = chosenAcc?.name || 'الحساب الافتراضي';
+          const chosenTradeVal = chosenAcc?.settings.tradeValueUsdt || marginPerTrade;
+
+          if (target.type === 'TRADER') {
+            executeCopyTraderToAccount(target.trader, chosenAccountId);
+          } else if (target.type === 'SINGLE_POSITION') {
+            onCopySinglePosition(
+              target.pos,
+              target.traderName,
+              chosenTradeVal,
+              chosenAccountId
+            );
+            setFeedbackBanner(
+              `${target.customBanner || `تم نسخ الصفقة ${target.pos.symbol}`} إلى حساب «${chosenAccName}»!`
+            );
+          }
+        }}
+      />
     </div>
   );
 };

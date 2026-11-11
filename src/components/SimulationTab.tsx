@@ -57,6 +57,10 @@ interface SimulationTabProps {
   paperSnapshot: PaperAccountSnapshot;
   copiedTraders: ActiveCopiedTrader[];
   isSyncingAll?: boolean;
+  onSelectAccount?: (accountId: string) => void;
+  onCreateAccount?: (name: string, initialBalance?: number) => string;
+  onRenameAccount?: (accountId: string, newName: string) => void;
+  onDeleteAccount?: (accountId: string) => void;
   onUpdateTradeSettings: (partial: Partial<TradeExecutionSettings>) => void;
   onSetVirtualBalance: (newBalance: number, resetPositions: boolean) => void;
   onOpenOrder: (
@@ -76,7 +80,11 @@ interface SimulationTabProps {
   onPartialExitPosition?: (positionId: string, withdrawPercent: number, price: number) => void;
   onResetPaper: () => void;
   onSyncAllCopiedTraders: () => void;
-  onRemoveCopiedTrader: (traderId: string, source: 'COPY_TRADING' | 'SMART_MONEY') => void;
+  onRemoveCopiedTrader: (
+    traderId: string,
+    source: 'COPY_TRADING' | 'SMART_MONEY',
+    accountId?: string
+  ) => void;
   onNavigateToTab: (tab: 'Copy Trading' | 'Whales' | 'KuCoinAPI') => void;
   onOpenTraderStats?: (
     traderId: string,
@@ -91,6 +99,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   paperSnapshot,
   copiedTraders,
   isSyncingAll = false,
+  onSelectAccount,
+  onCreateAccount,
+  onRenameAccount,
+  onDeleteAccount,
   onUpdateTradeSettings,
   onSetVirtualBalance,
   onOpenOrder,
@@ -104,6 +116,17 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   onOpenTraderStats,
 }) => {
   const settings = paperSnapshot.settings;
+  const accounts = paperSnapshot.accounts || [];
+  const activeAccountId = paperSnapshot.activeAccountId || 'acc_default';
+  const activeAccountName = paperSnapshot.activeAccountName || 'الحساب الافتراضي 1';
+
+  // Multi-Account UI State
+  const [isCreatingAccount, setIsCreatingAccount] = useState<boolean>(false);
+  const [newAccountName, setNewAccountName] = useState<string>('');
+  const [newAccountBalance, setNewAccountBalance] = useState<string>('1000');
+  const [isRenamingAccount, setIsRenamingAccount] = useState<boolean>(false);
+  const [renameAccountInput, setRenameAccountInput] = useState<string>(activeAccountName);
+  const [copiedTradersScope, setCopiedTradersScope] = useState<'ACTIVE' | 'ALL'>('ACTIVE');
 
   // Virtual Balance Editor State
   const [balanceInput, setBalanceInput] = useState<string>(
@@ -154,7 +177,9 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
     setScaleInFixedValueInput(settings.scaleInFixedValueUsdt ?? 10);
     setScaleInSamePercentInput(settings.scaleInSamePercentAsTrader ?? true);
     setPartialExitSamePercentInput(settings.partialExitSamePercentAsTrader ?? true);
-  }, [settings]);
+    setBalanceInput(String(settings.virtualInitialBalance || paperSnapshot.initialBalance || 1000));
+    setRenameAccountInput(activeAccountName);
+  }, [settings, activeAccountId, activeAccountName, paperSnapshot.initialBalance]);
 
   const openPositions = paperSnapshot.positions.filter((p) => p.status === 'OPEN');
   const closedPositions = paperSnapshot.positions.filter((p) => p.status === 'CLOSED');
@@ -318,7 +343,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       const pnl = pos.realizedPnl ?? 0;
       runningEquity += pnl;
       if (runningEquity > peakEquity) peakEquity = runningEquity;
-      const dd = peakEquity > 0 ? ((peakEquity - runningEquity) / peakEquity) * 100 : 0;
+      // أقصى تراجع يُحسب من رأس المال الأولي (initialBal)
+      const dd =
+        initialBal > 0 && runningEquity < initialBal
+          ? ((initialBal - runningEquity) / initialBal) * 100
+          : 0;
       if (dd > maxDrawdownPercent) maxDrawdownPercent = dd;
 
       const timeStr = new Date(pos.closeTime || pos.openTime)
@@ -347,7 +376,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
         const net = gross - (pos.commissionUsdt || 0);
         runningEquity += net;
         if (runningEquity > peakEquity) peakEquity = runningEquity;
-        const dd = peakEquity > 0 ? ((peakEquity - runningEquity) / peakEquity) * 100 : 0;
+        // أقصى تراجع يُحسب من رأس المال الأولي (initialBal)
+        const dd =
+          initialBal > 0 && runningEquity < initialBal
+            ? ((initialBal - runningEquity) / initialBal) * 100
+            : 0;
         if (dd > maxDrawdownPercent) maxDrawdownPercent = dd;
 
         equityCurve.push({
@@ -364,6 +397,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
     // Ensure at least 2 points on the chart so AreaChart renders a clean line/area
     if (equityCurve.length === 1) {
       const currentEq = Number(paperSnapshot.totalEquity.toFixed(2));
+      const dd =
+        initialBal > 0 && currentEq < initialBal
+          ? ((initialBal - currentEq) / initialBal) * 100
+          : 0;
+      if (dd > maxDrawdownPercent) maxDrawdownPercent = dd;
       equityCurve.push({
         step: 'الآن',
         label: 'الرصيد الحالي',
@@ -535,33 +573,148 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       .replace(',', '');
   };
 
+  const getTradeDurationMs = (cp: {
+    openTime: number;
+    closeTime?: number;
+    traderEntryTime?: number;
+    traderExitTime?: number;
+  }): number => {
+    const start = cp.openTime || cp.traderEntryTime || 0;
+    const end = cp.closeTime || cp.traderExitTime || start;
+    if (end >= start && start > 0) {
+      return end - start;
+    }
+    if (cp.traderEntryTime && end >= cp.traderEntryTime) {
+      return end - cp.traderEntryTime;
+    }
+    return Math.abs(end - start);
+  };
+
+  const formatTradeDuration = (
+    durationMs: number,
+    style: 'FULL' | 'COMPACT' = 'FULL'
+  ): { textAr: string; hhmmss: string } => {
+    const safeMs = Math.max(0, Math.floor(durationMs));
+    const totalSeconds = Math.floor(safeMs / 1000);
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    const totalHours = Math.floor(totalSeconds / 3600);
+    const hhmmss = `${String(totalHours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+
+    if (totalSeconds === 0) {
+      return {
+        textAr: style === 'COMPACT' ? '< 1ث' : 'أقل من ثانية',
+        hhmmss: '00:00:00',
+      };
+    }
+
+    if (style === 'COMPACT') {
+      const parts: string[] = [];
+      if (days > 0) parts.push(`${days}ي`);
+      if (hours > 0) parts.push(`${hours}س`);
+      if (minutes > 0) parts.push(`${minutes}د`);
+      if (seconds > 0 && days === 0 && hours === 0) parts.push(`${seconds}ث`);
+      return {
+        textAr: parts.join(' ') || `${seconds}ث`,
+        hhmmss,
+      };
+    }
+
+    const parts: string[] = [];
+    if (days > 0) parts.push(`${days} يوم`);
+    if (hours > 0) parts.push(`${hours} ساعة`);
+    if (minutes > 0) parts.push(`${minutes} دقيقة`);
+    if (seconds > 0 && days === 0) parts.push(`${seconds} ثانية`);
+
+    return {
+      textAr: parts.join(' و ') || `${seconds} ثانية`,
+      hhmmss,
+    };
+  };
+
+  const getSourceTypeLabelAr = (sourceType?: 'COPY_TRADING' | 'SMART_MONEY' | 'MANUAL', traderName?: string) => {
+    if (sourceType === 'SMART_MONEY') return 'الحيتان (Smart Money)';
+    if (sourceType === 'COPY_TRADING') return 'نسخ التداول (Copy Trading)';
+    if (traderName && traderName !== 'يدوي' && traderName !== 'تداول يدوي') {
+      return 'نسخ التداول (Copy Trading)';
+    }
+    return 'تداول يدوي';
+  };
+
   const handleExportClosedTradesExcel = (format: 'XLS' | 'CSV' = 'XLS') => {
     if (closedPositions.length === 0) return;
 
     const nowDateStr = new Date().toISOString().slice(0, 10);
+    const initialBal = Math.max(
+      1,
+      paperSnapshot.initialBalance || settings.virtualInitialBalance || 1000
+    );
+
+    const totalMargin = closedPositions.reduce(
+      (acc, cp) => acc + (cp.initialMarginUsdt || cp.marginUsdt || settings.tradeValueUsdt),
+      0
+    );
+    const totalCommission = closedPositions.reduce(
+      (acc, cp) => acc + (cp.commissionUsdt || 0),
+      0
+    );
+    const totalRealizedPnl = closedPositions.reduce(
+      (acc, cp) => acc + (cp.realizedPnl || 0),
+      0
+    );
+    const totalDurationMs = closedPositions.reduce(
+      (acc, cp) => acc + getTradeDurationMs(cp),
+      0
+    );
+    const avgDurationMs =
+      closedPositions.length > 0 ? totalDurationMs / closedPositions.length : 0;
+    const avgDurationFormatted = formatTradeDuration(avgDurationMs, 'FULL');
+    const overallProfitPctOnMargin =
+      totalMargin > 0 ? (totalRealizedPnl / totalMargin) * 100 : 0;
+    const overallProfitPctOnCapital = (totalRealizedPnl / initialBal) * 100;
+    const winningClosedCount = closedPositions.filter((cp) => (cp.realizedPnl || 0) > 0).length;
+    const losingClosedCount = closedPositions.filter((cp) => (cp.realizedPnl || 0) < 0).length;
+    const winRateClosedPct =
+      closedPositions.length > 0 ? (winningClosedCount / closedPositions.length) * 100 : 0;
 
     if (format === 'CSV') {
       const headers = [
         '#',
+        'الحساب',
         'الزوج (Symbol)',
         'الاتجاه (Side)',
         'الرافعة (Leverage)',
-        'المتداول المنسوخ',
+        'اسم المتداول المنسوخ',
+        'مصدر الصفقة',
         'قيمة الصفقة (USDT)',
         'تاريخ ووقت الدخول',
         'تاريخ ووقت الخروج',
+        'المدة الزمنية لاستمرار الصفقة',
+        'المدة الزمنية (HH:MM:SS)',
         'سعر الدخول (USDT)',
         'سعر الخروج (USDT)',
         'العمولة (USDT)',
         'الأرباح المحققة الصافية (USDT)',
-        'نسبة العائد ROI (%)',
+        'نسبة الربح المحققة من الصفقة (%)',
+        'نسبة الربح من رأس المال الأولي (%)',
+        'حالة الصفقة',
         'حركات التدعيم والانسحاب',
       ];
 
       const rows = closedPositions.map((cp, idx) => {
-        const margin = cp.marginUsdt || settings.tradeValueUsdt;
+        const margin = cp.initialMarginUsdt || cp.marginUsdt || settings.tradeValueUsdt;
         const rPnl = cp.realizedPnl || 0;
         const roiPct = margin > 0 ? (rPnl / margin) * 100 : 0;
+        const capitalPct = (rPnl / initialBal) * 100;
+        const durMs = getTradeDurationMs(cp);
+        const durFormatted = formatTradeDuration(durMs, 'FULL');
+        const traderName = cp.sourceTraderName || 'تداول يدوي';
+        const sourceLabel = getSourceTypeLabelAr(cp.sourceType, cp.sourceTraderName);
+        const tradeStatus = rPnl > 0 ? 'صفقة رابحة' : rPnl < 0 ? 'صفقة خاسرة' : 'تعادل';
+
         const adjustmentsSummary = (cp.scaleAdjustments || [])
           .map(
             (a) =>
@@ -571,25 +724,56 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
 
         return [
           idx + 1,
+          cp.accountName || activeAccountName,
           cp.symbol,
           cp.side,
           `${cp.leverage}x`,
-          cp.sourceTraderName || 'يدوي',
+          traderName,
+          sourceLabel,
           margin.toFixed(2),
           formatExcelDate(cp.openTime),
           formatExcelDate(cp.closeTime),
+          durFormatted.textAr,
+          durFormatted.hhmmss,
           cp.entryPrice.toFixed(4),
           (cp.exitPrice || 0).toFixed(4),
           (cp.commissionUsdt || 0).toFixed(4),
-          rPnl.toFixed(2),
-          `${roiPct.toFixed(2)}%`,
+          `${rPnl >= 0 ? '+' : ''}${rPnl.toFixed(2)}`,
+          `${roiPct >= 0 ? '+' : ''}${roiPct.toFixed(2)}%`,
+          `${capitalPct >= 0 ? '+' : ''}${capitalPct.toFixed(2)}%`,
+          tradeStatus,
           adjustmentsSummary || 'بدون تعديل',
         ]
           .map((cell) => `"${String(cell).replace(/"/g, '""')}"`)
           .join(',');
       });
 
-      const csvContent = '\uFEFF' + [headers.join(','), ...rows].join('\r\n');
+      const summaryRow = [
+        'الإجمالي',
+        activeAccountName,
+        `${closedPositions.length} صفقة`,
+        `رابحة: ${winningClosedCount} / خاسرة: ${losingClosedCount}`,
+        `نسبة النجاح: ${winRateClosedPct.toFixed(1)}%`,
+        'جميع المتداولين',
+        '--',
+        totalMargin.toFixed(2),
+        '--',
+        '--',
+        `المتوسط: ${avgDurationFormatted.textAr}`,
+        avgDurationFormatted.hhmmss,
+        '--',
+        '--',
+        totalCommission.toFixed(4),
+        `${totalRealizedPnl >= 0 ? '+' : ''}${totalRealizedPnl.toFixed(2)}`,
+        `${overallProfitPctOnMargin >= 0 ? '+' : ''}${overallProfitPctOnMargin.toFixed(2)}%`,
+        `${overallProfitPctOnCapital >= 0 ? '+' : ''}${overallProfitPctOnCapital.toFixed(2)}%`,
+        totalRealizedPnl >= 0 ? 'صافي ربح' : 'صافي خسارة',
+        '--',
+      ]
+        .map((cell) => `"${String(cell).replace(/"/g, '""')}"`)
+        .join(',');
+
+      const csvContent = '\uFEFF' + [headers.join(','), ...rows, summaryRow].join('\r\n');
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -602,26 +786,88 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       return;
     }
 
-    // Export formatted Excel (.xls) with RTL & styled cells
-    const totalMargin = closedPositions.reduce(
-      (acc, cp) => acc + (cp.marginUsdt || settings.tradeValueUsdt),
-      0
-    );
-    const totalCommission = closedPositions.reduce(
-      (acc, cp) => acc + (cp.commissionUsdt || 0),
-      0
-    );
-    const totalRealizedPnl = closedPositions.reduce(
-      (acc, cp) => acc + (cp.realizedPnl || 0),
-      0
-    );
+    // تجميع إحصائيات المتداولين المنسوخين لإضافتها كملخص تحليلي داخل ملف Excel
+    const traderSummaryMap = new Map<
+      string,
+      {
+        traderName: string;
+        sourceLabel: string;
+        tradesCount: number;
+        wins: number;
+        losses: number;
+        totalMargin: number;
+        totalPnl: number;
+        totalDurationMs: number;
+      }
+    >();
+
+    closedPositions.forEach((cp) => {
+      const tName = cp.sourceTraderName || 'تداول يدوي';
+      const sLabel = getSourceTypeLabelAr(cp.sourceType, cp.sourceTraderName);
+      const margin = cp.initialMarginUsdt || cp.marginUsdt || settings.tradeValueUsdt;
+      const rPnl = cp.realizedPnl || 0;
+      const dur = getTradeDurationMs(cp);
+
+      const curr = traderSummaryMap.get(tName) || {
+        traderName: tName,
+        sourceLabel: sLabel,
+        tradesCount: 0,
+        wins: 0,
+        losses: 0,
+        totalMargin: 0,
+        totalPnl: 0,
+        totalDurationMs: 0,
+      };
+      curr.tradesCount += 1;
+      if (rPnl > 0) curr.wins += 1;
+      if (rPnl < 0) curr.losses += 1;
+      curr.totalMargin += margin;
+      curr.totalPnl += rPnl;
+      curr.totalDurationMs += dur;
+      traderSummaryMap.set(tName, curr);
+    });
+
+    const traderSummaryRowsHtml = Array.from(traderSummaryMap.values())
+      .sort((a, b) => b.totalPnl - a.totalPnl)
+      .map((item, idx) => {
+        const winRate = item.tradesCount > 0 ? (item.wins / item.tradesCount) * 100 : 0;
+        const avgProfitPct = item.totalMargin > 0 ? (item.totalPnl / item.totalMargin) * 100 : 0;
+        const avgDur = formatTradeDuration(
+          item.tradesCount > 0 ? item.totalDurationMs / item.tradesCount : 0,
+          'FULL'
+        );
+        const color = item.totalPnl >= 0 ? '#01BC8D' : '#F6465D';
+        return `
+          <tr>
+            <td style="text-align:center;">${idx + 1}</td>
+            <td style="font-weight:bold;">${item.traderName}</td>
+            <td style="text-align:center;">${item.sourceLabel}</td>
+            <td style="text-align:center;font-weight:bold;">${item.tradesCount}</td>
+            <td style="text-align:center;color:#01BC8D;">${item.wins}</td>
+            <td style="text-align:center;color:#F6465D;">${item.losses}</td>
+            <td style="text-align:center;font-weight:bold;">${winRate.toFixed(1)}%</td>
+            <td style="text-align:center;">${avgDur.textAr} (${avgDur.hhmmss})</td>
+            <td style="text-align:right;">${item.totalMargin.toFixed(2)} USDT</td>
+            <td style="text-align:right;font-weight:bold;color:${color};">${item.totalPnl >= 0 ? '+' : ''}${item.totalPnl.toFixed(2)} USDT</td>
+            <td style="text-align:right;font-weight:bold;color:${color};">${avgProfitPct >= 0 ? '+' : ''}${avgProfitPct.toFixed(2)}%</td>
+          </tr>`;
+      })
+      .join('');
 
     const tableRowsHtml = closedPositions
       .map((cp, idx) => {
-        const margin = cp.marginUsdt || settings.tradeValueUsdt;
+        const margin = cp.initialMarginUsdt || cp.marginUsdt || settings.tradeValueUsdt;
         const rPnl = cp.realizedPnl || 0;
         const roiPct = margin > 0 ? (rPnl / margin) * 100 : 0;
+        const capitalPct = (rPnl / initialBal) * 100;
         const pnlColor = rPnl >= 0 ? '#01BC8D' : '#F6465D';
+        const rowBg = rPnl > 0 ? '#F0FDF9' : rPnl < 0 ? '#FEF2F2' : '#FFFFFF';
+        const durMs = getTradeDurationMs(cp);
+        const durFormatted = formatTradeDuration(durMs, 'FULL');
+        const traderName = cp.sourceTraderName || 'تداول يدوي';
+        const sourceLabel = getSourceTypeLabelAr(cp.sourceType, cp.sourceTraderName);
+        const statusText = rPnl > 0 ? 'رابحة' : rPnl < 0 ? 'خاسرة' : 'تعادل';
+
         const adjustmentsSummary = (cp.scaleAdjustments || [])
           .map(
             (a) =>
@@ -630,20 +876,26 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           .join(' ، ');
 
         return `
-          <tr>
+          <tr style="background-color:${rowBg};">
             <td style="text-align:center;">${idx + 1}</td>
+            <td style="text-align:center;">${cp.accountName || activeAccountName}</td>
             <td style="font-weight:bold;">${cp.symbol}</td>
             <td style="text-align:center;color:${cp.side === 'LONG' ? '#01BC8D' : '#F6465D'};font-weight:bold;">${cp.side}</td>
             <td style="text-align:center;">${cp.leverage}x</td>
-            <td>${cp.sourceTraderName || 'تداول يدوي'}</td>
-            <td style="text-align:right;">${margin.toFixed(2)}</td>
+            <td style="font-weight:bold;color:#0B0E11;">${traderName}</td>
+            <td style="text-align:center;font-size:11px;color:#4B5563;">${sourceLabel}</td>
+            <td style="text-align:right;font-weight:bold;">${margin.toFixed(2)}</td>
             <td style="text-align:center;">${formatExcelDate(cp.openTime)}</td>
             <td style="text-align:center;">${formatExcelDate(cp.closeTime)}</td>
+            <td style="text-align:center;font-weight:bold;color:#1F2937;">${durFormatted.textAr}</td>
+            <td style="text-align:center;font-family:monospace;color:#4B5563;">${durFormatted.hhmmss}</td>
             <td style="text-align:right;">${cp.entryPrice.toFixed(4)}</td>
             <td style="text-align:right;">${(cp.exitPrice || 0).toFixed(4)}</td>
             <td style="text-align:right;color:#F6465D;">${(cp.commissionUsdt || 0).toFixed(4)}</td>
             <td style="text-align:right;font-weight:bold;color:${pnlColor};">${rPnl >= 0 ? '+' : ''}${rPnl.toFixed(2)}</td>
             <td style="text-align:right;font-weight:bold;color:${pnlColor};">${roiPct >= 0 ? '+' : ''}${roiPct.toFixed(2)}%</td>
+            <td style="text-align:right;color:${pnlColor};">${capitalPct >= 0 ? '+' : ''}${capitalPct.toFixed(2)}%</td>
+            <td style="text-align:center;font-weight:bold;color:${pnlColor};">${statusText}</td>
             <td>${adjustmentsSummary || 'دخول وخروج مباشر'}</td>
           </tr>`;
       })
@@ -669,29 +921,52 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
         <![endif]-->
         <style>
           body, table { font-family: 'Cairo', 'Segoe UI', Tahoma, Arial, sans-serif; font-size: 12px; }
-          table { border-collapse: collapse; width: 100%; }
+          table { border-collapse: collapse; width: 100%; margin-bottom: 18px; }
           th { background-color: #01BC8D; color: #0B0E11; font-weight: bold; padding: 8px; border: 1px solid #232E3A; }
           td { padding: 6px 8px; border: 1px solid #D1D5DB; }
-          tfoot td { background-color: #12171D; color: #FFFFFF; font-weight: bold; padding: 8px; }
+          tfoot td { background-color: #12171D; color: #FFFFFF; font-weight: bold; padding: 8px; border: 1px solid #232E3A; }
+          .report-header { background-color: #12171D; color: #FFFFFF; padding: 14px; border-radius: 8px; margin-bottom: 14px; border: 1px solid #232E3A; }
+          .report-title { font-size: 16px; font-weight: bold; color: #01BC8D; margin-bottom: 6px; }
+          .report-meta { font-size: 12px; color: #E5E7EB; line-height: 1.6; }
+          .section-title { font-size: 14px; font-weight: bold; color: #0B0E11; background-color: #E6F9F4; padding: 8px 10px; border-right: 4px solid #01BC8D; margin: 14px 0 8px 0; }
         </style>
       </head>
       <body>
+        <div class="report-header">
+          <div class="report-title">تقرير سجل الصفقات المغلقة الشامل — ${activeAccountName}</div>
+          <div class="report-meta">
+            <strong>تاريخ التصدير:</strong> ${nowDateStr} |
+            <strong>وضع التداول:</strong> ${settings.mode === 'REAL' ? 'حقيقي (REAL)' : 'افتراضي (VIRTUAL)'} |
+            <strong>رأس المال الأولي:</strong> ${initialBal.toFixed(2)} USDT |
+            <strong>إجمالي الصفقات المغلقة:</strong> ${closedPositions.length} صفقة (رابحة: ${winningClosedCount} • خاسرة: ${losingClosedCount} • نسبة النجاح: ${winRateClosedPct.toFixed(1)}%) |
+            <strong>متوسط مدة الصفقة:</strong> ${avgDurationFormatted.textAr} (${avgDurationFormatted.hhmmss}) |
+            <strong>صافي الأرباح المحققة:</strong> ${totalRealizedPnl >= 0 ? '+' : ''}${totalRealizedPnl.toFixed(2)} USDT (${overallProfitPctOnMargin >= 0 ? '+' : ''}${overallProfitPctOnMargin.toFixed(2)}% من الهامش • ${overallProfitPctOnCapital >= 0 ? '+' : ''}${overallProfitPctOnCapital.toFixed(2)}% من رأس المال الأولي)
+          </div>
+        </div>
+
+        <div class="section-title">1. جدول سجل الصفقات المغلقة التفصيلي (شامل المتداول المنسوخ، نسبة الربح المحققة، والمدة الزمنية)</div>
         <table dir="rtl">
           <thead>
             <tr>
               <th>#</th>
+              <th>الحساب</th>
               <th>الزوج (Symbol)</th>
               <th>الاتجاه</th>
               <th>الرافعة</th>
-              <th>المتداول المنسوخ</th>
+              <th>اسم المتداول المنسوخ</th>
+              <th>مصدر الصفقة</th>
               <th>قيمة الصفقة (USDT)</th>
               <th>تاريخ ووقت الدخول</th>
               <th>تاريخ ووقت الخروج</th>
+              <th>المدة الزمنية لاستمرار الصفقة</th>
+              <th>المدة (HH:MM:SS)</th>
               <th>سعر الدخول (USDT)</th>
               <th>سعر الخروج (USDT)</th>
               <th>العمولة (USDT)</th>
               <th>الأرباح المحققة (USDT)</th>
-              <th>نسبة العائد ROI (%)</th>
+              <th>نسبة الربح المحققة من الصفقة (%)</th>
+              <th>الأثر على رأس المال الأولي (%)</th>
+              <th>حالة الصفقة</th>
               <th>سجل التدعيم والانسحاب</th>
             </tr>
           </thead>
@@ -700,14 +975,42 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </tbody>
           <tfoot>
             <tr>
-              <td colspan="5" style="text-align:right;">الإجمالي (${closedPositions.length} صفقة مغلقة)</td>
+              <td colspan="7" style="text-align:right;">الإجمالي العام (${closedPositions.length} صفقة مغلقة • رابحة: ${winningClosedCount} • خاسرة: ${losingClosedCount})</td>
               <td style="text-align:right;">${totalMargin.toFixed(2)} USDT</td>
-              <td colspan="4"></td>
+              <td colspan="2" style="text-align:center;">متوسط المدة الزمنية:</td>
+              <td style="text-align:center;color:#01BC8D;">${avgDurationFormatted.textAr}</td>
+              <td style="text-align:center;font-family:monospace;">${avgDurationFormatted.hhmmss}</td>
+              <td colspan="2"></td>
               <td style="text-align:right;color:#F6465D;">${totalCommission.toFixed(4)} USDT</td>
               <td style="text-align:right;color:${totalRealizedPnl >= 0 ? '#01BC8D' : '#F6465D'};">${totalRealizedPnl >= 0 ? '+' : ''}${totalRealizedPnl.toFixed(2)} USDT</td>
-              <td colspan="2"></td>
+              <td style="text-align:right;color:${overallProfitPctOnMargin >= 0 ? '#01BC8D' : '#F6465D'};">${overallProfitPctOnMargin >= 0 ? '+' : ''}${overallProfitPctOnMargin.toFixed(2)}%</td>
+              <td style="text-align:right;color:${overallProfitPctOnCapital >= 0 ? '#01BC8D' : '#F6465D'};">${overallProfitPctOnCapital >= 0 ? '+' : ''}${overallProfitPctOnCapital.toFixed(2)}%</td>
+              <td style="text-align:center;color:${totalRealizedPnl >= 0 ? '#01BC8D' : '#F6465D'};">نسبة النجاح: ${winRateClosedPct.toFixed(1)}%</td>
+              <td></td>
             </tr>
           </tfoot>
+        </table>
+
+        <div class="section-title">2. ملخص أداء المتداولين المنسوخين في الصفقات المغلقة</div>
+        <table dir="rtl">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>اسم المتداول المنسوخ</th>
+              <th>مصدر النسخ</th>
+              <th>عدد الصفقات المغلقة</th>
+              <th>الصفقات الرابحة</th>
+              <th>الصفقات الخاسرة</th>
+              <th>نسبة النجاح (Win Rate)</th>
+              <th>متوسط المدة الزمنية للصفقة</th>
+              <th>إجمالي قيمة الصفقات (USDT)</th>
+              <th>صافي الأرباح المحققة (USDT)</th>
+              <th>متوسط نسبة الربح المحققة (%)</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${traderSummaryRowsHtml}
+          </tbody>
         </table>
       </body>
       </html>`;
@@ -1107,6 +1410,229 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </button>
         </div>
 
+        {/* Multi-Account Virtual Trading Bar (فتح وتسمية عدة حسابات افتراضية في نفس الوقت) */}
+        {!isRealMode && (
+          <div
+            data-testid="virtual_multi_accounts_bar"
+            className="bg-[#0B0E11] border border-[#01BC8D]/40 rounded-xl p-3 sm:p-3.5 space-y-3"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Wallet className="w-4 h-4 text-[#01BC8D] shrink-0" />
+                <span className="text-xs sm:text-sm font-bold text-white">
+                  الحسابات الافتراضية المفتوحة ({accounts.length})
+                </span>
+                <span className="text-[11px] bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 px-2 py-0.5 rounded-lg font-bold">
+                  الحساب النشط: {activeAccountName}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRenameAccountInput(activeAccountName);
+                    setIsRenamingAccount(!isRenamingAccount);
+                    setIsCreatingAccount(false);
+                  }}
+                  data-testid="rename_virtual_account_btn"
+                  className="text-[11px] bg-[#1A222B] hover:bg-[#232E3A] text-white border border-[#232E3A] px-2.5 py-1.5 rounded-lg flex items-center gap-1 font-semibold cursor-pointer transition-colors"
+                >
+                  <Edit3 className="w-3 h-3 text-[#01BC8D]" />
+                  <span>تسمية / تعديل الاسم</span>
+                </button>
+
+                {accounts.length > 1 && onDeleteAccount && (
+                  <button
+                    type="button"
+                    onClick={() => onDeleteAccount(activeAccountId)}
+                    data-testid="delete_virtual_account_btn"
+                    className="text-[11px] bg-[#2B1216] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/40 px-2.5 py-1.5 rounded-lg flex items-center gap-1 font-semibold cursor-pointer transition-colors"
+                    title="حذف هذا الحساب الافتراضي"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>حذف الحساب</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewAccountName(`حساب افتراضي ${accounts.length + 1}`);
+                    setNewAccountBalance(String(settings.virtualInitialBalance || 1000));
+                    setIsCreatingAccount(!isCreatingAccount);
+                    setIsRenamingAccount(false);
+                  }}
+                  data-testid="create_virtual_account_btn"
+                  className="text-[11px] bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] px-3 py-1.5 rounded-lg flex items-center gap-1 font-bold cursor-pointer shadow-sm transition-colors"
+                >
+                  <PlusCircle className="w-3.5 h-3.5" />
+                  <span>+ فتح حساب افتراضي جديد</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Inline Rename Active Account Form */}
+            {isRenamingAccount && onRenameAccount && (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (renameAccountInput.trim()) {
+                    onRenameAccount(activeAccountId, renameAccountInput.trim());
+                    setIsRenamingAccount(false);
+                  }
+                }}
+                className="bg-[#12171D] border border-[#01BC8D]/50 rounded-xl p-2.5 flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
+              >
+                <span className="text-[11px] text-[#01BC8D] font-bold shrink-0">
+                  الاسم الجديد للحساب الحالي:
+                </span>
+                <input
+                  type="text"
+                  value={renameAccountInput}
+                  onChange={(e) => setRenameAccountInput(e.target.value)}
+                  placeholder="أدخل اسم الحساب..."
+                  className="flex-1 bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none"
+                  required
+                />
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="submit"
+                    className="bg-[#01BC8D] text-[#0B0E11] font-bold px-3 py-1.5 rounded-lg text-xs cursor-pointer"
+                  >
+                    حفظ الاسم
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsRenamingAccount(false)}
+                    className="bg-[#1A222B] text-[#8A99AD] hover:text-white px-2.5 py-1.5 rounded-lg text-xs cursor-pointer"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* Inline Create New Virtual Account Form */}
+            {isCreatingAccount && onCreateAccount && (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const name = newAccountName.trim() || `حساب افتراضي ${accounts.length + 1}`;
+                  const bal = Math.max(10, parseFloat(newAccountBalance) || 1000);
+                  onCreateAccount(name, bal);
+                  setIsCreatingAccount(false);
+                }}
+                className="bg-[#12171D] border border-[#01BC8D] rounded-xl p-3 space-y-2.5"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-[#01BC8D]">
+                    فتح حساب افتراضي جديد (يعمل في نفس الوقت بنفس الإعدادات المستقلة لكل حساب):
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setIsCreatingAccount(false)}
+                    className="text-[11px] text-[#8A99AD] hover:text-white cursor-pointer"
+                  >
+                    إغلاق
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 items-end">
+                  <div>
+                    <label className="block text-[10px] text-[#8A99AD] mb-1">
+                      تسمية الحساب الجديد:
+                    </label>
+                    <input
+                      type="text"
+                      value={newAccountName}
+                      onChange={(e) => setNewAccountName(e.target.value)}
+                      placeholder="مثال: حساب نسخ الحيتان"
+                      data-testid="new_account_name_input"
+                      className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-[#8A99AD] mb-1">
+                      الرصيد الافتراضي الابتدائي (USDT):
+                    </label>
+                    <input
+                      type="number"
+                      min="10"
+                      step="any"
+                      value={newAccountBalance}
+                      onChange={(e) => setNewAccountBalance(e.target.value)}
+                      data-testid="new_account_balance_input"
+                      className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none"
+                      required
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    data-testid="confirm_create_account_btn"
+                    className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2 px-4 rounded-lg text-xs cursor-pointer transition-colors"
+                  >
+                    إنشاء وفتح الحساب الآن
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* Horizontal / Grid Selector of All Virtual Accounts */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+              {accounts.map((acc) => {
+                const isSelected = acc.id === activeAccountId;
+                const accCopiedCount = copiedTraders.filter(
+                  (ct) => (ct.accountId || 'acc_default') === acc.id
+                ).length;
+
+                return (
+                  <button
+                    key={acc.id}
+                    type="button"
+                    onClick={() => onSelectAccount && onSelectAccount(acc.id)}
+                    data-testid={`switch_account_btn_${acc.id}`}
+                    className={`text-right rounded-xl p-2.5 border transition-all cursor-pointer flex flex-col justify-between gap-1.5 ${
+                      isSelected
+                        ? 'bg-[#0D2B24] border-[#01BC8D] shadow-[0_0_12px_rgba(1,188,141,0.18)]'
+                        : 'bg-[#12171D] border-[#232E3A] hover:border-[#01BC8D]/40'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 w-full">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          className={`w-2 h-2 rounded-full shrink-0 ${
+                            isSelected ? 'bg-[#01BC8D]' : 'bg-[#8A99AD]/50'
+                          }`}
+                        />
+                        <span className="font-bold text-xs text-white truncate">
+                          {acc.name}
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-[#0B0E11] text-[#01BC8D] border border-[#232E3A] shrink-0">
+                        {acc.settings.tradeValueUsdt}$ × {acc.settings.leverage}x
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[10px] text-[#8A99AD] font-mono tabular-nums w-full pt-1 border-t border-[#232E3A]/60">
+                      <span>
+                        المتاح: <strong className="text-white">{acc.availableBalance.toFixed(0)}$</strong>
+                      </span>
+                      <span>
+                        مفتوحة: <strong className="text-[#01BC8D]">{acc.openPositionsCount}/{acc.settings.maxConcurrentTrades}</strong>
+                      </span>
+                      <span>
+                        منسوخون: <strong className="text-white">{accCopiedCount}</strong>
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Real Mode Status Notice */}
         {isRealMode && (
           <div className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
@@ -1339,7 +1865,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
               {portfolioStats.peakEquity.toFixed(0)} $
             </span>
             <span className="text-[10px] text-[#F6465D] font-mono tabular-nums">
-              أقصى تراجع (Drawdown): {portfolioStats.maxDrawdownPercent.toFixed(2)}%
+              أقصى تراجع (من رأس المال الأولي): {portfolioStats.maxDrawdownPercent.toFixed(2)}%
             </span>
           </div>
         </div>
@@ -1983,22 +2509,55 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
         </form>
       </div>
 
-      {/* Multi-Trader Copy Management Section (إدارة نسخ أكثر من متداول بنفس الوقت) */}
+      {/* Multi-Trader Copy Management Section (إدارة نسخ أكثر من متداول بنفس الوقت عبر الحسابات) */}
       <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Users className="w-5 h-5 text-[#01BC8D]" />
             <div>
               <h3 className="font-bold text-sm sm:text-base text-white">
-                المتداولون والحيتان المنسوخون حالياً ({copiedTraders.length})
+                المتداولون والحيتان المنسوخون ({copiedTraders.length})
               </h3>
               <p className="text-[11px] text-[#8A99AD]">
-                يمكنك نسخ أكثر من متداول في نفس الوقت من نافذتي Copy Trading و Whales، وسيتم فتح صفقاتهم جميعاً وفق إعداداتك المحددة أعلاه.
+                يمكنك نسخ كل متداول أو حوت إلى حساب افتراضي معين، وسيتم فتح صفقاته وفق إعدادات الحساب المخصص له.
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {accounts.length > 1 && (
+              <div className="flex items-center bg-[#0B0E11] border border-[#232E3A] rounded-xl p-1 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setCopiedTradersScope('ACTIVE')}
+                  className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer transition-colors ${
+                    copiedTradersScope === 'ACTIVE'
+                      ? 'bg-[#01BC8D] text-[#0B0E11]'
+                      : 'text-[#8A99AD] hover:text-white'
+                  }`}
+                >
+                  حساب «{activeAccountName}» (
+                  {
+                    copiedTraders.filter(
+                      (ct) => (ct.accountId || 'acc_default') === activeAccountId
+                    ).length
+                  }
+                  )
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCopiedTradersScope('ALL')}
+                  className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer transition-colors ${
+                    copiedTradersScope === 'ALL'
+                      ? 'bg-[#01BC8D] text-[#0B0E11]'
+                      : 'text-[#8A99AD] hover:text-white'
+                  }`}
+                >
+                  جميع الحسابات ({copiedTraders.length})
+                </button>
+              </div>
+            )}
+
             {copiedTraders.length > 0 && (
               <button
                 onClick={onSyncAllCopiedTraders}
@@ -2024,85 +2583,117 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </div>
         </div>
 
-        {copiedTraders.length === 0 ? (
-          <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-4 text-center text-xs text-[#8A99AD]">
-            لا يوجد متداولون منسوخون حالياً. اضغط على <strong className="text-[#01BC8D]">+ إضافة متداول</strong> أو <strong className="text-[#01BC8D]">+ إضافة حوت</strong> لاختيار متداول أو أكثر ونسخهم في نفس الوقت.
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            {copiedTraders.map((ct) => (
-              <div
-                key={`${ct.source}_${ct.traderId}`}
-                className="bg-[#1A222B] border border-[#232E3A] hover:border-[#01BC8D]/50 rounded-xl p-3 flex items-center justify-between gap-2 transition-all shadow-sm"
-              >
-                <div className="flex items-center gap-2.5">
-                  {/* Trader Avatar / Photo - Clickable to open trader statistics */}
-                  <button
-                    type="button"
-                    onClick={() => handleTraderClick(ct.nickname, ct.traderId, ct.source)}
-                    className="relative group shrink-0 cursor-pointer focus:outline-none"
-                    title={`اضغط للدخول إلى صفحة إحصائيات المتداول ${ct.nickname}`}
-                  >
-                    {ct.avatarUrl ? (
-                      <img
-                        src={ct.avatarUrl}
-                        alt={ct.nickname}
-                        className="w-10 h-10 rounded-full object-cover border border-[#01BC8D] group-hover:scale-105 group-hover:ring-2 group-hover:ring-[#01BC8D] transition-all shadow-[0_0_10px_rgba(1,188,141,0.25)]"
-                      />
-                    ) : (
-                      <div className="w-10 h-10 rounded-full bg-[#0D2B24] text-[#01BC8D] group-hover:bg-[#01BC8D] group-hover:text-[#0B0E11] flex items-center justify-center font-bold text-xs border border-[#01BC8D]/50 group-hover:ring-2 group-hover:ring-[#01BC8D] transition-all shadow-[0_0_10px_rgba(1,188,141,0.25)]">
-                        {ct.nickname.slice(0, 2).toUpperCase()}
-                      </div>
-                    )}
-                    <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-[#0B0E11] border border-[#01BC8D] flex items-center justify-center text-[9px] text-[#01BC8D]">
-                      ↗
-                    </span>
-                  </button>
+        {(() => {
+          const displayedTraders =
+            copiedTradersScope === 'ACTIVE' && accounts.length > 1
+              ? copiedTraders.filter(
+                  (ct) => (ct.accountId || 'acc_default') === activeAccountId
+                )
+              : copiedTraders;
 
-                  <div>
-                    {/* Trader Name - Clickable to open trader statistics */}
-                    <div className="flex items-center gap-1.5 flex-wrap">
+          if (displayedTraders.length === 0) {
+            return (
+              <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-4 text-center text-xs text-[#8A99AD]">
+                لا يوجد متداولون منسوخون في «{activeAccountName}» حالياً. اضغط على{' '}
+                <strong className="text-[#01BC8D]">+ إضافة متداول</strong> أو{' '}
+                <strong className="text-[#01BC8D]">+ إضافة حوت</strong> واختر الحساب عند الضغط على زر النسخ.
+              </div>
+            );
+          }
+
+          return (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {displayedTraders.map((ct) => {
+                const targetAccId = ct.accountId || 'acc_default';
+                const targetAccObj = accounts.find((a) => a.id === targetAccId);
+                const targetAccName =
+                  targetAccObj?.name || ct.accountName || activeAccountName;
+                const targetAccSettings = targetAccObj?.settings || settings;
+
+                return (
+                  <div
+                    key={`${ct.source}_${ct.traderId}_${targetAccId}`}
+                    className="bg-[#1A222B] border border-[#232E3A] hover:border-[#01BC8D]/50 rounded-xl p-3 flex items-center justify-between gap-2 transition-all shadow-sm"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      {/* Trader Avatar / Photo - Clickable to open trader statistics */}
                       <button
                         type="button"
                         onClick={() => handleTraderClick(ct.nickname, ct.traderId, ct.source)}
-                        className="font-bold text-xs sm:text-sm text-white hover:text-[#01BC8D] flex items-center gap-1 cursor-pointer transition-colors text-right group"
+                        className="relative group shrink-0 cursor-pointer focus:outline-none"
                         title={`اضغط للدخول إلى صفحة إحصائيات المتداول ${ct.nickname}`}
                       >
-                        <span className="group-hover:underline">{ct.nickname}</span>
-                        <ExternalLink className="w-3 h-3 text-[#01BC8D] opacity-70 group-hover:opacity-100" />
+                        {ct.avatarUrl ? (
+                          <img
+                            src={ct.avatarUrl}
+                            alt={ct.nickname}
+                            className="w-10 h-10 rounded-full object-cover border border-[#01BC8D] group-hover:scale-105 group-hover:ring-2 group-hover:ring-[#01BC8D] transition-all shadow-[0_0_10px_rgba(1,188,141,0.25)]"
+                          />
+                        ) : (
+                          <div className="w-10 h-10 rounded-full bg-[#0D2B24] text-[#01BC8D] group-hover:bg-[#01BC8D] group-hover:text-[#0B0E11] flex items-center justify-center font-bold text-xs border border-[#01BC8D]/50 group-hover:ring-2 group-hover:ring-[#01BC8D] transition-all shadow-[0_0_10px_rgba(1,188,141,0.25)]">
+                            {ct.nickname.slice(0, 2).toUpperCase()}
+                          </div>
+                        )}
+                        <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-[#0B0E11] border border-[#01BC8D] flex items-center justify-center text-[9px] text-[#01BC8D]">
+                          ↗
+                        </span>
                       </button>
-                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#0B0E11] text-[#01BC8D] font-mono">
-                        {ct.source === 'SMART_MONEY' ? 'WHALE' : 'COPY'}
-                      </span>
-                    </div>
 
-                    <div className="text-[10px] text-[#8A99AD] mt-0.5">
-                      حجم صفقتك المخصص: <strong className="text-white font-mono">{settings.tradeValueUsdt}$</strong> • رافعتك:{' '}
-                      <strong className="text-[#01BC8D] font-mono">{settings.leverage}x</strong>
+                      <div>
+                        {/* Trader Name - Clickable to open trader statistics */}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => handleTraderClick(ct.nickname, ct.traderId, ct.source)}
+                            className="font-bold text-xs sm:text-sm text-white hover:text-[#01BC8D] flex items-center gap-1 cursor-pointer transition-colors text-right group"
+                            title={`اضغط للدخول إلى صفحة إحصائيات المتداول ${ct.nickname}`}
+                          >
+                            <span className="group-hover:underline">{ct.nickname}</span>
+                            <ExternalLink className="w-3 h-3 text-[#01BC8D] opacity-70 group-hover:opacity-100" />
+                          </button>
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#0B0E11] text-[#01BC8D] font-mono">
+                            {ct.source === 'SMART_MONEY' ? 'WHALE' : 'COPY'}
+                          </span>
+                          <span className="text-[9px] px-2 py-0.5 rounded bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 font-bold">
+                            حساب: {targetAccName}
+                          </span>
+                        </div>
+
+                        <div className="text-[10px] text-[#8A99AD] mt-0.5">
+                          حجم صفقتك المخصص:{' '}
+                          <strong className="text-white font-mono">
+                            {targetAccSettings.tradeValueUsdt}$
+                          </strong>{' '}
+                          • رافعتك:{' '}
+                          <strong className="text-[#01BC8D] font-mono">
+                            {targetAccSettings.leverage}x
+                          </strong>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleTraderClick(ct.nickname, ct.traderId, ct.source)}
+                          className="text-[10px] text-[#01BC8D] hover:underline font-semibold flex items-center gap-1 mt-1 cursor-pointer"
+                          title={`عرض صفحة إحصائيات المتداول ${ct.nickname}`}
+                        >
+                          <span>عرض صفحة الإحصائيات ↗</span>
+                        </button>
+                      </div>
                     </div>
 
                     <button
-                      type="button"
-                      onClick={() => handleTraderClick(ct.nickname, ct.traderId, ct.source)}
-                      className="text-[10px] text-[#01BC8D] hover:underline font-semibold flex items-center gap-1 mt-1 cursor-pointer"
-                      title={`عرض صفحة إحصائيات المتداول ${ct.nickname}`}
+                      onClick={() => onRemoveCopiedTrader(ct.traderId, ct.source, targetAccId)}
+                      className="bg-[#F6465D]/15 hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/30 p-2 rounded-lg text-xs cursor-pointer shrink-0"
+                      title="إلغاء نسخ هذا المتداول من هذا الحساب"
                     >
-                      <span>عرض صفحة الإحصائيات ↗</span>
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
-                </div>
-
-                <button
-                  onClick={() => onRemoveCopiedTrader(ct.traderId, ct.source)}
-                  className="bg-[#F6465D]/15 hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/30 p-2 rounded-lg text-xs cursor-pointer shrink-0"
-                  title="إلغاء نسخ هذا المتداول"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
+                );
+              })}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Open Positions Card */}
@@ -2831,7 +3422,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
               <span>جدول سجل الصفقات المغلقة ({closedPositions.length})</span>
             </h3>
             <p className="text-[11px] text-[#8A99AD] mt-0.5">
-              سجل مفصل ومستقل عن الصفقات المفتوحة يوضح تاريخ الدخول والخروج، أسعار التنفيذ، العمولات، وصافي الأرباح المحققة.
+              سجل مفصل يوضح اسم المتداول المنسوخ، تاريخ الدخول والخروج، المدة الزمنية لاستمرار الصفقة، أسعار التنفيذ، العمولات، ونسبة وصافي الأرباح المحققة مع التصدير إلى Excel.
             </p>
           </div>
 
@@ -2870,30 +3461,41 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
 
         {closedPositions.length === 0 ? (
           <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-6 text-center text-xs text-[#8A99AD]">
-            لا توجد صفقات مغلقة في السجل حتى الآن. بمجرد إغلاق أي صفقة مفتوحة، ستظهر هنا في الجدول مع إمكانية تصديرها كملف Excel.
+            لا توجد صفقات مغلقة في السجل حتى الآن. بمجرد إغلاق أي صفقة مفتوحة، ستظهر هنا في الجدول مع إمكانية تصديرها كملف Excel شامل (اسم المتداول المنسوخ، نسبة الربح المحققة، والمدة الزمنية).
           </div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-[#232E3A] bg-[#0B0E11]">
             <table className="w-full text-right border-collapse text-xs">
               <thead>
                 <tr className="bg-[#1A222B] text-[#8A99AD] border-b border-[#232E3A] text-[11px]">
-                  <th className="py-3 px-3 font-bold text-center">#</th>
+                  <th className="py-3 px-2.5 font-bold text-center">#</th>
                   <th className="py-3 px-3 font-bold">العملة / الزوج</th>
-                  <th className="py-3 px-3 font-bold">قيمة الصفقة</th>
-                  <th className="py-3 px-3 font-bold">تاريخ الدخول</th>
-                  <th className="py-3 px-3 font-bold">تاريخ الخروج</th>
-                  <th className="py-3 px-3 font-bold">سعر الدخول</th>
-                  <th className="py-3 px-3 font-bold">سعر الخروج</th>
-                  <th className="py-3 px-3 font-bold">العمولة</th>
-                  <th className="py-3 px-3 font-bold">الأرباح المحققة (PNL)</th>
+                  <th className="py-3 px-3 font-bold">المتداول المنسوخ</th>
+                  <th className="py-3 px-2.5 font-bold">قيمة الصفقة</th>
+                  <th className="py-3 px-2.5 font-bold">تاريخ الدخول</th>
+                  <th className="py-3 px-2.5 font-bold">تاريخ الخروج</th>
+                  <th className="py-3 px-2.5 font-bold">مدة الصفقة</th>
+                  <th className="py-3 px-2.5 font-bold">سعر الدخول</th>
+                  <th className="py-3 px-2.5 font-bold">سعر الخروج</th>
+                  <th className="py-3 px-2.5 font-bold">العمولة</th>
+                  <th className="py-3 px-3 font-bold">صافي الربح (USDT)</th>
+                  <th className="py-3 px-3 font-bold">نسبة الربح (%)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1A222B]">
                 {closedPositions.map((cp, index) => {
                   const rPnl = cp.realizedPnl || 0;
-                  const margin = cp.marginUsdt || settings.tradeValueUsdt;
+                  const margin = cp.initialMarginUsdt || cp.marginUsdt || settings.tradeValueUsdt;
                   const roiPct = margin > 0 ? (rPnl / margin) * 100 : 0;
                   const isProfit = rPnl >= 0;
+                  const durMs = getTradeDurationMs(cp);
+                  const durCompact = formatTradeDuration(durMs, 'COMPACT');
+                  const durFull = formatTradeDuration(durMs, 'FULL');
+                  const traderName = cp.sourceTraderName || 'تداول يدوي';
+                  const isCopiedTrader =
+                    Boolean(cp.sourceTraderName) &&
+                    cp.sourceTraderName !== 'يدوي' &&
+                    cp.sourceTraderName !== 'تداول يدوي';
 
                   const openTimeStr = new Date(cp.openTime)
                     .toLocaleString('ar-EG-u-nu-latn', {
@@ -2924,77 +3526,109 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                       key={cp.id}
                       className="hover:bg-[#12171D] transition-colors"
                     >
-                      <td className="py-3 px-3 text-center font-mono text-[#8A99AD]">
+                      <td className="py-3 px-2.5 text-center font-mono text-[#8A99AD]">
                         {index + 1}
                       </td>
                       <td className="py-3 px-3">
                         <div className="flex items-center gap-2">
                           <CoinIcon symbol={cp.symbol} size="sm" />
-                          <div>
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-bold font-mono text-white">
-                                {cp.symbol}
-                              </span>
-                              <span
-                                className={`px-1.5 py-0.5 rounded text-[9px] font-bold font-mono ${
-                                  cp.side === 'LONG'
-                                    ? 'bg-[#0D2B24] text-[#01BC8D]'
-                                    : 'bg-[#2B1216] text-[#F6465D]'
-                                }`}
-                              >
-                                {cp.side} {cp.leverage}x
-                              </span>
-                            </div>
-                            {cp.sourceTraderName && (
-                              <button
-                                type="button"
-                                onClick={() => handleTraderClick(cp.sourceTraderName, cp.sourceTraderId, cp.sourceType)}
-                                className="text-[10px] text-[#01BC8D] hover:text-[#00D49F] hover:underline block mt-0.5 text-right font-medium cursor-pointer transition-colors"
-                                title={`اضغط للدخول إلى صفحة إحصائيات المتداول ${cp.sourceTraderName}`}
-                              >
-                                {cp.sourceTraderName} ↗
-                              </button>
-                            )}
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold font-mono text-white">
+                              {cp.symbol}
+                            </span>
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-bold font-mono ${
+                                cp.side === 'LONG'
+                                  ? 'bg-[#0D2B24] text-[#01BC8D]'
+                                  : 'bg-[#2B1216] text-[#F6465D]'
+                              }`}
+                            >
+                              {cp.side} {cp.leverage}x
+                            </span>
                           </div>
                         </div>
                       </td>
-                      <td className="py-3 px-3 font-mono font-bold text-white tabular-nums whitespace-nowrap">
+                      <td className="py-3 px-3 whitespace-nowrap">
+                        {isCopiedTrader ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleTraderClick(
+                                cp.sourceTraderName,
+                                cp.sourceTraderId,
+                                cp.sourceType
+                              )
+                            }
+                            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-[#0D2B24]/70 border border-[#01BC8D]/30 text-[11px] text-[#01BC8D] hover:bg-[#0D2B24] hover:border-[#01BC8D] font-semibold cursor-pointer transition-all"
+                            title={`اضغط للدخول إلى صفحة إحصائيات المتداول ${traderName}`}
+                          >
+                            {cp.sourceType === 'SMART_MONEY' ? (
+                              <WhaleIcon className="w-3 h-3 shrink-0" />
+                            ) : (
+                              <Copy className="w-3 h-3 shrink-0" />
+                            )}
+                            <span>{traderName}</span>
+                            <span className="text-[9px] opacity-80">↗</span>
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-[#8A99AD] bg-[#12171D] border border-[#232E3A] px-2 py-0.5 rounded-md">
+                            {traderName}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-2.5 font-mono font-bold text-white tabular-nums whitespace-nowrap">
                         {margin.toFixed(2)} $
                       </td>
-                      <td className="py-3 px-3 font-mono text-[11px] text-[#8A99AD] whitespace-nowrap">
+                      <td className="py-3 px-2.5 font-mono text-[11px] text-[#8A99AD] whitespace-nowrap">
                         {openTimeStr}
                       </td>
-                      <td className="py-3 px-3 font-mono text-[11px] text-[#8A99AD] whitespace-nowrap">
+                      <td className="py-3 px-2.5 font-mono text-[11px] text-[#8A99AD] whitespace-nowrap">
                         {closeTimeStr}
                       </td>
-                      <td className="py-3 px-3 font-mono text-white tabular-nums whitespace-nowrap">
-                        {cp.entryPrice.toFixed(cp.entryPrice > 50 ? 2 : 4)}
-                      </td>
-                      <td className="py-3 px-3 font-mono text-white tabular-nums whitespace-nowrap">
-                        {(cp.exitPrice || 0).toFixed((cp.exitPrice || 0) > 50 ? 2 : 4)}
-                      </td>
-                      <td className="py-3 px-3 font-mono text-[#F6465D] tabular-nums whitespace-nowrap">
-                        {(cp.commissionUsdt || 0).toFixed(3)} $
-                      </td>
-                      <td className="py-3 px-3 whitespace-nowrap">
-                        <div className="font-mono tabular-nums">
-                          <span
-                            className={`font-bold text-xs ${
-                              isProfit ? 'text-[#01BC8D]' : 'text-[#F6465D]'
-                            }`}
-                          >
-                            {isProfit ? '+' : ''}
-                            {rPnl.toFixed(2)} USDT
+                      <td
+                        className="py-3 px-2.5 whitespace-nowrap"
+                        title={`المدة الكاملة: ${durFull.textAr} (${durFull.hhmmss})`}
+                      >
+                        <div className="inline-flex flex-col bg-[#12171D] border border-[#232E3A] px-2 py-0.5 rounded-lg">
+                          <span className="text-[11px] font-bold text-white">
+                            {durCompact.textAr}
                           </span>
-                          <span
-                            className={`block text-[10px] font-bold ${
-                              isProfit ? 'text-[#01BC8D]/80' : 'text-[#F6465D]/80'
-                            }`}
-                          >
-                            ({isProfit ? '+' : ''}
-                            {roiPct.toFixed(2)}%)
+                          <span className="text-[9px] font-mono text-[#8A99AD]" dir="ltr">
+                            {durCompact.hhmmss}
                           </span>
                         </div>
+                      </td>
+                      <td className="py-3 px-2.5 font-mono text-white tabular-nums whitespace-nowrap">
+                        {cp.entryPrice.toFixed(cp.entryPrice > 50 ? 2 : 4)}
+                      </td>
+                      <td className="py-3 px-2.5 font-mono text-white tabular-nums whitespace-nowrap">
+                        {(cp.exitPrice || 0).toFixed((cp.exitPrice || 0) > 50 ? 2 : 4)}
+                      </td>
+                      <td className="py-3 px-2.5 font-mono text-[#F6465D] tabular-nums whitespace-nowrap">
+                        {(cp.commissionUsdt || 0).toFixed(3)} $
+                      </td>
+                      <td className="py-3 px-3 whitespace-nowrap font-mono tabular-nums">
+                        <span
+                          className={`font-bold text-xs ${
+                            isProfit ? 'text-[#01BC8D]' : 'text-[#F6465D]'
+                          }`}
+                        >
+                          {isProfit ? '+' : ''}
+                          {rPnl.toFixed(2)} USDT
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 whitespace-nowrap font-mono tabular-nums">
+                        <span
+                          dir="ltr"
+                          className={`inline-block px-2 py-0.5 rounded-md font-bold text-[11px] ${
+                            isProfit
+                              ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/30'
+                              : 'bg-[#2B1216] text-[#F6465D] border border-[#F6465D]/30'
+                          }`}
+                        >
+                          {isProfit ? '+' : ''}
+                          {roiPct.toFixed(2)}%
+                        </span>
                       </td>
                     </tr>
                   );
@@ -3002,20 +3636,36 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
               </tbody>
               <tfoot>
                 <tr className="bg-[#1A222B] border-t border-[#232E3A] font-bold text-xs">
-                  <td colSpan={2} className="py-3 px-3 text-white">
+                  <td colSpan={3} className="py-3 px-3 text-white">
                     إجمالي السجل ({closedPositions.length} صفقة مغلقة)
                   </td>
-                  <td className="py-3 px-3 font-mono text-white tabular-nums">
+                  <td className="py-3 px-2.5 font-mono text-white tabular-nums">
                     {closedPositions
-                      .reduce((acc, cp) => acc + (cp.marginUsdt || settings.tradeValueUsdt), 0)
+                      .reduce(
+                        (acc, cp) =>
+                          acc + (cp.initialMarginUsdt || cp.marginUsdt || settings.tradeValueUsdt),
+                        0
+                      )
                       .toFixed(2)}{' '}
                     $
                   </td>
-                  <td colSpan={4} className="py-3 px-3 text-[#8A99AD] text-[11px]">
+                  <td colSpan={2} className="py-3 px-2.5 text-[#8A99AD] text-[11px]">
                     رابحة: {closedPositions.filter((c) => (c.realizedPnl || 0) > 0).length} • خاسرة:{' '}
                     {closedPositions.filter((c) => (c.realizedPnl || 0) < 0).length}
                   </td>
-                  <td className="py-3 px-3 font-mono text-[#F6465D] tabular-nums">
+                  <td className="py-3 px-2.5 text-[#01BC8D] text-[11px] whitespace-nowrap">
+                    {(() => {
+                      const totalDur = closedPositions.reduce(
+                        (acc, cp) => acc + getTradeDurationMs(cp),
+                        0
+                      );
+                      const avgDur =
+                        closedPositions.length > 0 ? totalDur / closedPositions.length : 0;
+                      return `متوسط: ${formatTradeDuration(avgDur, 'COMPACT').textAr}`;
+                    })()}
+                  </td>
+                  <td colSpan={2} className="py-3 px-2.5" />
+                  <td className="py-3 px-2.5 font-mono text-[#F6465D] tabular-nums">
                     {closedPositions
                       .reduce((acc, cp) => acc + (cp.commissionUsdt || 0), 0)
                       .toFixed(3)}{' '}
@@ -3031,6 +3681,29 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                         <span className={totalPnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'}>
                           {totalPnl >= 0 ? '+' : ''}
                           {totalPnl.toFixed(2)} USDT
+                        </span>
+                      );
+                    })()}
+                  </td>
+                  <td className="py-3 px-3 font-mono tabular-nums">
+                    {(() => {
+                      const totalPnl = closedPositions.reduce(
+                        (acc, cp) => acc + (cp.realizedPnl || 0),
+                        0
+                      );
+                      const totalMarg = closedPositions.reduce(
+                        (acc, cp) =>
+                          acc + (cp.initialMarginUsdt || cp.marginUsdt || settings.tradeValueUsdt),
+                        0
+                      );
+                      const totalPct = totalMarg > 0 ? (totalPnl / totalMarg) * 100 : 0;
+                      return (
+                        <span
+                          dir="ltr"
+                          className={totalPct >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'}
+                        >
+                          {totalPct >= 0 ? '+' : ''}
+                          {totalPct.toFixed(2)}%
                         </span>
                       );
                     })()}

@@ -210,10 +210,81 @@ export const App: React.FC = () => {
     handleTestBinanceConnection(cleared);
   };
 
+  // Multi-Account Management Handlers (فتح وتسمية وإدارة عدة حسابات افتراضية في نفس الوقت)
+  const handleSelectVirtualAccount = useCallback(
+    (accountId: string) => {
+      const snap = paperEngine.setActiveAccount(accountId, pricesMap);
+      setPaperSnapshot(snap);
+    },
+    [pricesMap]
+  );
+
+  const handleCreateVirtualAccount = useCallback(
+    (name: string, initialBalance?: number): string => {
+      const created = paperEngine.createAccount(name, initialBalance, true);
+      updatePaperSnapshot();
+      return created.id;
+    },
+    [updatePaperSnapshot]
+  );
+
+  const handleRenameVirtualAccount = useCallback(
+    (accountId: string, newName: string) => {
+      const cleanName = newName.trim();
+      if (!cleanName) return;
+      paperEngine.renameAccount(accountId, cleanName);
+
+      // Update accountName in copied traders storage
+      ['whale_copied_traders_ct', 'whale_copied_traders_sm'].forEach((key) => {
+        try {
+          const raw = localStorage.getItem(key);
+          if (raw) {
+            const arr: ActiveCopiedTrader[] = JSON.parse(raw);
+            const updated = arr.map((ct) =>
+              (ct.accountId || 'acc_default') === accountId
+                ? { ...ct, accountName: cleanName }
+                : ct
+            );
+            localStorage.setItem(key, JSON.stringify(updated));
+          }
+        } catch {
+          // ignore
+        }
+      });
+
+      refreshCopiedTradersList();
+      updatePaperSnapshot();
+    },
+    [refreshCopiedTradersList, updatePaperSnapshot]
+  );
+
+  const handleDeleteVirtualAccount = useCallback(
+    (accountId: string) => {
+      const snap = paperEngine.deleteAccount(accountId, pricesMap);
+      setPaperSnapshot(snap);
+
+      // Remove copied traders linked exclusively to the deleted account
+      ['whale_copied_traders_ct', 'whale_copied_traders_sm'].forEach((key) => {
+        try {
+          const raw = localStorage.getItem(key);
+          if (raw) {
+            const arr: ActiveCopiedTrader[] = JSON.parse(raw);
+            const filtered = arr.filter((ct) => (ct.accountId || 'acc_default') !== accountId);
+            localStorage.setItem(key, JSON.stringify(filtered));
+          }
+        } catch {
+          // ignore
+        }
+      });
+      refreshCopiedTradersList();
+    },
+    [pricesMap, refreshCopiedTradersList]
+  );
+
   // Update Trade Execution Settings (size, leverage, commission, maxConcurrentTrades, VIRTUAL/REAL mode)
   const handleUpdateTradeSettings = useCallback(
-    (partial: Partial<TradeExecutionSettings>) => {
-      const updated = paperEngine.updateSettings(partial);
+    (partial: Partial<TradeExecutionSettings>, accountId?: string) => {
+      const updated = paperEngine.updateSettings(partial, accountId);
       updatePaperSnapshot();
 
       // Keep KuCoin config synchronized with mode & leverage
@@ -233,8 +304,8 @@ export const App: React.FC = () => {
 
   // Set or reset Virtual Balance
   const handleSetVirtualBalance = useCallback(
-    (newBalance: number, resetPositions: boolean) => {
-      paperEngine.setVirtualBalance(newBalance, resetPositions);
+    (newBalance: number, resetPositions: boolean, accountId?: string) => {
+      paperEngine.setVirtualBalance(newBalance, resetPositions, accountId);
       updatePaperSnapshot();
     },
     [updatePaperSnapshot]
@@ -266,7 +337,7 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [binanceConfig]);
 
-  // Sync a copied trader's Positions and Latest records using USER's trade settings
+  // Sync a copied trader's Positions and Latest records using the target Account's trade settings
   const handleSyncTraderToEngine = useCallback(
     (params: {
       traderId: string;
@@ -275,22 +346,25 @@ export const App: React.FC = () => {
       positions: TraderOpenPosition[];
       latestRecords: TraderLatestRecord[];
       marginPerTradeUsdt: number;
+      accountId?: string;
     }): CopiedSyncLog[] => {
-      const currentSettings = paperEngine.getSettings();
+      const targetAcc = paperEngine.getAccount(params.accountId);
+      const currentSettings = targetAcc.settings;
       const userTradeValue = currentSettings.enforceUserSizeOnCopy
         ? currentSettings.tradeValueUsdt
         : params.marginPerTradeUsdt || currentSettings.tradeValueUsdt;
       const userLeverage = currentSettings.leverage;
 
-      // 1. Sync to local copy/trading engine with user's size, leverage, commission & max concurrent limit
+      // 1. Sync to target virtual account with that account's size, leverage, commission & max concurrent limit
       const logs = paperEngine.syncTraderPositionsAndRecords({
         ...params,
         marginPerTradeUsdt: userTradeValue,
+        accountId: targetAcc.id,
       });
       updatePaperSnapshot();
       setTimeout(refreshCopiedTradersList, 100);
 
-      // 2. Route synced entries and scale-ins to KuCoin API with user's configured settings
+      // 2. Route synced entries and scale-ins to KuCoin API with that account's configured settings
       for (const log of logs) {
         if (log.action === 'POSITION_SYNC' || log.action === 'ENTRY' || log.action === 'SCALE_IN') {
           if (log.quantity > 0) {
@@ -311,8 +385,8 @@ export const App: React.FC = () => {
               amountUsdt: orderAmountUsdt,
               entryPrice: log.price,
               leverage: userLeverage,
-              sourceTraderName: params.traderName,
-              sourceSignal: `Binance ${params.source} (${log.action} • ${orderAmountUsdt}$ × ${userLeverage}x)`,
+              sourceTraderName: `${params.traderName} (${targetAcc.name})`,
+              sourceSignal: `Binance ${params.source} [${targetAcc.name}] (${log.action} • ${orderAmountUsdt}$ × ${userLeverage}x)`,
             })
               .then((ord) => {
                 setKucoinConnectionState((prev) => ({
@@ -335,11 +409,12 @@ export const App: React.FC = () => {
     [kucoinConfig, updatePaperSnapshot, refreshCopiedTradersList]
   );
 
-  // Copy a single position using USER's configured Trade Settings
+  // Copy a single position using the target Account's configured Trade Settings
   const handleCopySinglePosition = useCallback(
-    (pos: TraderOpenPosition, traderName: string, marginUsdt: number) => {
+    (pos: TraderOpenPosition, traderName: string, marginUsdt: number, accountId?: string) => {
       addWatchedFuturesSymbol(pos.symbol);
-      const currentSettings = paperEngine.getSettings();
+      const targetAcc = paperEngine.getAccount(accountId);
+      const currentSettings = targetAcc.settings;
       const price =
         pos.markPrice > 0
           ? pos.markPrice
@@ -366,6 +441,7 @@ export const App: React.FC = () => {
           traderEntryTime: pos.entryTime,
           traderScaleAdjustments: pos.scaleAdjustments,
           currentScalePercent: pos.currentScalePercent,
+          accountId: targetAcc.id,
         });
         updatePaperSnapshot();
       } catch (e) {
@@ -373,7 +449,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Route to KuCoin with user's size & leverage
+      // Route to KuCoin with target account's size & leverage
       executeKuCoinOrder({
         config: {
           ...kucoinConfig,
@@ -384,8 +460,8 @@ export const App: React.FC = () => {
         amountUsdt: effectiveMargin,
         entryPrice: price,
         leverage: effectiveLeverage,
-        sourceTraderName: traderName,
-        sourceSignal: `Single Copy (${pos.symbol} ${pos.side} • ${effectiveMargin}$ × ${effectiveLeverage}x)`,
+        sourceTraderName: `${traderName} (${targetAcc.name})`,
+        sourceSignal: `Single Copy [${targetAcc.name}] (${pos.symbol} ${pos.side} • ${effectiveMargin}$ × ${effectiveLeverage}x)`,
       })
         .then((ord) => {
           setKucoinConnectionState((prev) => ({
@@ -400,14 +476,14 @@ export const App: React.FC = () => {
     [kucoinConfig, pricesMap, updatePaperSnapshot]
   );
 
-  // Sync ALL currently copied traders across both Copy Trading & Whales
+  // Sync ALL currently copied traders across both Copy Trading & Whales into their respective virtual accounts
   const handleSyncAllCopiedTraders = useCallback(async () => {
     const list = loadAllCopiedTradersFromStorage();
     if (list.length === 0) return;
     setIsSyncingAll(true);
-    const currentSettings = paperEngine.getSettings();
 
     for (const ct of list) {
+      const targetAcc = paperEngine.getAccount(ct.accountId);
       try {
         if (ct.source === 'COPY_TRADING') {
           const data = await fetchCopyTraderFullData(ct.traderId, null, connectionState.tickers);
@@ -417,7 +493,8 @@ export const App: React.FC = () => {
             source: 'COPY_TRADING',
             positions: data.positions,
             latestRecords: data.latestRecords,
-            marginPerTradeUsdt: currentSettings.tradeValueUsdt,
+            marginPerTradeUsdt: targetAcc.settings.tradeValueUsdt,
+            accountId: targetAcc.id,
           });
         } else {
           const data = await fetchSmartMoneyWhaleDetail(ct.traderId, null, connectionState.tickers);
@@ -427,7 +504,8 @@ export const App: React.FC = () => {
             source: 'SMART_MONEY',
             positions: data.positions,
             latestRecords: data.latestRecords,
-            marginPerTradeUsdt: currentSettings.tradeValueUsdt,
+            marginPerTradeUsdt: targetAcc.settings.tradeValueUsdt,
+            accountId: targetAcc.id,
           });
         }
       } catch (e) {
@@ -438,16 +516,20 @@ export const App: React.FC = () => {
     updatePaperSnapshot();
   }, [connectionState.tickers, handleSyncTraderToEngine, updatePaperSnapshot]);
 
-  // Remove a copied trader from storage
+  // Remove a copied trader from storage (optionally scoped to a specific virtual account)
   const handleRemoveCopiedTrader = useCallback(
-    (traderId: string, source: 'COPY_TRADING' | 'SMART_MONEY') => {
+    (traderId: string, source: 'COPY_TRADING' | 'SMART_MONEY', accountId?: string) => {
       const storageKey =
         source === 'COPY_TRADING' ? 'whale_copied_traders_ct' : 'whale_copied_traders_sm';
       try {
         const raw = localStorage.getItem(storageKey);
         if (raw) {
           const arr: ActiveCopiedTrader[] = JSON.parse(raw);
-          const filtered = arr.filter((item) => item.traderId !== traderId);
+          const filtered = arr.filter((item) => {
+            if (item.traderId !== traderId) return true;
+            if (accountId && (item.accountId || 'acc_default') !== accountId) return true;
+            return false;
+          });
           localStorage.setItem(storageKey, JSON.stringify(filtered));
         }
       } catch {
@@ -720,6 +802,9 @@ export const App: React.FC = () => {
             kucoinConnectionState={kucoinConnectionState}
             tradeSettings={paperSnapshot.settings}
             openPositionsCount={openPositionsCount}
+            accounts={paperSnapshot.accounts}
+            activeAccountId={paperSnapshot.activeAccountId}
+            onCreateAccount={handleCreateVirtualAccount}
             onRefresh={() => handleTestBinanceConnection(binanceConfig)}
             onOpenKucoin={handleOpenKucoinApi}
             onSyncTraderToEngine={handleSyncTraderToEngine}
@@ -737,6 +822,9 @@ export const App: React.FC = () => {
             kucoinConnectionState={kucoinConnectionState}
             tradeSettings={paperSnapshot.settings}
             openPositionsCount={openPositionsCount}
+            accounts={paperSnapshot.accounts}
+            activeAccountId={paperSnapshot.activeAccountId}
+            onCreateAccount={handleCreateVirtualAccount}
             auto={autoCopy}
             onAutoChange={handleSetAutoCopy}
             onOpenApi={handleOpenBinanceApi}
@@ -756,6 +844,10 @@ export const App: React.FC = () => {
             paperSnapshot={paperSnapshot}
             copiedTraders={allCopiedTraders}
             isSyncingAll={isSyncingAll}
+            onSelectAccount={handleSelectVirtualAccount}
+            onCreateAccount={handleCreateVirtualAccount}
+            onRenameAccount={handleRenameVirtualAccount}
+            onDeleteAccount={handleDeleteVirtualAccount}
             onUpdateTradeSettings={handleUpdateTradeSettings}
             onSetVirtualBalance={handleSetVirtualBalance}
             onOpenOrder={handleOpenPaperOrder}

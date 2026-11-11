@@ -124,9 +124,28 @@ export interface PaperPosition {
   sourceTraderName?: string;
   sourceType?: 'COPY_TRADING' | 'SMART_MONEY' | 'MANUAL';
   executionMode?: TradingExecutionMode;
+  accountId?: string;
+  accountName?: string;
+}
+
+export interface PaperVirtualAccountSummary {
+  id: string;
+  name: string;
+  createdAt: number;
+  initialBalance: number;
+  availableBalance: number;
+  totalEquity: number;
+  unrealizedPnl: number;
+  totalCommissionsPaid: number;
+  openPositionsCount: number;
+  closedPositionsCount: number;
+  settings: TradeExecutionSettings;
 }
 
 export interface PaperAccountSnapshot {
+  activeAccountId: string;
+  activeAccountName: string;
+  accounts: PaperVirtualAccountSummary[];
   initialBalance: number;
   availableBalance: number;
   totalEquity: number;
@@ -302,6 +321,8 @@ export interface CopiedSyncLog {
   quantity: number;
   leverage: number;
   messageAr: string;
+  accountId?: string;
+  accountName?: string;
 }
 
 export interface ActiveCopiedTrader {
@@ -315,6 +336,8 @@ export interface ActiveCopiedTrader {
   syncedPositionsCount: number;
   syncedRecordsCount: number;
   autoFollowRecords: boolean;
+  accountId?: string;
+  accountName?: string;
 }
 
 // ==========================================

@@ -19,6 +19,7 @@ import {
 import { WhaleIcon } from './WhaleIcon';
 import { SparklineSvg, QuickTradeBar } from './SparklineSvg';
 import { CoinIcon } from './CoinIcon';
+import { AccountCopyPickerModal } from './AccountCopyPickerModal';
 import {
   BinanceConnectionState,
   SmartMoneyTraderItem,
@@ -33,6 +34,7 @@ import {
   KuCoinConfig,
   KuCoinConnectionState,
   TradeExecutionSettings,
+  PaperVirtualAccountSummary,
 } from '../types';
 import {
   fetchSmartMoneyTradersList,
@@ -45,6 +47,9 @@ interface WhalesTabProps {
   kucoinConnectionState?: KuCoinConnectionState;
   tradeSettings?: TradeExecutionSettings;
   openPositionsCount?: number;
+  accounts?: PaperVirtualAccountSummary[];
+  activeAccountId?: string;
+  onCreateAccount?: (name: string, initialBalance?: number) => string;
   onRefresh: () => void;
   onOpenKucoin?: () => void;
   onSyncTraderToEngine: (params: {
@@ -54,11 +59,13 @@ interface WhalesTabProps {
     positions: TraderOpenPosition[];
     latestRecords: TraderLatestRecord[];
     marginPerTradeUsdt: number;
+    accountId?: string;
   }) => CopiedSyncLog[];
   onCopySinglePosition: (
     pos: TraderOpenPosition,
     traderName: string,
-    marginUsdt: number
+    marginUsdt: number,
+    accountId?: string
   ) => void;
   onOpenSimulationTab: () => void;
   targetWhaleId?: string | null;
@@ -83,6 +90,9 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
   connectionState,
   tradeSettings,
   openPositionsCount = 0,
+  accounts = [],
+  activeAccountId = 'acc_default',
+  onCreateAccount,
   onRefresh,
   onSyncTraderToEngine,
   onCopySinglePosition,
@@ -111,6 +121,18 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
   const [whaleRecords, setWhaleRecords] = useState<TraderLatestRecord[]>([]);
   const [isLoadingDetail, setIsLoadingDetail] = useState<boolean>(false);
   const [detailSubTab, setDetailSubTab] = useState<'POSITIONS' | 'POSITION_DETAILS'>('POSITIONS');
+
+  // Pending Copy Action Modal State (اختيار الحساب الافتراضي عند الضغط على زر النسخ)
+  const [pendingCopyTarget, setPendingCopyTarget] = useState<
+    | { type: 'WHALE'; whale: SmartMoneyTraderItem }
+    | {
+        type: 'SINGLE_POSITION';
+        pos: TraderOpenPosition;
+        traderName: string;
+        customBanner?: string;
+      }
+    | null
+  >(null);
 
   // Copy Configuration & Active Copied Whales
   const marginPerTrade = tradeSettings?.tradeValueUsdt || 30;
@@ -203,11 +225,15 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
     }
   }, [targetWhaleId, whales, handleSelectWhale, onClearTargetWhaleId]);
 
-  // Copy a Whale: fetches `positions` and `position` details and syncs to engine
-  const handleCopyWhale = useCallback(
-    async (whale: SmartMoneyTraderItem) => {
+  // Execute Copy Whale into a chosen Virtual Account
+  const executeCopyWhaleToAccount = useCallback(
+    async (whale: SmartMoneyTraderItem, targetAccountId: string) => {
+      const targetAcc = accounts.find((a) => a.id === targetAccountId);
+      const targetAccName = targetAcc?.name || 'الحساب الافتراضي';
+      const accMarginPerTrade = targetAcc?.settings.tradeValueUsdt || marginPerTrade;
+
       setFeedbackBanner(
-        `جاري جلب معلومات الصفقات من نافذتي Positions و Position للحوت ${whale.traderName}...`
+        `جاري جلب معلومات الصفقات من نافذتي Positions و Position للحوت ${whale.traderName} ونسخه إلى «${targetAccName}»...`
       );
 
       const fullData = await fetchSmartMoneyWhaleDetail(
@@ -229,18 +255,26 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
         source: 'SMART_MONEY',
         positions: fullData.positions,
         latestRecords: fullData.latestRecords,
-        marginPerTradeUsdt: marginPerTrade,
+        marginPerTradeUsdt: accMarginPerTrade,
+        accountId: targetAccountId,
       });
 
       setSyncLogs((prev) => [...logs, ...prev].slice(0, 30));
 
-      const exists = copiedWhales.find((c) => c.traderId === whale.topTraderId);
+      const existsInAccount = copiedWhales.find(
+        (c) =>
+          c.traderId === whale.topTraderId &&
+          (c.accountId || 'acc_default') === targetAccountId
+      );
       let updatedList: ActiveCopiedTrader[];
-      if (exists) {
+      if (existsInAccount) {
         updatedList = copiedWhales.map((c) =>
-          c.traderId === whale.topTraderId
+          c.traderId === whale.topTraderId &&
+          (c.accountId || 'acc_default') === targetAccountId
             ? {
                 ...c,
+                accountId: targetAccountId,
+                accountName: targetAccName,
                 syncedPositionsCount: fullData.positions.length,
                 syncedRecordsCount: fullData.positionHistory.length,
               }
@@ -253,12 +287,14 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
             nickname: whale.traderName,
             avatarUrl: whale.avatarUrl,
             source: 'SMART_MONEY',
-            copyBudgetUsdt: marginPerTrade,
+            copyBudgetUsdt: accMarginPerTrade,
             leverageOverride: null,
             startedAt: Date.now(),
             syncedPositionsCount: fullData.positions.length,
             syncedRecordsCount: fullData.positionHistory.length,
             autoFollowRecords: true,
+            accountId: targetAccountId,
+            accountName: targetAccName,
           },
           ...copiedWhales,
         ];
@@ -266,14 +302,30 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
       saveCopiedWhales(updatedList);
 
       setFeedbackBanner(
-        `تم تفعيل نسخ الحوت "${whale.traderName}" بنجاح! تم جلب (${fullData.positions.length}) صفقات من نافذة Positions و (${fullData.positionHistory.length}) تفاصيل مراكز من نافذة Position.`
+        `تم تفعيل نسخ الحوت "${whale.traderName}" في حساب «${targetAccName}» بنجاح! تم جلب (${fullData.positions.length}) صفقات من نافذة Positions و (${fullData.positionHistory.length}) تفاصيل مراكز.`
       );
     },
-    [connectionState.tickers, selectedWhaleId, onSyncTraderToEngine, marginPerTrade, copiedWhales]
+    [
+      accounts,
+      connectionState.tickers,
+      selectedWhaleId,
+      onSyncTraderToEngine,
+      marginPerTrade,
+      copiedWhales,
+    ]
   );
 
-  const handleStopCopyWhale = (traderId: string) => {
-    const updated = copiedWhales.filter((c) => c.traderId !== traderId);
+  // Open Account Picker Modal when user clicks "نسخ الحوت"
+  const handleCopyWhale = useCallback((whale: SmartMoneyTraderItem) => {
+    setPendingCopyTarget({ type: 'WHALE', whale });
+  }, []);
+
+  const handleStopCopyWhale = (traderId: string, accountId?: string) => {
+    const updated = copiedWhales.filter((c) => {
+      if (c.traderId !== traderId) return true;
+      if (accountId && (c.accountId || 'acc_default') !== accountId) return true;
+      return false;
+    });
     saveCopiedWhales(updated);
     setFeedbackBanner('تم إيقاف نسخ الحوت المحدد.');
   };
@@ -603,14 +655,12 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
 
                               <button
                                 onClick={() => {
-                                  onCopySinglePosition(
+                                  setPendingCopyTarget({
+                                    type: 'SINGLE_POSITION',
                                     pos,
-                                    whaleProfile.traderName,
-                                    marginPerTrade
-                                  );
-                                  setFeedbackBanner(
-                                    `تم نسخ مركز الحوت ${pos.symbol} (${pos.side} ${pos.leverage}x) من نافذة Positions بنجاح!`
-                                  );
+                                    traderName: whaleProfile.traderName,
+                                    customBanner: `تم نسخ مركز الحوت ${pos.symbol} (${pos.side} ${pos.leverage}x) من نافذة Positions`,
+                                  });
                                 }}
                                 className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-1.5 rounded-lg text-xs transition-colors cursor-pointer shrink-0"
                               >
@@ -789,8 +839,9 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
 
                               <button
                                 onClick={() => {
-                                  onCopySinglePosition(
-                                    {
+                                  setPendingCopyTarget({
+                                    type: 'SINGLE_POSITION',
+                                    pos: {
                                       id: item.id,
                                       symbol: item.symbol,
                                       collateral: 'USDT',
@@ -810,12 +861,9 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                                       currentScalePercent: 100,
                                       scaleAdjustments: item.scaleAdjustments,
                                     },
-                                    whaleProfile.traderName,
-                                    marginPerTrade
-                                  );
-                                  setFeedbackBanner(
-                                    `تم نسخ إعدادات المركز (${item.symbol} ${item.side}) من نافذة Position للحوت ${whaleProfile.traderName}`
-                                  );
+                                    traderName: whaleProfile.traderName,
+                                    customBanner: `تم نسخ إعدادات المركز (${item.symbol} ${item.side}) من نافذة Position للحوت ${whaleProfile.traderName}`,
+                                  });
                                 }}
                                 className="bg-[#12171D] hover:bg-[#212C37] text-[#01BC8D] border border-[#01BC8D]/40 px-3 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer"
                               >
@@ -985,7 +1033,10 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
               {whales.map((whale, index) => {
-                const isCopied = copiedWhales.some((c) => c.traderId === whale.topTraderId);
+                const whaleCopiedEntries = copiedWhales.filter(
+                  (c) => c.traderId === whale.topTraderId
+                );
+                const isCopied = whaleCopiedEntries.length > 0;
                 const inPos = whale.positionStatus === 'IN_POSITION';
 
                 return (
@@ -1048,7 +1099,9 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                         {isCopied ? (
                           <span className="bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/50 px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center gap-1.5 shadow-[0_0_10px_rgba(1,188,141,0.25)]">
                             <span className="w-2 h-2 rounded-full bg-[#01BC8D] animate-pulse" />
-                            <span>يتم النسخ الآن</span>
+                            <span>
+                              منسوخ ({whaleCopiedEntries.length > 1 ? `${whaleCopiedEntries.length} حسابات` : whaleCopiedEntries[0]?.accountName || 'يتم النسخ'})
+                            </span>
                           </span>
                         ) : (
                           <span
@@ -1125,13 +1178,23 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                       </button>
 
                       {isCopied ? (
-                        <button
-                          onClick={() => handleStopCopyWhale(whale.topTraderId)}
-                          className="bg-[#0D2B24] hover:bg-[#2B1216] text-[#01BC8D] hover:text-[#F6465D] border border-[#01BC8D]/50 hover:border-[#F6465D]/50 font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                        >
-                          <Square className="w-3.5 h-3.5" />
-                          <span>إيقاف النسخ</span>
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleCopyWhale(whale)}
+                            className="flex-1 bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2 px-2 rounded-xl text-[11px] flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                            title="نسخ هذا الحوت إلى حساب افتراضي آخر"
+                          >
+                            <Copy className="w-3 h-3" />
+                            <span>نسخ لحساب آخر</span>
+                          </button>
+                          <button
+                            onClick={() => handleStopCopyWhale(whale.topTraderId)}
+                            className="bg-[#2B1216] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/40 font-bold py-2 px-2.5 rounded-xl text-[11px] flex items-center justify-center cursor-pointer"
+                            title="إيقاف النسخ"
+                          >
+                            <Square className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       ) : (
                         <button
                           onClick={() => handleCopyWhale(whale)}
@@ -1182,6 +1245,57 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
           )}
         </>
       )}
+
+      {/* Account Selection Modal when clicking any Copy button */}
+      <AccountCopyPickerModal
+        isOpen={pendingCopyTarget !== null}
+        onClose={() => setPendingCopyTarget(null)}
+        titleAr={
+          pendingCopyTarget?.type === 'SINGLE_POSITION'
+            ? `اختيار الحساب الافتراضي لنسخ مركز ${pendingCopyTarget.pos.symbol}`
+            : 'اختيار الحساب الافتراضي لنسخ الحوت إليه'
+        }
+        targetName={
+          pendingCopyTarget?.type === 'WHALE'
+            ? pendingCopyTarget.whale.traderName
+            : pendingCopyTarget?.type === 'SINGLE_POSITION'
+            ? `${pendingCopyTarget.pos.symbol} (${pendingCopyTarget.traderName})`
+            : ''
+        }
+        accounts={accounts}
+        activeAccountId={activeAccountId}
+        copiedAccountIdsForTarget={
+          pendingCopyTarget?.type === 'WHALE'
+            ? copiedWhales
+                .filter((cw) => cw.traderId === pendingCopyTarget.whale.topTraderId)
+                .map((cw) => cw.accountId || 'acc_default')
+            : []
+        }
+        onCreateNewAccount={onCreateAccount}
+        onConfirmCopyToAccount={(chosenAccountId) => {
+          const target = pendingCopyTarget;
+          setPendingCopyTarget(null);
+          if (!target) return;
+
+          const chosenAcc = accounts.find((a) => a.id === chosenAccountId);
+          const chosenAccName = chosenAcc?.name || 'الحساب الافتراضي';
+          const chosenTradeVal = chosenAcc?.settings.tradeValueUsdt || marginPerTrade;
+
+          if (target.type === 'WHALE') {
+            executeCopyWhaleToAccount(target.whale, chosenAccountId);
+          } else if (target.type === 'SINGLE_POSITION') {
+            onCopySinglePosition(
+              target.pos,
+              target.traderName,
+              chosenTradeVal,
+              chosenAccountId
+            );
+            setFeedbackBanner(
+              `${target.customBanner || `تم نسخ مركز ${target.pos.symbol}`} إلى حساب «${chosenAccName}»!`
+            );
+          }
+        }}
+      />
     </div>
   );
 };
