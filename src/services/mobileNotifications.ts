@@ -1,0 +1,623 @@
+import {
+  MobileNotificationActionType,
+  MobileNotificationSettings,
+  MobileTradeNotification,
+  PaperPosition,
+} from '../types';
+
+const NOTIFICATIONS_STORAGE_KEY = 'whale_mobile_notifications_log_v1';
+const NOTIFICATION_SETTINGS_KEY = 'whale_mobile_notification_settings_v1';
+const MAX_STORED_NOTIFICATIONS = 100;
+
+export const DEFAULT_MOBILE_NOTIFICATION_SETTINGS: MobileNotificationSettings = {
+  enabled: true,
+  notifyOnOpen: true,
+  notifyOnScaleIn: true,
+  notifyOnPartialExit: true,
+  notifyOnFullExit: true,
+  soundEnabled: true,
+  vibrationEnabled: true,
+  browserPushEnabled: true,
+  inAppBannerEnabled: true,
+  telegramEnabled: false,
+  telegramBotToken: '',
+  telegramChatId: '',
+};
+
+type NotificationListener = (
+  latest: MobileTradeNotification | null,
+  all: MobileTradeNotification[],
+  settings: MobileNotificationSettings
+) => void;
+
+class MobileNotificationService {
+  private notifications: MobileTradeNotification[] = [];
+  private settings: MobileNotificationSettings = { ...DEFAULT_MOBILE_NOTIFICATION_SETTINGS };
+  private listeners: Set<NotificationListener> = new Set();
+
+  constructor() {
+    this.settings = this.loadSettings();
+    this.notifications = this.loadNotifications();
+  }
+
+  private loadSettings(): MobileNotificationSettings {
+    try {
+      const raw = localStorage.getItem(NOTIFICATION_SETTINGS_KEY);
+      if (raw) {
+        return { ...DEFAULT_MOBILE_NOTIFICATION_SETTINGS, ...JSON.parse(raw) };
+      }
+    } catch {
+      // ignore
+    }
+    return { ...DEFAULT_MOBILE_NOTIFICATION_SETTINGS };
+  }
+
+  private saveSettings(): void {
+    try {
+      localStorage.setItem(NOTIFICATION_SETTINGS_KEY, JSON.stringify(this.settings));
+    } catch {
+      // ignore
+    }
+  }
+
+  private loadNotifications(): MobileTradeNotification[] {
+    try {
+      const raw = localStorage.getItem(NOTIFICATIONS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // ignore
+    }
+    return [];
+  }
+
+  private saveNotifications(): void {
+    try {
+      localStorage.setItem(
+        NOTIFICATIONS_STORAGE_KEY,
+        JSON.stringify(this.notifications.slice(0, MAX_STORED_NOTIFICATIONS))
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  public getSettings(): MobileNotificationSettings {
+    return { ...this.settings };
+  }
+
+  public updateSettings(partial: Partial<MobileNotificationSettings>): MobileNotificationSettings {
+    this.settings = { ...this.settings, ...partial };
+    this.saveSettings();
+    this.emitChange(null);
+    return { ...this.settings };
+  }
+
+  public getNotifications(): MobileTradeNotification[] {
+    return [...this.notifications];
+  }
+
+  public getUnreadCount(): number {
+    return this.notifications.filter((n) => !n.read).length;
+  }
+
+  public markAllAsRead(): void {
+    let changed = false;
+    this.notifications = this.notifications.map((n) => {
+      if (!n.read) {
+        changed = true;
+        return { ...n, read: true };
+      }
+      return n;
+    });
+    if (changed) {
+      this.saveNotifications();
+      this.emitChange(null);
+    }
+  }
+
+  public markAsRead(id: string): void {
+    this.notifications = this.notifications.map((n) =>
+      n.id === id ? { ...n, read: true } : n
+    );
+    this.saveNotifications();
+    this.emitChange(null);
+  }
+
+  public clearAllNotifications(): void {
+    this.notifications = [];
+    this.saveNotifications();
+    this.emitChange(null);
+  }
+
+  public subscribe(listener: NotificationListener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private emitChange(latest: MobileTradeNotification | null): void {
+    const snapshot = [...this.notifications];
+    const currentSettings = { ...this.settings };
+    this.listeners.forEach((cb) => cb(latest, snapshot, currentSettings));
+  }
+
+  /**
+   * Request Browser/System Mobile Push Notification Permission
+   */
+  public async requestBrowserPermission(): Promise<NotificationPermission | 'unsupported'> {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      return 'unsupported';
+    }
+    if (Notification.permission === 'granted') {
+      return 'granted';
+    }
+    try {
+      const perm = await Notification.requestPermission();
+      return perm;
+    } catch {
+      return Notification.permission;
+    }
+  }
+
+  public getBrowserPermissionStatus(): NotificationPermission | 'unsupported' {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      return 'unsupported';
+    }
+    return Notification.permission;
+  }
+
+  /**
+   * Play distinct mobile sound chime using Web Audio API
+   */
+  private playChime(actionType: MobileNotificationActionType, isProfit: boolean = true): void {
+    if (!this.settings.soundEnabled || typeof window === 'undefined') return;
+    try {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+
+      const playTone = (freq: number, startOffset: number, duration: number, type: OscillatorType = 'sine', gainVal = 0.14) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + startOffset);
+        gain.gain.setValueAtTime(0.001, ctx.currentTime + startOffset);
+        gain.gain.exponentialRampToValueAtTime(gainVal, ctx.currentTime + startOffset + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startOffset + duration);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + startOffset);
+        osc.stop(ctx.currentTime + startOffset + duration);
+      };
+
+      if (actionType === 'OPEN_TRADE') {
+        // Ascending emerald chime
+        playTone(587.33, 0, 0.14, 'triangle', 0.15); // D5
+        playTone(880.0, 0.12, 0.22, 'triangle', 0.18); // A5
+      } else if (actionType === 'SCALE_IN') {
+        // Double reinforcement pulse
+        playTone(523.25, 0, 0.12, 'sine', 0.15); // C5
+        playTone(659.25, 0.1, 0.12, 'sine', 0.15); // E5
+        playTone(783.99, 0.2, 0.2, 'sine', 0.18); // G5
+      } else if (actionType === 'PARTIAL_EXIT') {
+        // Partial harvest two-tone
+        playTone(783.99, 0, 0.14, 'sine', 0.15);
+        playTone(659.25, 0.13, 0.2, 'sine', 0.15);
+      } else {
+        // FULL_EXIT
+        if (isProfit) {
+          playTone(523.25, 0, 0.12, 'triangle', 0.16);
+          playTone(659.25, 0.11, 0.12, 'triangle', 0.16);
+          playTone(1046.5, 0.22, 0.28, 'triangle', 0.2);
+        } else {
+          playTone(440.0, 0, 0.16, 'sine', 0.15);
+          playTone(349.23, 0.15, 0.24, 'sine', 0.15);
+        }
+      }
+    } catch {
+      // AudioContext blocked until user interaction
+    }
+  }
+
+  /**
+   * Vibrate mobile phone
+   */
+  private triggerVibration(actionType: MobileNotificationActionType): void {
+    if (!this.settings.vibrationEnabled || typeof navigator === 'undefined' || !navigator.vibrate) {
+      return;
+    }
+    try {
+      if (actionType === 'OPEN_TRADE') {
+        navigator.vibrate([120, 60, 140]);
+      } else if (actionType === 'SCALE_IN') {
+        navigator.vibrate([90, 50, 90, 50, 140]);
+      } else if (actionType === 'PARTIAL_EXIT') {
+        navigator.vibrate([100, 70, 100]);
+      } else {
+        navigator.vibrate([180, 80, 220]);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  /**
+   * Format price cleanly
+   */
+  private formatPrice(p: number): string {
+    if (!p || isNaN(p)) return '0.00';
+    if (p >= 1000) return p.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (p >= 1) return p.toFixed(4);
+    return p.toFixed(6);
+  }
+
+  /**
+   * Dispatch native system notification on Android / iOS PWA / Desktop Browser
+   */
+  private async sendBrowserSystemNotification(item: MobileTradeNotification): Promise<void> {
+    if (!this.settings.browserPushEnabled || typeof window === 'undefined' || !('Notification' in window)) {
+      return;
+    }
+
+    if (Notification.permission !== 'granted') {
+      return;
+    }
+
+    const sideAr = item.side === 'LONG' ? 'شراء Long 🟢' : 'بيع Short 🔴';
+    const modeAr = item.executionMode === 'REAL' ? 'حقيقي (KuCoin)' : 'افتراضي (Simulation)';
+    const lines: string[] = [
+      `العملة: ${item.symbol} | ${sideAr} (${item.leverage}x)`,
+      `المتداول المصدر: ${item.traderName} • الوضع: ${modeAr}`,
+    ];
+
+    if (item.actionType === 'OPEN_TRADE') {
+      lines.push(
+        `سعر الدخول: ${this.formatPrice(item.entryPrice)}$ | قيمة الصفقة: ${item.marginUsdt.toFixed(2)}$`,
+        `الكمية: ${item.quantity} | العمولة: ${item.commissionUsdt.toFixed(4)}$`
+      );
+    } else if (item.actionType === 'SCALE_IN') {
+      const addedUsdt = Math.abs(item.marginDeltaUsdt || 0);
+      lines.push(
+        `قيمة التدعيم: +${addedUsdt.toFixed(2)}$ (+${Math.abs(item.volumePercent)}%) | السعر: ${this.formatPrice(item.price)}$`,
+        `متوسط الدخول الجديد: ${this.formatPrice(item.entryPrice)}$ | إجمالي الهامش: ${item.marginUsdt.toFixed(2)}$ (${item.remainingScalePercent}%)`
+      );
+    } else if (item.actionType === 'PARTIAL_EXIT') {
+      const withdrawnUsdt = Math.abs(item.marginDeltaUsdt || 0);
+      const pnlVal = item.realizedPnlUsdt || 0;
+      const pnlSign = pnlVal >= 0 ? '+' : '';
+      lines.push(
+        `نسبة السحب: -${Math.abs(item.volumePercent)}% (${withdrawnUsdt.toFixed(2)}$) | سعر الخروج: ${this.formatPrice(item.exitPrice || item.price)}$`,
+        `الربح المحقق للجزء: ${pnlSign}${pnlVal.toFixed(2)}$ | المتبقي بالصفقة: ${item.remainingScalePercent}% (${item.marginUsdt.toFixed(2)}$)`
+      );
+    } else {
+      // FULL_EXIT
+      const pnlVal = item.realizedPnlUsdt || 0;
+      const pnlPct = item.realizedPnlPercent || 0;
+      const pnlSign = pnlVal >= 0 ? '+' : '';
+      lines.push(
+        `سعر الدخول: ${this.formatPrice(item.entryPrice)}$ ⬅️ سعر الخروج: ${this.formatPrice(item.exitPrice || item.price)}$`,
+        `صافي الربح/الخسارة: ${pnlSign}${pnlVal.toFixed(2)}$ (${pnlSign}${pnlPct.toFixed(2)}%) | العمولة: ${item.commissionUsdt.toFixed(4)}$`
+      );
+    }
+
+    const title = `${item.actionTitleAr} — ${item.symbol}`;
+    const body = lines.join('\n');
+
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg && 'showNotification' in reg) {
+          await reg.showNotification(title, {
+            body,
+            icon: '/assets/aistudio/icone_c1401ade.png',
+            badge: '/assets/aistudio/icone_c1401ade.png',
+            dir: 'rtl',
+            lang: 'ar',
+            tag: item.id,
+          });
+          return;
+        }
+      }
+      new Notification(title, {
+        body,
+        icon: '/assets/aistudio/icone_c1401ade.png',
+        dir: 'rtl',
+        lang: 'ar',
+        tag: item.id,
+      });
+    } catch {
+      // Fallback handled by in-app mobile banner
+    }
+  }
+
+  /**
+   * Send rich Telegram mobile push notification if enabled
+   */
+  public async sendTelegramPushNotification(item: MobileTradeNotification): Promise<boolean> {
+    if (
+      !this.settings.telegramEnabled ||
+      !this.settings.telegramBotToken.trim() ||
+      !this.settings.telegramChatId.trim()
+    ) {
+      return false;
+    }
+
+    const token = this.settings.telegramBotToken.trim();
+    const chatId = this.settings.telegramChatId.trim();
+    const sideBadge = item.side === 'LONG' ? '🟢 LONG (شراء)' : '🔴 SHORT (بيع)';
+    const modeBadge =
+      item.executionMode === 'REAL' ? '⚡ حقيقي (KuCoin Live)' : '🧪 محاكاة (Simulation)';
+    const timeStr = new Date(item.timestamp).toLocaleTimeString('ar-EG', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+
+    let detailsBlock = '';
+    if (item.actionType === 'OPEN_TRADE') {
+      detailsBlock = [
+        `💵 <b>قيمة الصفقة (الهامش):</b> <code>$${item.marginUsdt.toFixed(2)} USDT</code>`,
+        `🎯 <b>سعر الدخول:</b> <code>$${this.formatPrice(item.entryPrice)}</code>`,
+        `📦 <b>الكمية المنفذة:</b> <code>${item.quantity}</code>`,
+        `📊 <b>الحجم الابتدائي:</b> <code>100%</code>`,
+        `🧾 <b>العمولة:</b> <code>$${item.commissionUsdt.toFixed(4)}</code>`,
+      ].join('\n');
+    } else if (item.actionType === 'SCALE_IN') {
+      const addedUsdt = Math.abs(item.marginDeltaUsdt || 0);
+      detailsBlock = [
+        `➕ <b>المبلغ المضاف للتدعيم:</b> <code>+$${addedUsdt.toFixed(2)} USDT (+${Math.abs(item.volumePercent)}%)</code>`,
+        `⚡ <b>سعر التدعيم:</b> <code>$${this.formatPrice(item.price)}</code>`,
+        `🎯 <b>متوسط سعر الدخول الجديد:</b> <code>$${this.formatPrice(item.entryPrice)}</code>`,
+        `💼 <b>إجمالي قيمة الصفقة الآن:</b> <code>$${item.marginUsdt.toFixed(2)} USDT</code>`,
+        `📈 <b>نسبة حجم الصفقة الحالية:</b> <code>${item.remainingScalePercent}%</code>`,
+        `🧾 <b>إجمالي العمولة:</b> <code>$${item.commissionUsdt.toFixed(4)}</code>`,
+      ].join('\n');
+    } else if (item.actionType === 'PARTIAL_EXIT') {
+      const withdrawnUsdt = Math.abs(item.marginDeltaUsdt || 0);
+      const pnlVal = item.realizedPnlUsdt || 0;
+      const pnlEmoji = pnlVal >= 0 ? '✅' : '🔻';
+      const pnlSign = pnlVal >= 0 ? '+' : '';
+      detailsBlock = [
+        `➖ <b>الجزء المسحوب:</b> <code>-${Math.abs(item.volumePercent)}% ($${withdrawnUsdt.toFixed(2)} USDT)</code>`,
+        `🎯 <b>سعر الدخول:</b> <code>$${this.formatPrice(item.entryPrice)}</code>`,
+        `🏁 <b>سعر الخروج الجزئي:</b> <code>$${this.formatPrice(item.exitPrice || item.price)}</code>`,
+        `${pnlEmoji} <b>الربح/الخسارة المحققة للجزء:</b> <code>${pnlSign}$${pnlVal.toFixed(2)} USDT</code>`,
+        `💼 <b>الهامش المتبقي بالصفقة:</b> <code>$${item.marginUsdt.toFixed(2)} USDT (${item.remainingScalePercent}%)</code>`,
+      ].join('\n');
+    } else {
+      const pnlVal = item.realizedPnlUsdt || 0;
+      const pnlPct = item.realizedPnlPercent || 0;
+      const pnlEmoji = pnlVal >= 0 ? '🏆 ربح محقق' : '🔻 خسارة محققة';
+      const pnlSign = pnlVal >= 0 ? '+' : '';
+      detailsBlock = [
+        `🎯 <b>سعر الدخول:</b> <code>$${this.formatPrice(item.entryPrice)}</code>`,
+        `🏁 <b>سعر الخروج النهائي:</b> <code>$${this.formatPrice(item.exitPrice || item.price)}</code>`,
+        `📦 <b>الكمية المغلقة:</b> <code>${item.quantity}</code>`,
+        `${pnlEmoji}: <code>${pnlSign}$${pnlVal.toFixed(2)} USDT (${pnlSign}${pnlPct.toFixed(2)}%)</code>`,
+        `🧾 <b>إجمالي العمولة المقتطعة:</b> <code>$${item.commissionUsdt.toFixed(4)}</code>`,
+      ].join('\n');
+    }
+
+    const htmlMessage = [
+      `🔔 <b>${item.actionTitleAr}</b>`,
+      `━━━━━━━━━━━━━━━━━━`,
+      `🪙 <b>العملة:</b> <code>${item.symbol}</code>`,
+      `🧭 <b>الاتجاه والرافعة:</b> ${sideBadge} × <b>${item.leverage}x</b>`,
+      `👤 <b>المتداول المصدر:</b> ${item.traderName}`,
+      `⚙️ <b>وضع التنفيذ:</b> ${modeBadge}`,
+      `━━━━━━━━━━━━━━━━━━`,
+      detailsBlock,
+      `━━━━━━━━━━━━━━━━━━`,
+      `🕒 <b>الوقت:</b> ${timeStr}`,
+    ].join('\n');
+
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: htmlMessage,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Dispatch a full trade notification when a position is opened, scaled in, partially exited, or closed
+   */
+  public notifyTradeEvent(params: {
+    actionType: MobileNotificationActionType;
+    position: PaperPosition;
+    executionPrice: number;
+    volumePercent?: number;
+    marginDeltaUsdt?: number;
+    realizedPnlDeltaUsdt?: number;
+  }): MobileTradeNotification | null {
+    if (!this.settings.enabled) return null;
+
+    const { actionType, position, executionPrice, volumePercent, marginDeltaUsdt, realizedPnlDeltaUsdt } =
+      params;
+
+    if (actionType === 'OPEN_TRADE' && !this.settings.notifyOnOpen) return null;
+    if (actionType === 'SCALE_IN' && !this.settings.notifyOnScaleIn) return null;
+    if (actionType === 'PARTIAL_EXIT' && !this.settings.notifyOnPartialExit) return null;
+    if (actionType === 'FULL_EXIT' && !this.settings.notifyOnFullExit) return null;
+
+    const traderName =
+      position.sourceTraderName ||
+      (position.sourceType === 'SMART_MONEY'
+        ? 'حوت Smart Money'
+        : position.sourceType === 'COPY_TRADING'
+        ? 'متداول Copy Trading'
+        : 'صفقة يدوية');
+
+    let actionTitleAr = 'فتح صفقة جديدة';
+    let summaryTextAr = '';
+    let volPct = volumePercent ?? 100;
+    let remainingPct = position.currentScalePercent ?? 100;
+    let pnlUsdt: number | undefined = undefined;
+    let pnlPercent: number | undefined = undefined;
+
+    const baseMargin =
+      position.initialMarginUsdt || position.marginUsdt || 25;
+
+    if (actionType === 'OPEN_TRADE') {
+      actionTitleAr = '🟢 فتح صفقة جديدة';
+      volPct = 100;
+      remainingPct = position.currentScalePercent || 100;
+      summaryTextAr = `تم فتح صفقة ${position.side === 'LONG' ? 'شراء Long' : 'بيع Short'} على ${position.symbol} بقيمة ${position.marginUsdt.toFixed(2)}$ (${position.leverage}x) بسعر دخول ${this.formatPrice(position.entryPrice)}$`;
+    } else if (actionType === 'SCALE_IN') {
+      const addedUsdt = Math.abs(marginDeltaUsdt || 0);
+      volPct = Math.abs(volumePercent || 25);
+      remainingPct = position.currentScalePercent || 100 + volPct;
+      actionTitleAr = `🔵 تدعيم الصفقة (+${volPct}%)`;
+      summaryTextAr = `تم تدعيم صفقة ${position.symbol} بمبلغ +${addedUsdt.toFixed(2)}$ (+${volPct}%) عند سعر ${this.formatPrice(executionPrice)}$ • إجمالي الهامش الآن ${position.marginUsdt.toFixed(2)}$ (الحجم: ${remainingPct}%)`;
+    } else if (actionType === 'PARTIAL_EXIT') {
+      const withdrawnUsdt = Math.abs(marginDeltaUsdt || 0);
+      volPct = -Math.abs(volumePercent || 25);
+      remainingPct = position.currentScalePercent || 50;
+      pnlUsdt = realizedPnlDeltaUsdt ?? 0;
+      pnlPercent = withdrawnUsdt > 0 ? (pnlUsdt / withdrawnUsdt) * 100 : 0;
+      const pnlSign = pnlUsdt >= 0 ? '+' : '';
+      actionTitleAr = `🟠 سحب جزئي من الصفقة (-${Math.abs(volPct)}%)`;
+      summaryTextAr = `تم سحب ${Math.abs(volPct)}% (${withdrawnUsdt.toFixed(2)}$) من صفقة ${position.symbol} بسعر ${this.formatPrice(executionPrice)}$ • الربح المحقق للجزء: ${pnlSign}${pnlUsdt.toFixed(2)}$ • المتبقي: ${remainingPct}%`;
+    } else {
+      // FULL_EXIT
+      volPct = -100;
+      remainingPct = 0;
+      pnlUsdt = realizedPnlDeltaUsdt ?? position.realizedPnl ?? 0;
+      pnlPercent = baseMargin > 0 ? (pnlUsdt / baseMargin) * 100 : 0;
+      const pnlSign = pnlUsdt >= 0 ? '+' : '';
+      actionTitleAr =
+        pnlUsdt >= 0 ? '🏆 إغلاق الصفقة بربح' : '🔴 إغلاق كامل للصفقة';
+      summaryTextAr = `تم الخروج الكامل من صفقة ${position.symbol} بسعر ${this.formatPrice(executionPrice)}$ (دخول: ${this.formatPrice(position.entryPrice)}$) • صافي النتيجة: ${pnlSign}${pnlUsdt.toFixed(2)}$ (${pnlSign}${pnlPercent.toFixed(2)}%)`;
+    }
+
+    const notification: MobileTradeNotification = {
+      id: `notif_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      timestamp: Date.now(),
+      read: false,
+      actionType,
+      actionTitleAr,
+      symbol: position.symbol,
+      side: position.side,
+      leverage: position.leverage,
+      executionMode: position.executionMode || 'VIRTUAL',
+      traderName,
+      sourceType: position.sourceType || 'MANUAL',
+      price: executionPrice,
+      entryPrice: position.entryPrice,
+      exitPrice:
+        actionType === 'PARTIAL_EXIT' || actionType === 'FULL_EXIT'
+          ? executionPrice
+          : undefined,
+      quantity: position.quantity,
+      marginUsdt: position.marginUsdt,
+      marginDeltaUsdt,
+      volumePercent: volPct,
+      remainingScalePercent: remainingPct,
+      commissionUsdt: position.commissionUsdt || 0,
+      realizedPnlUsdt: pnlUsdt,
+      realizedPnlPercent: pnlPercent,
+      summaryTextAr,
+    };
+
+    this.notifications.unshift(notification);
+    if (this.notifications.length > MAX_STORED_NOTIFICATIONS) {
+      this.notifications = this.notifications.slice(0, MAX_STORED_NOTIFICATIONS);
+    }
+    this.saveNotifications();
+
+    // Trigger mobile sound, vibration, native system notification, and Telegram push
+    this.playChime(actionType, (pnlUsdt ?? 0) >= 0);
+    this.triggerVibration(actionType);
+    this.sendBrowserSystemNotification(notification);
+    this.sendTelegramPushNotification(notification);
+
+    this.emitChange(notification);
+    return notification;
+  }
+
+  /**
+   * Trigger a realistic test notification so the user can verify mobile banner, sound, vibration, and Telegram
+   */
+  public triggerTestNotification(
+    actionType: MobileNotificationActionType = 'OPEN_TRADE'
+  ): MobileTradeNotification {
+    const mockPosition: PaperPosition = {
+      id: `test_pos_${Date.now()}`,
+      symbol: 'BTCUSDT',
+      side: 'LONG',
+      quantity: 0.0026,
+      marginUsdt: actionType === 'SCALE_IN' ? 37.5 : actionType === 'PARTIAL_EXIT' ? 15.0 : 25.0,
+      initialMarginUsdt: 25.0,
+      entryPrice: 96420.5,
+      leverage: 10,
+      commissionUsdt: 0.15,
+      status: actionType === 'FULL_EXIT' ? 'CLOSED' : 'OPEN',
+      openTime: Date.now() - 3600000,
+      closeTime: actionType === 'FULL_EXIT' ? Date.now() : undefined,
+      currentScalePercent:
+        actionType === 'SCALE_IN'
+          ? 150
+          : actionType === 'PARTIAL_EXIT'
+          ? 60
+          : actionType === 'FULL_EXIT'
+          ? 0
+          : 100,
+      realizedPnl: actionType === 'FULL_EXIT' ? 6.85 : actionType === 'PARTIAL_EXIT' ? 2.45 : 0,
+      sourceTraderName: 'AlphaWhale_Quant',
+      sourceType: 'COPY_TRADING',
+      executionMode: 'VIRTUAL',
+    };
+
+    const prevEnabled = this.settings.enabled;
+    this.settings.enabled = true;
+    const created = this.notifyTradeEvent({
+      actionType,
+      position: mockPosition,
+      executionPrice:
+        actionType === 'OPEN_TRADE'
+          ? 96420.5
+          : actionType === 'SCALE_IN'
+          ? 96150.0
+          : 98840.0,
+      volumePercent:
+        actionType === 'OPEN_TRADE'
+          ? 100
+          : actionType === 'SCALE_IN'
+          ? 50
+          : actionType === 'PARTIAL_EXIT'
+          ? -40
+          : -100,
+      marginDeltaUsdt:
+        actionType === 'OPEN_TRADE'
+          ? 25.0
+          : actionType === 'SCALE_IN'
+          ? 12.5
+          : actionType === 'PARTIAL_EXIT'
+          ? -10.0
+          : -25.0,
+      realizedPnlDeltaUsdt:
+        actionType === 'PARTIAL_EXIT'
+          ? 2.45
+          : actionType === 'FULL_EXIT'
+          ? 6.85
+          : undefined,
+    });
+    this.settings.enabled = prevEnabled;
+    return created!;
+  }
+}
+
+export const mobileNotifications = new MobileNotificationService();

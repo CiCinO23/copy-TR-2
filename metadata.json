@@ -1,0 +1,6 @@
+{
+  "name": "Copy TR",
+  "description": "Copy TR - USDⓈ-M Futures copy trading, smart money whales, and KuCoin execution platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

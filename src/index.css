@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --kc-bg: #0B0E11;
+    --kc-panel: #12171D;
+    --kc-elevated: #1A222B;
+    --kc-border: #232E3A;
+    --kc-primary: #01BC8D;
+    --kc-primary-hover: #00D49F;
+    --kc-danger: #F6465D;
+    --kc-text: #F0F4F8;
+    --kc-muted: #8A99AD;
+  }
+
+  *, *::before, *::after {
+    border-color: #232E3A;
+    font-family: 'Cairo', sans-serif !important;
+  }
+
+  body, html, button, input, select, textarea {
+    background-color: #0B0E11;
+    color: #F0F4F8;
+    font-family: 'Cairo', sans-serif !important;
+    letter-spacing: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  code, pre, .font-mono, .font-sans, .font-num, text, tspan {
+    font-family: 'Cairo', sans-serif !important;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+  }
+}
+
+/* KuCoin Official Terminal Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0B0E11;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1E2936;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #01BC8D;
+}
+
+/* Animations */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
