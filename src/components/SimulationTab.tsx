@@ -1051,100 +1051,76 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
 
   return (
     <div className="space-y-5 animate-in fade-in duration-200">
-      {/* Header & Mode Switcher (التبديل بين التداول الافتراضي والحقيقي - متجاوب وأنيق للهاتف وسطح المكتب) */}
-      <div className="bg-[#12171D] border border-[#232E3A] rounded-xl sm:rounded-2xl p-3 sm:p-4 space-y-2.5 sm:space-y-3.5 shadow-sm">
-        <div className="flex items-center justify-between gap-2.5">
-          {/* اليمين: عنوان الصفحة والأيقونة */}
-          <div className="flex items-center gap-2 sm:gap-2.5 min-w-0">
-            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-[#01BC8D]/15 border border-[#01BC8D]/30 flex items-center justify-center text-[#01BC8D] shrink-0">
-              <Wallet className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
-            </div>
-            <div className="min-w-0">
-              <h2 className="text-sm sm:text-lg font-bold text-white tracking-wide truncate flex items-center gap-1.5">
-                <span>نافذة التداول</span>
-                <span className="hidden sm:inline text-xs font-normal text-[#8A99AD]">
-                  (إدارة الصفقات والنسخ)
-                </span>
+      {/* Header & Mode Switcher (التبديل بين التداول الافتراضي والحقيقي) */}
+      <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4 shadow-lg">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <h2 className="text-xl sm:text-2xl font-bold text-white tracking-wide">
+                نافذة التداول (إدارة الصفقات والنسخ)
               </h2>
-              <p className="text-[11px] text-[#8A99AD] hidden sm:block mt-0.5">
-                إدارة رصيد التداول، إعدادات الصفقات والرافعة، والتبديل الفوري بين التداول الافتراضي والحقيقي.
-              </p>
+              <span
+                data-testid="trading_mode_badge"
+                className={`text-xs px-2.5 py-0.5 rounded-full font-bold font-mono border ${
+                  isRealMode
+                    ? 'bg-[#01BC8D]/15 text-[#01BC8D] border-[#01BC8D]/40'
+                    : 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/40'
+                }`}
+              >
+                {isRealMode ? 'وضع التداول الحقيقي (REAL KUCOIN)' : 'وضع التداول الافتراضي (VIRTUAL)'}
+              </span>
             </div>
-          </div>
-
-          {/* اليسار: شارة وضع التداول الحالية أنيقة ومضغوطة للهاتف */}
-          <div
-            data-testid="trading_mode_badge"
-            className={`px-2 sm:px-2.5 py-1 rounded-full font-mono font-bold text-[10px] sm:text-[11px] flex items-center gap-1.5 shrink-0 border transition-all ${
-              isRealMode
-                ? 'bg-[#01BC8D]/15 text-[#01BC8D] border-[#01BC8D]/40'
-                : 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/40'
-            }`}
-          >
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                isRealMode ? 'bg-[#01BC8D] animate-ping' : 'bg-[#01BC8D] animate-pulse'
-              }`}
-            />
-            <span className="hidden sm:inline">
-              {isRealMode ? 'وضع التداول الحقيقي' : 'وضع التداول الافتراضي'}
-            </span>
-            <span className="sm:hidden font-sans">
-              {isRealMode ? 'حقيقي' : 'افتراضي'}
-            </span>
-            <span className="text-[9px] opacity-75">
-              ({isRealMode ? 'REAL' : 'VIRTUAL'})
-            </span>
+            <p className="text-xs text-[#8A99AD] mt-1.5 leading-relaxed">
+              تحكم كامل في رصيد التداول الافتراضي، إعدادات حجم الصفقة والرافعة والعمولة، عدد الصفقات المفتوحة بنفس الوقت، والتبديل الفوري بين التداول الافتراضي والحقيقي.
+            </p>
           </div>
         </div>
 
-        {/* Mode Toggle Bar (مضغوط على سطر واحد لكلا الوضعين لثيم الهاتف) */}
-        <div className="grid grid-cols-2 gap-1.5 bg-[#0B0E11] p-1 rounded-xl border border-[#232E3A]">
+        {/* Mode Toggle Bar */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 bg-[#0B0E11] p-2 rounded-xl border border-[#232E3A]">
           <button
             type="button"
             onClick={() => handleModeSwitch('VIRTUAL')}
             data-testid="mode_switch_virtual"
-            className={`py-1.5 sm:py-2 px-2 sm:px-3 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+            className={`py-2.5 px-4 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
               !isRealMode
-                ? 'bg-[#01BC8D] text-[#0B0E11] shadow-sm'
+                ? 'bg-[#01BC8D] text-[#0B0E11] shadow-md'
                 : 'text-[#8A99AD] hover:text-white'
             }`}
           >
-            <Wallet className="w-3.5 h-3.5 shrink-0" />
-            <span className="hidden sm:inline">التداول الافتراضي (VIRTUAL)</span>
-            <span className="sm:hidden">افتراضي (VIRTUAL)</span>
+            <Wallet className="w-4 h-4 shrink-0" />
+            <span>التداول الافتراضي (رصيد قابل للتعديل)</span>
           </button>
 
           <button
             type="button"
             onClick={() => handleModeSwitch('REAL')}
             data-testid="mode_switch_real"
-            className={`py-1.5 sm:py-2 px-2 sm:px-3 rounded-lg text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+            className={`py-2.5 px-4 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
               isRealMode
-                ? 'bg-[#01BC8D] text-white shadow-sm'
+                ? 'bg-[#01BC8D] text-white shadow-md'
                 : 'text-[#8A99AD] hover:text-white'
             }`}
           >
-            <Zap className="w-3.5 h-3.5 shrink-0" />
-            <span className="hidden sm:inline">التداول الحقيقي (KuCoin API)</span>
-            <span className="sm:hidden">حقيقي (KuCoin)</span>
+            <Zap className="w-4 h-4 shrink-0" />
+            <span>التداول الحقيقي (عبر حساب KuCoin API)</span>
           </button>
         </div>
 
         {/* Real Mode Status Notice */}
         {isRealMode && (
-          <div className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl p-2.5 sm:p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+          <div className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
             <div className="flex items-center gap-2 text-[#01BC8D]">
               <ShieldCheck className="w-4 h-4 shrink-0" />
-              <span className="text-[11px] sm:text-xs">
+              <span>
                 {kucoinConnectionState.isAuthenticated
-                  ? `متصل بحسابك الحقيقي في KuCoin • الرصيد: ${kucoinConnectionState.availableUsdt.toFixed(2)} USDT`
-                  : 'أنت في وضع التداول الحقيقي. يرجى تفعيل مفاتيح KuCoin API.'}
+                  ? `متصل بحسابك الحقيقي في KuCoin • الرصيد المتاح: ${kucoinConnectionState.availableUsdt.toFixed(2)} USDT`
+                  : 'أنت في وضع التداول الحقيقي على KuCoin. يرجى التأكد من إدخال مفاتيح KuCoin API وتفعيل الإرسال الحقيقي.'}
               </span>
             </div>
             <button
               onClick={() => onNavigateToTab('KuCoinAPI')}
-              className="bg-[#01BC8D] text-white font-bold px-2.5 py-1 rounded-lg text-[10px] sm:text-[11px] shrink-0 cursor-pointer self-end sm:self-center"
+              className="bg-[#01BC8D] text-white font-bold px-3 py-1.5 rounded-lg text-[11px] shrink-0 cursor-pointer"
             >
               إعدادات مفاتيح KuCoin
             </button>
@@ -1153,9 +1129,9 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       </div>
 
       {/* Balance & Portfolio Metrics Row (مع إمكانية تعديل الرصيد الافتراضي) */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 sm:gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
         {/* Editable Virtual / Real Balance Card */}
-        <div className="bg-[#12171D] border border-[#01BC8D]/50 rounded-xl sm:rounded-2xl p-3 sm:p-4 sm:col-span-2 flex flex-col justify-between">
+        <div className="bg-[#12171D] border border-[#01BC8D]/50 rounded-2xl p-4 sm:col-span-2 flex flex-col justify-between">
           <div className="flex items-center justify-between">
             <span className="text-xs text-[#8A99AD] font-semibold">
               {isRealMode ? 'رصيد KuCoin المتاح للتداول' : 'رصيد التداول الافتراضي المتاح'}
@@ -1168,7 +1144,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                   setIsEditingBalance(!isEditingBalance);
                 }}
                 data-testid="edit_virtual_balance_btn"
-                className="text-[10px] sm:text-[11px] bg-[#1A222B] hover:bg-[#212C37] text-[#01BC8D] border border-[#01BC8D]/40 px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-lg flex items-center gap-1 font-bold cursor-pointer"
+                className="text-[11px] bg-[#1A222B] hover:bg-[#212C37] text-[#01BC8D] border border-[#01BC8D]/40 px-2.5 py-1 rounded-lg flex items-center gap-1 font-bold cursor-pointer"
               >
                 <Edit3 className="w-3 h-3" />
                 <span>{isEditingBalance ? 'إغلاق التعديل' : 'تغيير الرصيد الافتراضي'}</span>
@@ -1176,15 +1152,15 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             )}
           </div>
 
-          <div className="my-1.5 sm:my-2 flex items-baseline justify-between">
-            <span className="text-lg sm:text-2xl font-bold text-white font-mono tabular-nums">
+          <div className="my-2 flex items-baseline justify-between">
+            <span className="text-xl sm:text-2xl font-bold text-white font-mono tabular-nums">
               {isRealMode
                 ? `${kucoinConnectionState.availableUsdt.toFixed(2)} USDT`
                 : `${paperSnapshot.availableBalance.toFixed(2)} USDT`}
             </span>
             {!isRealMode && (
-              <span className="text-[11px] sm:text-xs text-[#8A99AD] font-mono tabular-nums">
-                الرصيد المبدئي: {paperSnapshot.initialBalance.toFixed(0)}$
+              <span className="text-xs text-[#8A99AD] font-mono tabular-nums">
+                الرصيد الكلي المبدئي: {paperSnapshot.initialBalance.toFixed(0)}$
               </span>
             )}
           </div>
@@ -1249,38 +1225,38 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 </strong>
               </span>
               <span className="text-[#8A99AD] font-mono tabular-nums">
-                العمولات: {paperSnapshot.totalCommissionsPaid.toFixed(3)}$
+                العمولات المخصومة: {paperSnapshot.totalCommissionsPaid.toFixed(3)}$
               </span>
             </div>
           )}
         </div>
 
         {/* Unrealized PNL Card */}
-        <div className="bg-[#12171D] border border-[#232E3A] rounded-xl sm:rounded-2xl p-3 sm:p-4 flex flex-col justify-between">
+        <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 flex flex-col justify-between">
           <span className="text-xs text-[#8A99AD]">الأرباح غير المحققة (PNL)</span>
           <span
-            className={`text-lg sm:text-xl font-bold font-mono tabular-nums my-1 sm:my-2 block ${
+            className={`text-xl font-bold font-mono tabular-nums my-2 block ${
               paperSnapshot.unrealizedPnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'
             }`}
           >
             {paperSnapshot.unrealizedPnl >= 0 ? '+' : ''}
             {paperSnapshot.unrealizedPnl.toFixed(2)} $
           </span>
-          <span className="text-[10px] sm:text-[11px] text-[#8A99AD]">تحديث لحظي من السوق</span>
+          <span className="text-[11px] text-[#8A99AD]">تحديث لحظي من السوق</span>
         </div>
 
         {/* Concurrent Open Positions Slot Counter */}
-        <div className="bg-[#12171D] border border-[#232E3A] rounded-xl sm:rounded-2xl p-3 sm:p-4 flex flex-col justify-between">
+        <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 flex flex-col justify-between">
           <span className="text-xs text-[#8A99AD]">الصفقات المفتوحة بنفس الوقت</span>
-          <div className="my-1 sm:my-2 flex items-baseline gap-1.5">
-            <span className="text-lg sm:text-xl font-bold font-mono tabular-nums text-white">
+          <div className="my-2 flex items-baseline gap-1.5">
+            <span className="text-xl font-bold font-mono tabular-nums text-white">
               {openPositions.length}
             </span>
             <span className="text-xs text-[#8A99AD] font-mono tabular-nums">
               / {settings.maxConcurrentTrades} كحد أقصى
             </span>
           </div>
-          <span className="text-[10px] sm:text-[11px] text-[#01BC8D]">
+          <span className="text-[11px] text-[#01BC8D]">
             {copiedTraders.length} متداولين منسوخين حالياً
           </span>
         </div>

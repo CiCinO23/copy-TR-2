@@ -35,6 +35,13 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import android.webkit.*
+import android.view.ViewGroup
+import android.app.DownloadManager
+import android.net.Uri
+import android.os.Environment
+import android.widget.Toast
 import kotlinx.coroutines.launch
 
 private val Ink = Color(0xFF0B0E11)
@@ -106,39 +113,150 @@ private data class NavItem(
 @Composable
 fun WhaleApp() {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    var webViewInstance by remember { mutableStateOf<android.webkit.WebView?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+    var hasError by remember { mutableStateOf(false) }
 
-    var selected by remember { mutableStateOf("Dashboard") }
-    var autoCopy by remember { mutableStateOf(false) }
-    var showLiveDialog by remember { mutableStateOf(false) }
+    val appUrl = "https://ais-pre-ahokpnh2dw5lc4zjnbhmkv-37129485862.europe-west1.run.app"
 
-    var binanceConfig by remember { mutableStateOf(BinancePrefs.load(context)) }
-    var connectionState by remember {
-        mutableStateOf(
-            BinanceConnectionState(
-                statusMessageAr = "جاري الاتصال بحساب باينانس الحقيقي وجلب البيانات..."
-            )
+    BackHandler(enabled = webViewInstance?.canGoBack() == true) {
+        webViewInstance?.goBack()
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Ink)
+    ) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                android.webkit.WebView(ctx).apply {
+                    layoutParams = android.view.ViewGroup.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    setBackgroundColor(0xFF0B0E11.toInt())
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.databaseEnabled = true
+                    settings.allowFileAccess = true
+                    settings.useWideViewPort = true
+                    settings.loadWithOverviewMode = true
+                    settings.setSupportZoom(false)
+                    settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
+
+                    android.webkit.CookieManager.getInstance().setAcceptCookie(true)
+                    android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+                    webChromeClient = object : android.webkit.WebChromeClient() {
+                        override fun onProgressChanged(view: android.webkit.WebView?, newProgress: Int) {
+                            if (newProgress >= 90) {
+                                isLoading = false
+                            }
+                        }
+                    }
+
+                    webViewClient = object : android.webkit.WebViewClient() {
+                        override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
+                            isLoading = false
+                            hasError = false
+                        }
+
+                        override fun onReceivedError(
+                            view: android.webkit.WebView?,
+                            errorCode: Int,
+                            description: String?,
+                            failingUrl: String?
+                        ) {
+                            isLoading = false
+                            hasError = true
+                        }
+                    }
+
+                    setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
+                        try {
+                            val request = android.app.DownloadManager.Request(android.net.Uri.parse(url)).apply {
+                                setMimeType(mimetype)
+                                val cookies = android.webkit.CookieManager.getInstance().getCookie(url)
+                                addRequestHeader("cookie", cookies)
+                                addRequestHeader("User-Agent", userAgent)
+                                setDescription("جاري تنزيل الملف...")
+                                setTitle(android.webkit.URLUtil.guessFileName(url, contentDisposition, mimetype))
+                                setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                setDestinationInExternalPublicDir(
+                                    android.os.Environment.DIRECTORY_DOWNLOADS,
+                                    android.webkit.URLUtil.guessFileName(url, contentDisposition, mimetype)
+                                )
+                            }
+                            val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
+                            dm.enqueue(request)
+                            android.widget.Toast.makeText(ctx, "بدأ تنزيل الملف...", android.widget.Toast.LENGTH_SHORT).show()
+                        } catch (e: Exception) {
+                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                            ctx.startActivity(intent)
+                        }
+                    }
+
+                    loadUrl(appUrl)
+                    webViewInstance = this
+                }
+            }
         )
-    }
 
-    // Automatically connect to Binance on app start
-    LaunchedEffect(Unit) {
-        connectionState = connectionState.copy(isTesting = true, statusMessageAr = "جاري فحص الاتصال ومزامنة البيانات مع باينانس...")
-        connectionState = BinanceApiClient.testConnectionAndFetchData(binanceConfig)
-    }
+        if (isLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Ink),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = Gold)
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "جاري مزامنة وتشغيل Copy TR...",
+                        color = Muted,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        }
 
-    fun triggerConnectionTest(updatedConfig: BinanceConfig) {
-        binanceConfig = updatedConfig
-        BinancePrefs.save(context, updatedConfig)
-        scope.launch {
-            connectionState = connectionState.copy(
-                isTesting = true,
-                statusMessageAr = "جاري الاتصال بخادم باينانس ومزامنة المحفظة...",
-                errorMessageAr = null
-            )
-            connectionState = BinanceApiClient.testConnectionAndFetchData(updatedConfig)
+        if (hasError) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Ink)
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "تعذر الاتصال بالخادم. يرجى التحقق من اتصال الإنترنت.",
+                        color = RedAlert,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = {
+                            hasError = false
+                            isLoading = true
+                            webViewInstance?.reload()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Gold)
+                    ) {
+                        Text("إعادة المحاولة", color = Ink, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
         }
     }
+}
+
+@Composable
+fun LegacyWhaleApp() {
 
     if (selected != "Dashboard") {
         BackHandler {
