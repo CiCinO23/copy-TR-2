@@ -109,6 +109,10 @@ export interface PaperPosition {
   marginUsdt: number;
   initialMarginUsdt?: number;
   entryPrice: number;
+  traderEntryPrice?: number;
+  stopLossPrice?: number;
+  isSecuredNearCurrent?: boolean;
+  securedBufferPercent?: number;
   leverage: number;
   commissionUsdt: number;
   status: 'OPEN' | 'CLOSED';
@@ -126,6 +130,26 @@ export interface PaperPosition {
   executionMode?: TradingExecutionMode;
   accountId?: string;
   accountName?: string;
+}
+
+export interface PendingReconnectTradeChoice {
+  id: string;
+  createdAt: number;
+  traderId: string;
+  traderName: string;
+  source: 'COPY_TRADING' | 'SMART_MONEY';
+  accountId: string;
+  accountName: string;
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  traderEntryPrice: number;
+  currentMarketPrice: number;
+  priceDiffPercent: number;
+  leverage: number;
+  marginUsdt: number;
+  traderEntryTime?: number;
+  traderScaleAdjustments?: PositionScaleAdjustment[];
+  currentScalePercent?: number;
 }
 
 export interface PaperVirtualAccountSummary {
@@ -154,6 +178,7 @@ export interface PaperAccountSnapshot {
   totalCommissionsPaid: number;
   positions: PaperPosition[];
   settings: TradeExecutionSettings;
+  pendingReconnectChoices?: PendingReconnectTradeChoice[];
 }
 
 // ==========================================
@@ -432,7 +457,9 @@ export type MobileNotificationActionType =
   | 'SCALE_IN'
   | 'PARTIAL_EXIT'
   | 'FULL_EXIT'
-  | 'DRAWDOWN_ALERT';
+  | 'DRAWDOWN_ALERT'
+  | 'RECONNECT_TRADE_CHOICE'
+  | 'POSITION_SECURED';
 
 export interface MobileTradeNotification {
   id: string;
@@ -464,6 +491,9 @@ export interface MobileTradeNotification {
   initialBalanceUsdt?: number; // رأس المال الأولي للحساب
   currentEquityUsdt?: number; // الرصيد الإجمالي الحالي للحساب (Equity)
   drawdownLossUsdt?: number; // مقدار التراجع بالدولار من رأس المال الأولي
+  pendingTradeChoiceId?: string; // معرف خيار تنفيذ الصفقة السابقة بعد الانقطاع
+  traderOriginalEntryPrice?: number; // سعر دخول المتداول الأصلي للمقارنة مع السعر الحالي
+  stopLossPrice?: number; // سعر وقف الخسارة عند تأمين الصفقة
   summaryTextAr: string;
 }
 
@@ -489,4 +519,18 @@ export interface MobileNotificationSettings {
   telegramBotToken: string;
   telegramChatId: string;
 }
+
+export type KuCoinLockScope = 'ALWAYS_ON_TAB_OPEN' | 'SESSION_TIMEOUT';
+
+export interface KuCoinSecurityLockConfig {
+  enabled: boolean;
+  pinCode: string;
+  biometricEnabled: boolean;
+  biometricCredentialId?: string | null;
+  lockScope: KuCoinLockScope;
+  sessionTimeoutMinutes: number;
+  protectRealTradingSwitch: boolean;
+}
+
+
 

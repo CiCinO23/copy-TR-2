@@ -26,7 +26,9 @@ import {
   ActiveCopiedTrader,
   MobileTradeNotification,
   MobileNotificationSettings,
+  KuCoinSecurityLockConfig,
 } from './types';
+import { Lock, Unlock } from 'lucide-react';
 import {
   loadBinanceConfig,
   saveBinanceConfig,
@@ -49,6 +51,11 @@ import {
 } from './services/copyAndSmartMoneyApi';
 import { paperEngine } from './services/paperTrading';
 import { mobileNotifications } from './services/mobileNotifications';
+import {
+  loadKuCoinSecurityConfig,
+  saveKuCoinSecurityConfig,
+  shouldRequireUnlock,
+} from './services/kucoinSecurityLock';
 
 function loadAllCopiedTradersFromStorage(): ActiveCopiedTrader[] {
   const result: ActiveCopiedTrader[] = [];
@@ -123,7 +130,9 @@ export const App: React.FC = () => {
   );
 
   const refreshCopiedTradersList = useCallback(() => {
-    setAllCopiedTraders(loadAllCopiedTradersFromStorage());
+    const nextList = loadAllCopiedTradersFromStorage();
+    paperEngine.prunePendingChoicesForCopiedTraders(nextList);
+    setAllCopiedTraders(nextList);
   }, []);
 
   // Live prices map from Binance tickers and all-symbols price map
@@ -367,44 +376,6 @@ export const App: React.FC = () => {
     refreshCopiedTradersList();
   }, [selectedTab, refreshCopiedTradersList]);
 
-  // Polling every 15 seconds to keep Binance market data fresh (pauses if Full Exit was triggered)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (mobileNotifications.isAppStoppedByFullExit()) return;
-      testConnectionAndFetchData(binanceConfig).then((res) => {
-        setConnectionState(res);
-      });
-    }, 15000);
-
-    const handleServiceWorkerMessage = (event: MessageEvent) => {
-      const data = event.data;
-      if (!data || typeof data !== 'object') return;
-      if (data.type === 'SW_BACKGROUND_HEARTBEAT') {
-        if (!mobileNotifications.isAppStoppedByFullExit()) {
-          testConnectionAndFetchData(binanceConfig).then((res) => {
-            setConnectionState(res);
-          });
-        }
-      } else if (data.type === 'NOTIFICATION_CLICKED_FROM_LOCKSCREEN') {
-        if (data.data?.accountId) {
-          handleSelectVirtualAccount(data.data.accountId);
-        }
-        setSelectedTab('Simulation');
-      }
-    };
-
-    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
-      navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
-    }
-
-    return () => {
-      clearInterval(interval);
-      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
-        navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
-      }
-    };
-  }, [binanceConfig, handleSelectVirtualAccount]);
-
   // Sync a copied trader's Positions and Latest records using the target Account's trade settings
   const handleSyncTraderToEngine = useCallback(
     (params: {
@@ -423,24 +394,41 @@ export const App: React.FC = () => {
         : params.marginPerTradeUsdt || currentSettings.tradeValueUsdt;
       const userLeverage = currentSettings.leverage;
 
-      // 1. Sync to target virtual account with that account's size, leverage, commission & max concurrent limit
+      // 1. Sync to target virtual account with live market prices, auto exits/partial exits & reconnect price advantage evaluation
       const logs = paperEngine.syncTraderPositionsAndRecords({
         ...params,
         marginPerTradeUsdt: userTradeValue,
         accountId: targetAcc.id,
+        currentPrices: pricesMap,
+        checkReconnectAdvantage: true,
       });
       updatePaperSnapshot();
       setTimeout(refreshCopiedTradersList, 100);
 
-      // 2. Route synced entries and scale-ins to KuCoin API with that account's configured settings
+      // 2. Route synced entries, scale-ins, partial exits, and full exits to KuCoin API at current market price
       for (const log of logs) {
-        if (log.action === 'POSITION_SYNC' || log.action === 'ENTRY' || log.action === 'SCALE_IN') {
+        if (
+          log.action === 'POSITION_SYNC' ||
+          log.action === 'ENTRY' ||
+          log.action === 'SCALE_IN' ||
+          log.action === 'PARTIAL_EXIT' ||
+          log.action === 'EXIT'
+        ) {
           if (log.quantity > 0) {
+            const isClosingAction = log.action === 'EXIT' || log.action === 'PARTIAL_EXIT';
+            const executionSide: 'LONG' | 'SHORT' = isClosingAction
+              ? log.side === 'LONG'
+                ? 'SHORT'
+                : 'LONG'
+              : log.side;
+
             const orderAmountUsdt =
               log.action === 'SCALE_IN'
                 ? currentSettings.scaleInSamePercentAsTrader !== false
-                  ? Number((userTradeValue * ((log.volumePercent || 25) / 100)).toFixed(2))
+                  ? Number((userTradeValue * (Math.abs(log.volumePercent || 25) / 100)).toFixed(2))
                   : Math.max(1, currentSettings.scaleInFixedValueUsdt || 10)
+                : log.action === 'PARTIAL_EXIT'
+                ? Number((userTradeValue * (Math.abs(log.volumePercent || 30) / 100)).toFixed(2))
                 : userTradeValue;
 
             executeKuCoinOrder({
@@ -449,12 +437,12 @@ export const App: React.FC = () => {
                 enableLiveExecution: currentSettings.mode === 'REAL',
               },
               binanceSymbol: log.symbol,
-              side: log.side,
+              side: executionSide,
               amountUsdt: orderAmountUsdt,
               entryPrice: log.price,
               leverage: userLeverage,
               sourceTraderName: `${params.traderName} (${targetAcc.name})`,
-              sourceSignal: `Binance ${params.source} [${targetAcc.name}] (${log.action} • ${orderAmountUsdt}$ × ${userLeverage}x)`,
+              sourceSignal: `Binance ${params.source} [${targetAcc.name}] (${log.action} بالسعر الحالي • ${orderAmountUsdt}$ × ${userLeverage}x)`,
             })
               .then((ord) => {
                 setKucoinConnectionState((prev) => ({
@@ -474,21 +462,25 @@ export const App: React.FC = () => {
 
       return logs;
     },
-    [kucoinConfig, updatePaperSnapshot, refreshCopiedTradersList]
+    [kucoinConfig, pricesMap, updatePaperSnapshot, refreshCopiedTradersList]
   );
 
-  // Copy a single position using the target Account's configured Trade Settings
+  // Copy a single position using the target Account's configured Trade Settings at the CURRENT LIVE MARKET PRICE
   const handleCopySinglePosition = useCallback(
     (pos: TraderOpenPosition, traderName: string, marginUsdt: number, accountId?: string) => {
       addWatchedFuturesSymbol(pos.symbol);
       const targetAcc = paperEngine.getAccount(accountId);
       const currentSettings = targetAcc.settings;
-      const price =
-        pos.markPrice > 0
+      const sym = pos.symbol.toUpperCase();
+      // Always execute at the current live market price (السعر الحالي للسوق وليس برقم ثابت)
+      const liveMarketPrice =
+        pricesMap[sym] && pricesMap[sym] > 0
+          ? pricesMap[sym]
+          : pos.markPrice > 0
           ? pos.markPrice
           : pos.entryPrice > 0
           ? pos.entryPrice
-          : pricesMap[pos.symbol] || 50.0;
+          : 50.0;
       const effectiveMargin = currentSettings.enforceUserSizeOnCopy
         ? currentSettings.tradeValueUsdt
         : marginUsdt || currentSettings.tradeValueUsdt;
@@ -500,7 +492,8 @@ export const App: React.FC = () => {
         paperEngine.openPositionWithUserSettings({
           symbol: pos.symbol,
           side: pos.side,
-          entryPrice: price,
+          entryPrice: liveMarketPrice,
+          traderEntryPrice: pos.entryPrice > 0 ? pos.entryPrice : liveMarketPrice,
           traderLeverage: pos.leverage,
           customMarginUsdt: effectiveMargin,
           customLeverage: effectiveLeverage,
@@ -517,7 +510,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Route to KuCoin with target account's size & leverage
+      // Route to KuCoin with target account's size & leverage at current market price
       executeKuCoinOrder({
         config: {
           ...kucoinConfig,
@@ -526,10 +519,10 @@ export const App: React.FC = () => {
         binanceSymbol: pos.symbol,
         side: pos.side,
         amountUsdt: effectiveMargin,
-        entryPrice: price,
+        entryPrice: liveMarketPrice,
         leverage: effectiveLeverage,
         sourceTraderName: `${traderName} (${targetAcc.name})`,
-        sourceSignal: `Single Copy [${targetAcc.name}] (${pos.symbol} ${pos.side} • ${effectiveMargin}$ × ${effectiveLeverage}x)`,
+        sourceSignal: `Single Copy Market [${targetAcc.name}] (${pos.symbol} ${pos.side} @ السعر الحالي ${liveMarketPrice} • ${effectiveMargin}$ × ${effectiveLeverage}x)`,
       })
         .then((ord) => {
           setKucoinConnectionState((prev) => ({
@@ -584,6 +577,75 @@ export const App: React.FC = () => {
     updatePaperSnapshot();
   }, [connectionState.tickers, handleSyncTraderToEngine, updatePaperSnapshot]);
 
+  // Automatic background polling & reconnection sync (every 15s + on online / visibilitychange + initial connect)
+  const hasInitialTraderSyncRunRef = useRef(false);
+  useEffect(() => {
+    if (connectionState.tickers.length > 0 && !hasInitialTraderSyncRunRef.current) {
+      hasInitialTraderSyncRunRef.current = true;
+      handleSyncAllCopiedTraders();
+    }
+  }, [connectionState.tickers.length, handleSyncAllCopiedTraders]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (mobileNotifications.isAppStoppedByFullExit()) return;
+      testConnectionAndFetchData(binanceConfig).then((res) => {
+        setConnectionState(res);
+        handleSyncAllCopiedTraders();
+      });
+    }, 15000);
+
+    const handleReconnectOrForeground = () => {
+      if (mobileNotifications.isAppStoppedByFullExit()) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      testConnectionAndFetchData(binanceConfig).then((res) => {
+        setConnectionState(res);
+        handleSyncAllCopiedTraders();
+      });
+    };
+
+    const handleServiceWorkerMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'SW_BACKGROUND_HEARTBEAT') {
+        if (!mobileNotifications.isAppStoppedByFullExit()) {
+          testConnectionAndFetchData(binanceConfig).then((res) => {
+            setConnectionState(res);
+            handleSyncAllCopiedTraders();
+          });
+        }
+      } else if (data.type === 'NOTIFICATION_CLICKED_FROM_LOCKSCREEN') {
+        if (data.data?.accountId) {
+          handleSelectVirtualAccount(data.data.accountId);
+        }
+        setSelectedTab('Simulation');
+      }
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleReconnectOrForeground);
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleReconnectOrForeground);
+    }
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
+    }
+
+    return () => {
+      clearInterval(interval);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleReconnectOrForeground);
+      }
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleReconnectOrForeground);
+      }
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
+      }
+    };
+  }, [binanceConfig, handleSelectVirtualAccount, handleSyncAllCopiedTraders]);
+
   // Remove a copied trader from storage (optionally scoped to a specific virtual account)
   const handleRemoveCopiedTrader = useCallback(
     (traderId: string, source: 'COPY_TRADING' | 'SMART_MONEY', accountId?: string) => {
@@ -604,11 +666,12 @@ export const App: React.FC = () => {
         // ignore
       }
       refreshCopiedTradersList();
+      updatePaperSnapshot();
     },
-    [refreshCopiedTradersList]
+    [refreshCopiedTradersList, updatePaperSnapshot]
   );
 
-  // Manual trade action
+  // Manual trade action (Always executes at Current Live Market Price)
   const handleOpenPaperOrder = (
     symbol: string,
     side: 'LONG' | 'SHORT',
@@ -616,8 +679,22 @@ export const App: React.FC = () => {
     entryPrice: number,
     leverage: number
   ) => {
+    const sym = symbol.toUpperCase();
+    const liveMarketPrice =
+      pricesMap[sym] && pricesMap[sym] > 0 ? pricesMap[sym] : entryPrice;
     const currentSettings = paperEngine.getSettings();
-    paperEngine.openPosition(symbol, side, quantity, entryPrice, leverage, undefined, 'MANUAL');
+    const effectiveNotional = quantity * entryPrice;
+    const liveQty = liveMarketPrice > 0 ? effectiveNotional / liveMarketPrice : quantity;
+
+    paperEngine.openPosition(
+      sym,
+      side,
+      liveQty,
+      liveMarketPrice,
+      leverage,
+      undefined,
+      'MANUAL'
+    );
     updatePaperSnapshot();
 
     executeKuCoinOrder({
@@ -625,13 +702,13 @@ export const App: React.FC = () => {
         ...kucoinConfig,
         enableLiveExecution: currentSettings.mode === 'REAL',
       },
-      binanceSymbol: symbol,
+      binanceSymbol: sym,
       side,
-      amountUsdt: (quantity * entryPrice) / leverage,
-      entryPrice,
+      amountUsdt: (liveQty * liveMarketPrice) / leverage,
+      entryPrice: liveMarketPrice,
       leverage,
-      sourceTraderName: 'صفقة يدوية',
-      sourceSignal: 'Manual Execution',
+      sourceTraderName: 'صفقة يدوية (بالسعر الحالي)',
+      sourceSignal: 'Manual Market Execution (بالسعر الحالي للسوق)',
     })
       .then((ord) => {
         setKucoinConnectionState((prev) => ({
@@ -646,6 +723,58 @@ export const App: React.FC = () => {
     paperEngine.closePosition(positionId, exitPrice);
     updatePaperSnapshot();
   };
+
+  const handleSecurePaperPosition = useCallback(
+    (positionId: string, currentPrice: number, bufferPercent: number = 0.2) => {
+      paperEngine.securePositionNearCurrentPrice(positionId, currentPrice, bufferPercent);
+      updatePaperSnapshot();
+    },
+    [updatePaperSnapshot]
+  );
+
+  const handleExecutePendingReconnectChoice = useCallback(
+    (choiceId: string) => {
+      const opened = paperEngine.executePendingReconnectChoice(choiceId, pricesMap);
+      updatePaperSnapshot();
+      if (opened) {
+        const targetAcc = paperEngine.getAccount(opened.accountId);
+        executeKuCoinOrder({
+          config: {
+            ...kucoinConfig,
+            enableLiveExecution: targetAcc.settings.mode === 'REAL',
+          },
+          binanceSymbol: opened.symbol,
+          side: opened.side,
+          amountUsdt: opened.marginUsdt,
+          entryPrice: opened.entryPrice,
+          leverage: opened.leverage,
+          sourceTraderName: `${opened.sourceTraderName || 'متداول'} (${targetAcc.name})`,
+          sourceSignal: `تأكيد تنفيذ صفقة سابقة بالسعر الحالي (${opened.symbol} ${opened.side} @ ${opened.entryPrice})`,
+        })
+          .then((ord) => {
+            setKucoinConnectionState((prev) => ({
+              ...prev,
+              recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(0, 50),
+            }));
+          })
+          .catch(console.warn);
+      }
+    },
+    [kucoinConfig, pricesMap, updatePaperSnapshot]
+  );
+
+  const handleDismissPendingReconnectChoice = useCallback(
+    (choiceId: string) => {
+      paperEngine.dismissPendingReconnectChoice(choiceId);
+      updatePaperSnapshot();
+    },
+    [updatePaperSnapshot]
+  );
+
+  const handleTriggerSampleReconnectChoice = useCallback(() => {
+    paperEngine.triggerSampleReconnectChoiceNotification(pricesMap);
+    updatePaperSnapshot();
+  }, [pricesMap, updatePaperSnapshot]);
 
   const handleScaleInPaperPosition = (
     positionId: string,
@@ -735,6 +864,55 @@ export const App: React.FC = () => {
 
   const [apiSubTab, setApiSubTab] = useState<'KUCOIN' | 'BINANCE'>('KUCOIN');
 
+  // KuCoin Live Execution Tab Security Lock (PIN Code & Fingerprint)
+  const [kucoinSecurityConfig, setKucoinSecurityConfig] = useState<KuCoinSecurityLockConfig>(() =>
+    loadKuCoinSecurityConfig()
+  );
+  const [kucoinUnlockState, setKucoinUnlockState] = useState<{
+    isUnlocked: boolean;
+    lastUnlockedAt: number | null;
+  }>({
+    isUnlocked: false,
+    lastUnlockedAt: null,
+  });
+
+  const isKucoinSecurityUnlocked = useMemo(() => {
+    return !shouldRequireUnlock(kucoinSecurityConfig, {
+      isUnlocked: kucoinUnlockState.isUnlocked,
+      lastUnlockedAt: kucoinUnlockState.lastUnlockedAt,
+      now: Date.now(),
+    });
+  }, [kucoinSecurityConfig, kucoinUnlockState]);
+
+  const handleUnlockKucoinSecurity = useCallback(
+    (_method: 'PIN' | 'BIOMETRIC', updatedCredentialId?: string | null) => {
+      if (updatedCredentialId && updatedCredentialId !== kucoinSecurityConfig.biometricCredentialId) {
+        const nextCfg = saveKuCoinSecurityConfig({ biometricCredentialId: updatedCredentialId });
+        setKucoinSecurityConfig(nextCfg);
+      }
+      setKucoinUnlockState({
+        isUnlocked: true,
+        lastUnlockedAt: Date.now(),
+      });
+    },
+    [kucoinSecurityConfig.biometricCredentialId]
+  );
+
+  const handleLockKucoinSecurityNow = useCallback(() => {
+    setKucoinUnlockState({
+      isUnlocked: false,
+      lastUnlockedAt: null,
+    });
+  }, []);
+
+  const handleUpdateKucoinSecurityConfig = useCallback(
+    (partial: Partial<KuCoinSecurityLockConfig>) => {
+      const updated = saveKuCoinSecurityConfig(partial);
+      setKucoinSecurityConfig(updated);
+    },
+    []
+  );
+
   // Target trader / whale selection when navigating from SimulationTab
   const [targetTraderId, setTargetTraderId] = useState<string | null>(null);
   const [targetWhaleId, setTargetWhaleId] = useState<string | null>(null);
@@ -770,9 +948,10 @@ export const App: React.FC = () => {
       if (latest && settings.enabled && settings.inAppBannerEnabled) {
         setActivePushBanner(latest);
         if (bannerTimer) clearTimeout(bannerTimer);
+        const duration = latest.actionType === 'RECONNECT_TRADE_CHOICE' ? 18000 : 7000;
         bannerTimer = setTimeout(() => {
           setActivePushBanner(null);
-        }, 7000);
+        }, duration);
       }
     });
     return () => {
@@ -792,14 +971,20 @@ export const App: React.FC = () => {
   );
 
   const handleOpenKucoinApi = useCallback(() => {
+    if (kucoinSecurityConfig.enabled && kucoinSecurityConfig.lockScope === 'ALWAYS_ON_TAB_OPEN') {
+      setKucoinUnlockState({ isUnlocked: false, lastUnlockedAt: null });
+    }
     setApiSubTab('KUCOIN');
     setSelectedTab('API');
-  }, []);
+  }, [kucoinSecurityConfig.enabled, kucoinSecurityConfig.lockScope]);
 
   const handleOpenBinanceApi = useCallback(() => {
+    if (kucoinSecurityConfig.enabled && kucoinSecurityConfig.lockScope === 'ALWAYS_ON_TAB_OPEN') {
+      setKucoinUnlockState({ isUnlocked: false, lastUnlockedAt: null });
+    }
     setApiSubTab('BINANCE');
     setSelectedTab('API');
-  }, []);
+  }, [kucoinSecurityConfig.enabled, kucoinSecurityConfig.lockScope]);
 
   const handleOpenNotificationsCenter = useCallback(() => {
     setShowNotificationsCenter(true);
@@ -815,6 +1000,8 @@ export const App: React.FC = () => {
         onOpenSimulation={() => setSelectedTab('Simulation')}
         onOpenCenter={handleOpenNotificationsCenter}
         onSelectAccount={handleSelectVirtualAccount}
+        onExecutePendingChoice={handleExecutePendingReconnectChoice}
+        onDismissPendingChoice={handleDismissPendingReconnectChoice}
       />
 
       {/* Top Header Bar */}
@@ -870,7 +1057,16 @@ export const App: React.FC = () => {
               <div className="flex items-center border-t border-[#232E3A] -mx-4 px-4">
                 <button
                   type="button"
-                  onClick={() => setApiSubTab('KUCOIN')}
+                  onClick={() => {
+                    if (
+                      apiSubTab !== 'KUCOIN' &&
+                      kucoinSecurityConfig.enabled &&
+                      kucoinSecurityConfig.lockScope === 'ALWAYS_ON_TAB_OPEN'
+                    ) {
+                      setKucoinUnlockState({ isUnlocked: false, lastUnlockedAt: null });
+                    }
+                    setApiSubTab('KUCOIN');
+                  }}
                   data-testid="api_subtab_kucoin"
                   className={`flex-1 py-3 px-3 text-xs sm:text-sm font-bold border-b-2 flex items-center justify-center gap-2 transition-all cursor-pointer ${
                     apiSubTab === 'KUCOIN'
@@ -884,11 +1080,25 @@ export const App: React.FC = () => {
                     }`}
                   />
                   <span>[KuCoin للتنفيذ]</span>
+                  {kucoinSecurityConfig.enabled &&
+                    (isKucoinSecurityUnlocked ? (
+                      <Unlock className="w-3.5 h-3.5 text-[#01BC8D]" />
+                    ) : (
+                      <Lock className="w-3.5 h-3.5 text-[#01BC8D]" />
+                    ))}
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => setApiSubTab('BINANCE')}
+                  onClick={() => {
+                    if (
+                      kucoinSecurityConfig.enabled &&
+                      kucoinSecurityConfig.lockScope === 'ALWAYS_ON_TAB_OPEN'
+                    ) {
+                      setKucoinUnlockState({ isUnlocked: false, lastUnlockedAt: null });
+                    }
+                    setApiSubTab('BINANCE');
+                  }}
                   data-testid="api_subtab_binance"
                   className={`flex-1 py-3 px-3 text-xs sm:text-sm font-bold border-b-2 flex items-center justify-center gap-2 transition-all cursor-pointer ${
                     apiSubTab === 'BINANCE'
@@ -914,6 +1124,12 @@ export const App: React.FC = () => {
                 onClearKeys={handleClearKuCoin}
                 onRefresh={() => handleTestKuCoinConnection(kucoinConfig)}
                 onOpenSimulationTab={() => setSelectedTab('Simulation')}
+                securityConfig={kucoinSecurityConfig}
+                isSecurityUnlocked={isKucoinSecurityUnlocked}
+                onUnlockSecurity={handleUnlockKucoinSecurity}
+                onLockSecurityNow={handleLockKucoinSecurityNow}
+                onUpdateSecurityConfig={handleUpdateKucoinSecurityConfig}
+                onOpenSettingsTab={() => setSelectedTab('Settings')}
               />
             ) : (
               <BinanceApiTab
@@ -983,6 +1199,10 @@ export const App: React.FC = () => {
             onSetVirtualBalance={handleSetVirtualBalance}
             onOpenOrder={handleOpenPaperOrder}
             onClosePosition={handleClosePaperPosition}
+            onSecurePosition={handleSecurePaperPosition}
+            onExecutePendingChoice={handleExecutePendingReconnectChoice}
+            onDismissPendingChoice={handleDismissPendingReconnectChoice}
+            onTriggerSampleReconnectChoice={handleTriggerSampleReconnectChoice}
             onScaleInPosition={handleScaleInPaperPosition}
             onPartialExitPosition={handlePartialExitPaperPosition}
             onResetPaper={handleResetPaper}
@@ -998,6 +1218,10 @@ export const App: React.FC = () => {
             notificationSettings={notificationSettings}
             onUpdateNotificationSettings={(partial) => mobileNotifications.updateSettings(partial)}
             onOpenNotificationsCenter={handleOpenNotificationsCenter}
+            securityConfig={kucoinSecurityConfig}
+            isSecurityUnlocked={isKucoinSecurityUnlocked}
+            onUnlockSecurity={handleUnlockKucoinSecurity}
+            onLockSecurityNow={handleLockKucoinSecurityNow}
           />
         )}
 
@@ -1007,6 +1231,9 @@ export const App: React.FC = () => {
             connectionState={connectionState}
             notificationSettings={notificationSettings}
             onUpdateNotificationSettings={(partial) => mobileNotifications.updateSettings(partial)}
+            securityConfig={kucoinSecurityConfig}
+            onUpdateSecurityConfig={handleUpdateKucoinSecurityConfig}
+            onLockSecurityNow={handleLockKucoinSecurityNow}
             onLive={() => setShowLiveDialog(true)}
             onOpenApiSetup={handleOpenKucoinApi}
             onOpenNotifications={handleOpenNotificationsCenter}
@@ -1018,6 +1245,9 @@ export const App: React.FC = () => {
       <Navigation
         currentTab={selectedTab}
         onSelectTab={(tab) => {
+          if (kucoinSecurityConfig.enabled && kucoinSecurityConfig.lockScope === 'ALWAYS_ON_TAB_OPEN') {
+            setKucoinUnlockState({ isUnlocked: false, lastUnlockedAt: null });
+          }
           if (tab === 'API') {
             setSelectedTab('API');
           } else {
@@ -1044,6 +1274,8 @@ export const App: React.FC = () => {
         onClearAll={() => mobileNotifications.clearAllNotifications()}
         onNavigateToSimulation={() => setSelectedTab('Simulation')}
         onSelectAccount={handleSelectVirtualAccount}
+        onExecutePendingChoice={handleExecutePendingReconnectChoice}
+        onDismissPendingChoice={handleDismissPendingReconnectChoice}
       />
     </div>
   );

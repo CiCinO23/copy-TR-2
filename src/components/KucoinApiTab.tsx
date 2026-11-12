@@ -9,8 +9,16 @@ import {
   ExternalLink,
   Zap,
   Sliders,
+  Lock,
+  ShieldCheck,
+  Fingerprint,
 } from 'lucide-react';
-import { KuCoinConfig, KuCoinConnectionState } from '../types';
+import { KuCoinConfig, KuCoinConnectionState, KuCoinSecurityLockConfig } from '../types';
+import {
+  KuCoinSecurityLockScreen,
+  KuCoinSecurityConfigModal,
+} from './KuCoinSecurityLockGuard';
+import { DEFAULT_KUCOIN_SECURITY_CONFIG } from '../services/kucoinSecurityLock';
 
 interface KucoinApiTabProps {
   config: KuCoinConfig;
@@ -19,6 +27,12 @@ interface KucoinApiTabProps {
   onClearKeys: () => void;
   onRefresh: () => void;
   onOpenSimulationTab?: () => void;
+  securityConfig?: KuCoinSecurityLockConfig;
+  isSecurityUnlocked?: boolean;
+  onUnlockSecurity?: (method: 'PIN' | 'BIOMETRIC', credentialId?: string | null) => void;
+  onLockSecurityNow?: () => void;
+  onUpdateSecurityConfig?: (partial: Partial<KuCoinSecurityLockConfig>) => void;
+  onOpenSettingsTab?: () => void;
 }
 
 export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
@@ -28,6 +42,12 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
   onClearKeys,
   onRefresh,
   onOpenSimulationTab,
+  securityConfig = DEFAULT_KUCOIN_SECURITY_CONFIG,
+  isSecurityUnlocked = true,
+  onUnlockSecurity,
+  onLockSecurityNow,
+  onUpdateSecurityConfig,
+  onOpenSettingsTab,
 }) => {
   const [apiKey, setApiKey] = useState<string>(config.apiKey);
   const [apiSecret, setApiSecret] = useState<string>(config.apiSecret);
@@ -39,6 +59,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
 
   const [showSecret, setShowSecret] = useState<boolean>(false);
   const [showPassphrase, setShowPassphrase] = useState<boolean>(false);
+  const [isConfigModalOpen, setIsConfigModalOpen] = useState<boolean>(false);
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
@@ -54,8 +75,81 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
     });
   };
 
+  if (securityConfig.enabled && !isSecurityUnlocked) {
+    return (
+      <div className="py-2 animate-in fade-in duration-200">
+        <KuCoinSecurityLockScreen
+          config={securityConfig}
+          titleAr="قفل أمان تبويب التنفيذ المباشر (KuCoin)"
+          subtitleAr="تم تفعيل الحماية المتقدمة للمحفظة الحقيقية. يرجى إدخال رمز القفل الرقمي (PIN Code) أو التأكيد ببصمة الإصبع لفتح تبويب التنفيذ المباشر (KuCoin)."
+          onUnlockSuccess={(method, credId) => {
+            if (onUnlockSecurity) {
+              onUnlockSecurity(method, credId);
+            }
+          }}
+          onOpenSettingsTab={onOpenSettingsTab}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4 animate-in fade-in duration-200">
+      {/* Real Wallet Security Vault Bar (شريط حماية المحفظة الحقيقية بـ PIN وبصمة الإصبع) */}
+      <div
+        data-testid="kucoin_security_vault_bar"
+        className="bg-[#0D2B24]/90 border border-[#01BC8D]/40 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+      >
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-xl bg-[#01BC8D]/20 border border-[#01BC8D]/40 text-[#01BC8D] flex items-center justify-center shrink-0">
+            <ShieldCheck className="w-4 h-4" />
+          </div>
+          <div>
+            <div className="text-xs sm:text-sm font-bold text-white flex items-center gap-2 flex-wrap">
+              <span>أمان المحفظة الحقيقية (KuCoin Security Lock)</span>
+              <span
+                className={`text-[10px] px-2 py-0.5 rounded font-bold ${
+                  securityConfig.enabled
+                    ? 'bg-[#01BC8D] text-[#0B0E11]'
+                    : 'bg-[#232E3A] text-[#8A99AD]'
+                }`}
+              >
+                {securityConfig.enabled
+                  ? `مفعّل (PIN ${securityConfig.biometricEnabled ? '+ بصمة الإصبع' : 'فقط'})`
+                  : 'غير مفعّل'}
+              </span>
+            </div>
+            <p className="text-[11px] text-[#8A99AD] mt-0.5">
+              حماية تبويب التنفيذ المباشر ومفاتيح محفظة KuCoin الحقيقية برمز قفل رقمي (PIN) أو بصمة الإصبع.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setIsConfigModalOpen(true)}
+            data-testid="kucoin_open_security_settings_btn"
+            className="text-xs bg-[#12171D] hover:bg-[#1A222B] text-white border border-[#01BC8D]/40 px-3 py-1.5 rounded-xl flex items-center gap-1.5 font-semibold cursor-pointer transition-colors"
+          >
+            <Fingerprint className="w-3.5 h-3.5 text-[#01BC8D]" />
+            <span>إعدادات رمز PIN والبصمة</span>
+          </button>
+
+          {securityConfig.enabled && onLockSecurityNow && (
+            <button
+              type="button"
+              onClick={onLockSecurityNow}
+              data-testid="kucoin_lock_now_btn"
+              className="text-xs bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-1.5 rounded-xl flex items-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>قفل التبويب الآن</span>
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Title & Architecture Banner */}
       <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -340,6 +434,17 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
           )}
         </div>
       </form>
+
+      <KuCoinSecurityConfigModal
+        isOpen={isConfigModalOpen}
+        config={securityConfig}
+        onClose={() => setIsConfigModalOpen(false)}
+        onUpdateConfig={(partial) => {
+          if (onUpdateSecurityConfig) {
+            onUpdateSecurityConfig(partial);
+          }
+        }}
+      />
     </div>
   );
 };

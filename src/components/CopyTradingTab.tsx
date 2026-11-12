@@ -264,18 +264,6 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
         setPositionHistory(fullData.positionHistory);
       }
 
-      const logs = onSyncTraderToEngine({
-        traderId: trader.leadPortfolioId,
-        traderName: trader.nickname,
-        source: 'COPY_TRADING',
-        positions: fullData.positions,
-        latestRecords: fullData.latestRecords,
-        marginPerTradeUsdt: accMarginPerTrade,
-        accountId: targetAccountId,
-      });
-
-      setSyncLogs((prev) => [...logs, ...prev].slice(0, 30));
-
       const existsInAccount = copiedTraders.find(
         (c) =>
           c.traderId === trader.leadPortfolioId &&
@@ -315,6 +303,18 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
         ];
       }
       saveCopiedTraders(updatedList);
+
+      const logs = onSyncTraderToEngine({
+        traderId: trader.leadPortfolioId,
+        traderName: trader.nickname,
+        source: 'COPY_TRADING',
+        positions: fullData.positions,
+        latestRecords: fullData.latestRecords,
+        marginPerTradeUsdt: accMarginPerTrade,
+        accountId: targetAccountId,
+      });
+
+      setSyncLogs((prev) => [...logs, ...prev].slice(0, 30));
 
       setFeedbackBanner(
         `تم تفعيل نسخ المتداول "${trader.nickname}" في حساب «${targetAccName}» بنجاح! تم سحب (${fullData.positions.length}) مراكز من Positions و (${fullData.latestRecords.length}) حركات دخول/خروج.`

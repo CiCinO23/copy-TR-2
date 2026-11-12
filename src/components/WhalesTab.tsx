@@ -249,18 +249,6 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
         setWhaleRecords(fullData.latestRecords);
       }
 
-      const logs = onSyncTraderToEngine({
-        traderId: whale.topTraderId,
-        traderName: whale.traderName,
-        source: 'SMART_MONEY',
-        positions: fullData.positions,
-        latestRecords: fullData.latestRecords,
-        marginPerTradeUsdt: accMarginPerTrade,
-        accountId: targetAccountId,
-      });
-
-      setSyncLogs((prev) => [...logs, ...prev].slice(0, 30));
-
       const existsInAccount = copiedWhales.find(
         (c) =>
           c.traderId === whale.topTraderId &&
@@ -300,6 +288,18 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
         ];
       }
       saveCopiedWhales(updatedList);
+
+      const logs = onSyncTraderToEngine({
+        traderId: whale.topTraderId,
+        traderName: whale.traderName,
+        source: 'SMART_MONEY',
+        positions: fullData.positions,
+        latestRecords: fullData.latestRecords,
+        marginPerTradeUsdt: accMarginPerTrade,
+        accountId: targetAccountId,
+      });
+
+      setSyncLogs((prev) => [...logs, ...prev].slice(0, 30));
 
       setFeedbackBanner(
         `تم تفعيل نسخ الحوت "${whale.traderName}" في حساب «${targetAccName}» بنجاح! تم جلب (${fullData.positions.length}) صفقات من نافذة Positions و (${fullData.positionHistory.length}) تفاصيل مراكز.`

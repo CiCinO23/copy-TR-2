@@ -50,9 +50,14 @@ import {
   TradingExecutionMode,
   ActiveCopiedTrader,
   MobileNotificationSettings,
+  KuCoinSecurityLockConfig,
 } from '../types';
 import { getCachedPrice, fetchSymbolPrice } from '../services/binanceApi';
 import { mobileNotifications } from '../services/mobileNotifications';
+import { filterPendingChoicesForCopiedTradersOnPage } from '../services/tradeExecutionRules';
+import { KuCoinSecurityLockScreen } from './KuCoinSecurityLockGuard';
+import { DEFAULT_KUCOIN_SECURITY_CONFIG } from '../services/kucoinSecurityLock';
+import { Lock } from 'lucide-react';
 
 interface SimulationTabProps {
   connectionState: BinanceConnectionState;
@@ -78,6 +83,10 @@ interface SimulationTabProps {
     leverage: number
   ) => void;
   onClosePosition: (positionId: string, exitPrice: number) => void;
+  onSecurePosition?: (positionId: string, currentPrice: number, bufferPercent?: number) => void;
+  onExecutePendingChoice?: (choiceId: string) => void;
+  onDismissPendingChoice?: (choiceId: string) => void;
+  onTriggerSampleReconnectChoice?: () => void;
   onScaleInPosition?: (
     positionId: string,
     addPercent: number,
@@ -107,6 +116,10 @@ interface SimulationTabProps {
   notificationSettings?: MobileNotificationSettings;
   onUpdateNotificationSettings?: (partial: Partial<MobileNotificationSettings>) => void;
   onOpenNotificationsCenter?: () => void;
+  securityConfig?: KuCoinSecurityLockConfig;
+  isSecurityUnlocked?: boolean;
+  onUnlockSecurity?: (method: 'PIN' | 'BIOMETRIC', credentialId?: string | null) => void;
+  onLockSecurityNow?: () => void;
 }
 
 export const SimulationTab: React.FC<SimulationTabProps> = ({
@@ -123,6 +136,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   onSetVirtualBalance,
   onOpenOrder,
   onClosePosition,
+  onSecurePosition,
+  onExecutePendingChoice,
+  onDismissPendingChoice,
+  onTriggerSampleReconnectChoice,
   onScaleInPosition,
   onPartialExitPosition,
   onResetPaper,
@@ -135,6 +152,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   notificationSettings,
   onUpdateNotificationSettings,
   onOpenNotificationsCenter,
+  securityConfig = DEFAULT_KUCOIN_SECURITY_CONFIG,
+  isSecurityUnlocked = true,
+  onUnlockSecurity,
+  onLockSecurityNow,
 }) => {
   const settings = paperSnapshot.settings;
   const accounts = paperSnapshot.accounts || [];
@@ -649,7 +670,19 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
     };
   };
 
+  const [isPromptingRealModeUnlock, setIsPromptingRealModeUnlock] = useState<boolean>(false);
+
   const handleModeSwitch = (mode: TradingExecutionMode) => {
+    if (
+      mode === 'REAL' &&
+      securityConfig.enabled &&
+      securityConfig.protectRealTradingSwitch &&
+      !isSecurityUnlocked
+    ) {
+      setIsPromptingRealModeUnlock(true);
+      return;
+    }
+    setIsPromptingRealModeUnlock(false);
     onUpdateTradeSettings({ mode }, activeAccountId, false);
   };
 
@@ -1570,10 +1603,67 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 : 'text-[#8A99AD] hover:text-white'
             }`}
           >
-            <Zap className="w-4 h-4 shrink-0" />
+            {securityConfig.enabled &&
+            securityConfig.protectRealTradingSwitch &&
+            !isSecurityUnlocked ? (
+              <Lock className="w-4 h-4 shrink-0 text-[#01BC8D]" />
+            ) : (
+              <Zap className="w-4 h-4 shrink-0" />
+            )}
             <span>التداول الحقيقي (عبر حساب KuCoin API)</span>
           </button>
         </div>
+
+        {/* Security Lock Gate Modal/Panel when switching to Real KuCoin Execution */}
+        {(isPromptingRealModeUnlock ||
+          (isRealMode &&
+            securityConfig.enabled &&
+            securityConfig.protectRealTradingSwitch &&
+            !isSecurityUnlocked)) && (
+          <div className="pt-2">
+            <KuCoinSecurityLockScreen
+              config={securityConfig}
+              titleAr="تأكيد الأمان للتبديل إلى التداول الحقيقي (KuCoin)"
+              subtitleAr="لحماية محفظتك الحقيقية في كوكوين، يرجى إدخال رمز القفل الرقمي (PIN Code) أو التأكيد ببصمة الإصبع لتفعيل وضع التنفيذ الحقيقي."
+              onUnlockSuccess={(method, credId) => {
+                if (onUnlockSecurity) {
+                  onUnlockSecurity(method, credId);
+                }
+                setIsPromptingRealModeUnlock(false);
+                onUpdateTradeSettings({ mode: 'REAL' }, activeAccountId, false);
+              }}
+              onCancelOrFallback={() => {
+                setIsPromptingRealModeUnlock(false);
+                if (isRealMode) {
+                  onUpdateTradeSettings({ mode: 'VIRTUAL' }, activeAccountId, false);
+                }
+              }}
+              cancelLabelAr="البقاء في وضع التداول الافتراضي الآمن"
+            />
+          </div>
+        )}
+
+        {/* Quick Lock Real Mode Bar when unlocked in Real Mode */}
+        {isRealMode && securityConfig.enabled && isSecurityUnlocked && onLockSecurityNow && (
+          <div className="bg-[#0D2B24]/80 border border-[#01BC8D]/40 rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs text-white font-semibold">
+              <ShieldCheck className="w-4 h-4 text-[#01BC8D] shrink-0" />
+              <span>وضع التداول الحقيقي (KuCoin) مفتوح ومؤمّن بـ PIN / بصمة الإصبع</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                onLockSecurityNow();
+                onUpdateTradeSettings({ mode: 'VIRTUAL' }, activeAccountId, false);
+              }}
+              data-testid="simulation_lock_real_wallet_btn"
+              className="text-[11px] bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-1 rounded-lg flex items-center gap-1 cursor-pointer transition-colors shrink-0"
+            >
+              <Lock className="w-3 h-3" />
+              <span>قفل المحفظة الحقيقية والعودة للافتراضي</span>
+            </button>
+          </div>
+        )}
 
         {/* Multi-Account Virtual Trading Bar (فتح وتسمية عدة حسابات افتراضية في نفس الوقت) */}
         {!isRealMode && (
@@ -3094,6 +3184,160 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
         })()}
       </div>
 
+      {/* قسم معالجة الصفقات السابقة بعد انقطاع الاتصال وخيارات التنفيذ بالسعر الحالي (يعرض فقط صفقات المتداول المنسوخ في هذه الصفحة) */}
+      {(() => {
+        const copiedTradersOnThisPage = copiedTraders.filter(
+          (ct) => (ct.accountId || 'acc_default') === activeAccountId
+        );
+        const pendingChoicesForCopiedTradersOnPage = filterPendingChoicesForCopiedTradersOnPage(
+          paperSnapshot.pendingReconnectChoices || [],
+          copiedTraders,
+          activeAccountId
+        );
+
+        return (
+          <div
+            data-testid="reconnect_trades_advantage_section"
+            className="bg-[#12171D] border border-[#F59E0B]/40 rounded-2xl p-4 sm:p-5 space-y-3"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-start gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-[#3B2606] border border-[#F59E0B]/40 flex items-center justify-center text-[#FBBF24] shrink-0 mt-0.5">
+                  <Zap className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-bold text-sm sm:text-base text-white">
+                      صفقات سابقة بانتظار قرارك لأن السعر الحالي أقل أفضلية من سعر دخول المتداول
+                    </h3>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 font-bold">
+                      خاص بالمتداول المنسوخ في هذه الصفحة فقط
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-[#8A99AD] mt-0.5 leading-relaxed">
+                    عند فتح التطبيق بعد انقطاع الاتصال ووجود صفقات سابقة للمتداول المنسوخ في هذه الصفحة: إذا كانت{' '}
+                    <strong className="text-[#F6465D]">بيع (SHORT)</strong> والسعر الحالي{' '}
+                    <strong className="text-[#01BC8D]">أعلى من سعر الدخول</strong> (أو{' '}
+                    <strong className="text-[#01BC8D]">شراء LONG</strong> والسعر الحالي{' '}
+                    <strong className="text-[#01BC8D]">أدنى من سعر الدخول</strong>) أي في مصلحتك ⬅️{' '}
+                    <strong className="text-white">تُنفذ مباشرة بالسعر الحالي</strong>. أما إذا كان السعر أسوأ ⬅️{' '}
+                    <strong className="text-[#FBBF24]">تظهر هنا كخيار تنفيذ خاص بالمتداول المنسوخ في هذه الصفحة</strong>.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {copiedTradersOnThisPage.length === 0 ? (
+              <div
+                data-testid="no_copied_trader_pending_choices_msg"
+                className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3.5 text-center text-xs text-[#8A99AD]"
+              >
+                لا يوجد متداول منسوخ في حساب «{activeAccountName}» بهذه الصفحة حالياً — تظهر هنا فقط صفقات المتداول المنسوخ في هذه الصفحة عندما يكون السعر الحالي أقل أفضلية من سعر دخوله.
+              </div>
+            ) : pendingChoicesForCopiedTradersOnPage.length === 0 ? (
+              <div
+                data-testid="no_unfavorable_pending_choices_msg"
+                className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-[#8A99AD]"
+              >
+                <span>
+                  لا توجد صفقات معلقة بانتظار قرارك للمتداول المنسوخ في هذه الصفحة (
+                  <strong className="text-[#01BC8D]">
+                    {copiedTradersOnThisPage.map((ct) => ct.nickname).join('، ')}
+                  </strong>
+                  ) حالياً.
+                </span>
+                <span className="text-[10px] text-[#01BC8D] bg-[#0D2B24] border border-[#01BC8D]/30 px-2.5 py-1 rounded-lg font-bold shrink-0">
+                  المتداولون المنسوخون بالصفحة: {copiedTradersOnThisPage.length}
+                </span>
+              </div>
+            ) : (
+              <div className="space-y-2 pt-2 border-t border-[#232E3A]">
+                <div className="text-xs font-bold text-[#FBBF24] flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>
+                    صفقات سابقة بانتظار قرارك لأن السعر الحالي أقل أفضلية من سعر دخول المتداول (
+                    {pendingChoicesForCopiedTradersOnPage.length}):
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 gap-2">
+                  {pendingChoicesForCopiedTradersOnPage.map((choice) => {
+                    const liveNow = getSymbolPrice(choice.symbol) || choice.currentMarketPrice;
+                    const isShort = choice.side === 'SHORT';
+                    return (
+                      <div
+                        key={choice.id}
+                        data-testid={`pending_reconnect_choice_card_${choice.id}`}
+                        className="bg-[#0B0E11] border border-[#F59E0B]/60 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <CoinIcon symbol={choice.symbol} size="sm" />
+                            <span className="font-mono font-extrabold text-sm text-white">
+                              {choice.symbol}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded font-mono font-bold text-[10px] ${
+                                isShort
+                                  ? 'bg-[#2B1216] text-[#F6465D]'
+                                  : 'bg-[#0D2B24] text-[#01BC8D]'
+                              }`}
+                            >
+                              {choice.side} ({isShort ? 'بيع' : 'شراء'}) {choice.leverage}x
+                            </span>
+                            <span className="text-[10px] px-2 py-0.5 rounded bg-[#1A222B] text-[#8A99AD]">
+                              المتداول المنسوخ: <strong className="text-white">{choice.traderName}</strong> • حساب:{' '}
+                              <strong className="text-[#01BC8D]">{choice.accountName}</strong>
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-[#8A99AD]">
+                            سعر دخول المتداول:{' '}
+                            <strong className="font-mono text-white">
+                              ${choice.traderEntryPrice.toFixed(4)}
+                            </strong>{' '}
+                            • السعر الحالي للسوق:{' '}
+                            <strong className="font-mono text-[#FBBF24]">
+                              ${liveNow.toFixed(4)}
+                            </strong>{' '}
+                            • الحجم المخصص:{' '}
+                            <strong className="font-mono text-[#01BC8D]">
+                              ${choice.marginUsdt.toFixed(2)} USDT
+                            </strong>
+                          </div>
+                          <div className="text-[10px] text-[#FBBF24]">
+                            {isShort
+                              ? '⚠️ صفقة بيع (SHORT) للمتداول المنسوخ والسعر الحالي أقل من سعر دخوله — هل ترغب بتنفيذها بالسعر الحالي الآن؟'
+                              : '⚠️ صفقة شراء (LONG) للمتداول المنسوخ والسعر الحالي أعلى من سعر دخوله — هل ترغب بتنفيذها بالسعر الحالي الآن؟'}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            data-testid={`execute_pending_choice_btn_${choice.id}`}
+                            onClick={() => onExecutePendingChoice && onExecutePendingChoice(choice.id)}
+                            className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-extrabold px-3 py-2 rounded-xl text-xs cursor-pointer transition-colors"
+                          >
+                            ✅ تنفيذ بالسعر الحالي الآن
+                          </button>
+                          <button
+                            type="button"
+                            data-testid={`dismiss_pending_choice_btn_${choice.id}`}
+                            onClick={() => onDismissPendingChoice && onDismissPendingChoice(choice.id)}
+                            className="bg-[#2B1216] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/40 font-bold px-3 py-2 rounded-xl text-xs cursor-pointer transition-colors"
+                          >
+                            تجاهل الصفقة
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Open Positions Card */}
       <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
@@ -3142,7 +3386,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
 
         {openPositions.length === 0 ? (
           <p className="text-xs sm:text-sm text-[#8A99AD] leading-relaxed py-3">
-            لا توجد صفقات مفتوحة حالياً. عند نسخ متداول أو أكثر، ستظهر الصفقات هنا بالحجم والرافعة والعمولة التي حددتها مع أوقات الدخول وسجل التدعيم والانسحاب الجزئي.
+            لا توجد صفقات مفتوحة حالياً. عند نسخ متداول أو أكثر، ستظهر الصفقات هنا بالحجم والرافعة والعمولة التي حددتها مع التنفيذ الفوري بالسعر الحالي للسوق، وخيار تأمين الصفقة بوقف خسارة قرب السعر الحالي.
           </p>
         ) : (
           <div className="space-y-2.5">
@@ -3215,6 +3459,17 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                           >
                             الحجم الحالي: {currentScale}%
                           </span>
+                          {p.stopLossPrice && p.stopLossPrice > 0 && (
+                            <span
+                              data-testid={`secured_sl_badge_${p.id}`}
+                              className="text-[10px] px-2 py-0.5 rounded font-mono font-bold bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/60 flex items-center gap-1"
+                            >
+                              <ShieldCheck className="w-3 h-3" />
+                              <span>
+                                مؤمّنة بوقف خسارة قرب السعر الحالي: SL @ {p.stopLossPrice.toFixed(4)}
+                              </span>
+                            </span>
+                          )}
                           {p.sourceTraderName && (
                             <button
                               type="button"
@@ -3241,8 +3496,14 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                               (الأصلية: {p.initialMarginUsdt.toFixed(2)}$)
                             </span>
                           )}{' '}
-                          • دخول:{' '}
-                          <span className="font-mono text-white">{p.entryPrice.toFixed(4)}</span> • حالي:{' '}
+                          • دخولك (بالسعر الحالي):{' '}
+                          <span className="font-mono text-white">{p.entryPrice.toFixed(4)}</span>
+                          {p.traderEntryPrice && Math.abs(p.traderEntryPrice - p.entryPrice) > 0.0001 && (
+                            <span className="text-[10px] text-[#8A99AD] font-mono mr-1">
+                              (دخول المتداول: {p.traderEntryPrice.toFixed(4)})
+                            </span>
+                          )}{' '}
+                          • حالي:{' '}
                           <span className="font-mono text-[#01BC8D]">{livePrice.toFixed(4)}</span> • العمولة:{' '}
                           <span className="font-mono text-[#F6465D]">{(p.commissionUsdt || 0).toFixed(3)}$</span>
                         </div>
@@ -3260,8 +3521,8 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                     </div>
 
                     <div className="flex flex-col sm:items-end justify-between gap-2">
-                      <div className="flex items-center justify-between sm:justify-end gap-4">
-                        <div className="text-left font-mono">
+                      <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2">
+                        <div className="text-left font-mono ml-2">
                           <div
                             className={`font-bold ${
                               isProfit ? 'text-[#01BC8D]' : 'text-[#F6465D]'
@@ -3275,7 +3536,26 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                           </div>
                         </div>
 
+                        {onSecurePosition && (
+                          <button
+                            type="button"
+                            data-testid={`secure_position_btn_${p.id}`}
+                            onClick={() => onSecurePosition(p.id, livePrice, 0.2)}
+                            className="bg-[#0D2B24] hover:bg-[#01BC8D] text-[#01BC8D] hover:text-[#0B0E11] border border-[#01BC8D]/50 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                            title="تأمين الصفقة بوضع وقف خسارة (Stop-Loss) قرب السعر الحالي للسوق"
+                          >
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                            <span>
+                              {p.isSecuredNearCurrent
+                                ? 'تحديث تأمين الصفقة'
+                                : 'تأمين الصفقة (وقف خسارة قرب السعر الحالي)'}
+                            </span>
+                          </button>
+                        )}
+
                         <button
+                          type="button"
+                          data-testid={`close_position_btn_${p.id}`}
                           onClick={() => onClosePosition(p.id, livePrice)}
                           className="bg-[#F6465D]/15 hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/40 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
                         >

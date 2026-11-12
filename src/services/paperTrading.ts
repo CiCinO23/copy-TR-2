@@ -6,13 +6,24 @@ import {
   TraderOpenPosition,
   TraderLatestRecord,
   CopiedSyncLog,
+  PendingReconnectTradeChoice,
+  ActiveCopiedTrader,
 } from '../types';
 import { mobileNotifications } from './mobileNotifications';
+import {
+  evaluatePreviousTradePriceAdvantage,
+  calculateSecureStopLossPrice,
+  isStopLossTriggered,
+  resolveLiveMarketExecutionPrice,
+  filterPendingChoicesForCopiedTradersOnPage,
+} from './tradeExecutionRules';
 
 const PAPER_STORAGE_KEY = 'whale_copy_paper_state_v3';
 const TRADE_SETTINGS_STORAGE_KEY = 'whale_copy_trade_settings_v1';
 const MULTI_ACCOUNTS_STORAGE_KEY = 'whale_copy_multi_accounts_v1';
 const ACTIVE_ACCOUNT_ID_STORAGE_KEY = 'whale_copy_active_account_id_v1';
+const PENDING_CHOICES_STORAGE_KEY = 'whale_copy_pending_reconnect_choices_v1';
+const DISMISSED_CHOICES_STORAGE_KEY = 'whale_copy_dismissed_reconnect_choices_v1';
 
 export const DEFAULT_TRADE_SETTINGS: TradeExecutionSettings = {
   mode: 'VIRTUAL',
@@ -50,9 +61,98 @@ export interface StoredVirtualAccount {
 export class PaperEngine {
   private accounts: StoredVirtualAccount[] = [];
   private activeAccountId: string = 'acc_default';
+  private pendingReconnectChoices: PendingReconnectTradeChoice[] = [];
+  private dismissedReconnectChoiceIds: Set<string> = new Set();
 
   constructor() {
     this.loadMultiAccounts();
+    this.loadPendingChoices();
+  }
+
+  private loadStoredCopiedTraders(): ActiveCopiedTrader[] {
+    const result: ActiveCopiedTrader[] = [];
+    try {
+      const ctRaw = localStorage.getItem('whale_copied_traders_ct');
+      if (ctRaw) {
+        const parsed = JSON.parse(ctRaw);
+        if (Array.isArray(parsed)) result.push(...parsed);
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      const smRaw = localStorage.getItem('whale_copied_traders_sm');
+      if (smRaw) {
+        const parsed = JSON.parse(smRaw);
+        if (Array.isArray(parsed)) result.push(...parsed);
+      }
+    } catch {
+      // ignore
+    }
+    return result;
+  }
+
+  private loadPendingChoices(): void {
+    try {
+      const rawPending = localStorage.getItem(PENDING_CHOICES_STORAGE_KEY);
+      if (rawPending) {
+        const parsed = JSON.parse(rawPending);
+        if (Array.isArray(parsed)) {
+          this.pendingReconnectChoices = parsed.filter(
+            (c: PendingReconnectTradeChoice) => c && !String(c.id || '').startsWith('choice_sample_')
+          );
+        }
+      }
+      const rawDismissed = localStorage.getItem(DISMISSED_CHOICES_STORAGE_KEY);
+      if (rawDismissed) {
+        const parsed = JSON.parse(rawDismissed);
+        if (Array.isArray(parsed)) {
+          this.dismissedReconnectChoiceIds = new Set(parsed);
+        }
+      }
+      this.prunePendingChoicesForCopiedTraders(this.loadStoredCopiedTraders());
+    } catch {
+      // ignore
+    }
+  }
+
+  /**
+   * Prunes any pending reconnect trade choices that do not belong to an actively copied trader
+   * in its assigned virtual account.
+   */
+  public prunePendingChoicesForCopiedTraders(copiedTraders?: ActiveCopiedTrader[]): void {
+    const list = copiedTraders ?? this.loadStoredCopiedTraders();
+    const beforeLen = this.pendingReconnectChoices.length;
+    this.pendingReconnectChoices = this.pendingReconnectChoices.filter((choice) => {
+      if (!choice || String(choice.id || '').startsWith('choice_sample_')) {
+        return false;
+      }
+      const choiceAccId = choice.accountId || 'acc_default';
+      return list.some(
+        (ct) =>
+          (ct.accountId || 'acc_default') === choiceAccId &&
+          ((ct.traderId === choice.traderId && ct.source === choice.source) ||
+            ct.nickname === choice.traderName)
+      );
+    });
+    if (this.pendingReconnectChoices.length !== beforeLen) {
+      this.savePendingChoices();
+    }
+  }
+
+  private savePendingChoices(): void {
+    try {
+      localStorage.setItem(
+        PENDING_CHOICES_STORAGE_KEY,
+        JSON.stringify(this.pendingReconnectChoices)
+      );
+      localStorage.setItem(
+        DISMISSED_CHOICES_STORAGE_KEY,
+        JSON.stringify(Array.from(this.dismissedReconnectChoiceIds))
+      );
+    } catch {
+      // ignore
+    }
   }
 
   private loadLegacySettings(): TradeExecutionSettings {
@@ -165,6 +265,7 @@ export class PaperEngine {
     try {
       localStorage.setItem(MULTI_ACCOUNTS_STORAGE_KEY, JSON.stringify(this.accounts));
       localStorage.setItem(ACTIVE_ACCOUNT_ID_STORAGE_KEY, this.activeAccountId);
+      this.savePendingChoices();
 
       // Keep legacy keys in sync with the active account for backward compatibility
       const activeAcc = this.getAccount();
@@ -537,6 +638,16 @@ export class PaperEngine {
     const scope = options?.scope || 'ALL_ACCOUNTS';
     const removeExtra = options?.removeExtraAccounts || false;
 
+    if (scope === 'ALL_ACCOUNTS') {
+      this.pendingReconnectChoices = [];
+      this.dismissedReconnectChoiceIds.clear();
+    } else {
+      const activeId = this.getActiveAccountId();
+      this.pendingReconnectChoices = this.pendingReconnectChoices.filter(
+        (c) => c.accountId !== activeId
+      );
+    }
+
     if (removeExtra && this.accounts.length > 1) {
       const primary = this.accounts[0];
       this.accounts.forEach((a) => mobileNotifications.resetAccountDrawdownAlert(a.id));
@@ -597,7 +708,8 @@ export class PaperEngine {
     initialScaleAdjustments?: PaperPosition['scaleAdjustments'],
     currentScalePercent?: number,
     initialMarginOverride?: number,
-    accountId?: string
+    accountId?: string,
+    traderEntryPrice?: number
   ): PaperPosition {
     const acc = this.getAccount(accountId);
     const openCount = this.getOpenPositionsCount(acc.id);
@@ -640,7 +752,7 @@ export class PaperEngine {
             {
               id: `${posId}_init`,
               actionType: 'INITIAL_ENTRY',
-              actionLabelAr: `فتح الصفقة الأولي (${side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${baseInitialMargin.toFixed(2)}$)`,
+              actionLabelAr: `فتح الصفقة بالسعر الحالي للسوق (${side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${baseInitialMargin.toFixed(2)}$)`,
               timestamp: traderEntryTime || now,
               volumePercent: 100,
               remainingPercentAfter: 100,
@@ -658,6 +770,7 @@ export class PaperEngine {
       marginUsdt: cleanMargin,
       initialMarginUsdt: baseInitialMargin,
       entryPrice,
+      traderEntryPrice: traderEntryPrice && traderEntryPrice > 0 ? traderEntryPrice : entryPrice,
       leverage: safeLeverage,
       commissionUsdt: Number(entryCommission.toFixed(4)),
       status: 'OPEN',
@@ -688,12 +801,13 @@ export class PaperEngine {
   }
 
   /**
-   * Open a position using the target Account's Fixed Trade Settings
+   * Open a position using the target Account's Fixed Trade Settings at the Current Market Price
    */
   public openPositionWithUserSettings(params: {
     symbol: string;
     side: 'LONG' | 'SHORT';
-    entryPrice: number;
+    entryPrice: number; // Always the current live market price
+    traderEntryPrice?: number; // Original entry price of the trader
     traderLeverage?: number;
     customMarginUsdt?: number;
     customLeverage?: number;
@@ -733,18 +847,19 @@ export class PaperEngine {
       let runningScalePct = 100;
 
       mappedAdjustments = params.traderScaleAdjustments.map((adj) => {
-        const p = adj.price > 0 ? adj.price : safePrice;
+        const p = safePrice; // Always execute at the current market price
 
         if (adj.actionType === 'INITIAL_ENTRY') {
           runningMargin = baseMarginUsdt;
           runningScalePct = 100;
           return {
             ...adj,
+            price: safePrice,
             volumePercent: 100,
             remainingPercentAfter: 100,
             executedQty: Number(((baseMarginUsdt * leverage) / p).toFixed(5)),
             marginDeltaUsdt: baseMarginUsdt,
-            actionLabelAr: `فتح الصفقة الأولي (${params.side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${baseMarginUsdt.toFixed(2)}$)`,
+            actionLabelAr: `فتح الصفقة بالسعر الحالي (${params.side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${baseMarginUsdt.toFixed(2)}$)`,
           };
         }
 
@@ -756,6 +871,7 @@ export class PaperEngine {
             runningScalePct += traderPct;
             return {
               ...adj,
+              price: adj.price > 0 ? adj.price : safePrice,
               volumePercent: traderPct,
               remainingPercentAfter: runningScalePct,
               executedQty: Number(((addedMargin * leverage) / p).toFixed(5)),
@@ -769,6 +885,7 @@ export class PaperEngine {
             runningScalePct += equivPct;
             return {
               ...adj,
+              price: adj.price > 0 ? adj.price : safePrice,
               volumePercent: equivPct,
               remainingPercentAfter: runningScalePct,
               executedQty: Number(((addedMargin * leverage) / p).toFixed(5)),
@@ -785,6 +902,7 @@ export class PaperEngine {
           runningScalePct = Math.max(5, Math.round(runningScalePct * (1 - withdrawPct / 100)));
           return {
             ...adj,
+            price: adj.price > 0 ? adj.price : safePrice,
             volumePercent: -withdrawPct,
             remainingPercentAfter: runningScalePct,
             executedQty: Number(((withdrawnMargin * leverage) / p).toFixed(5)),
@@ -819,8 +937,92 @@ export class PaperEngine {
       mappedAdjustments,
       finalScalePercent,
       baseMarginUsdt,
-      acc.id
+      acc.id,
+      params.traderEntryPrice
     );
+  }
+
+  /**
+   * تأمين الصفقة (Secure Position): Places a protective Stop-Loss near the current live market price
+   */
+  public securePositionNearCurrentPrice(
+    positionId: string,
+    currentMarketPrice: number,
+    bufferPercent: number = 0.2,
+    accountId?: string
+  ): PaperPosition {
+    const { pos } = this.findAccountAndPosition(positionId, accountId);
+    const safeCurrent = currentMarketPrice > 0 ? currentMarketPrice : pos.entryPrice;
+    const safeBuffer = Math.min(Math.max(0.05, bufferPercent || 0.2), 5);
+    const stopLossPrice = calculateSecureStopLossPrice({
+      side: pos.side,
+      currentMarketPrice: safeCurrent,
+      bufferPercent: safeBuffer,
+    });
+
+    pos.stopLossPrice = stopLossPrice;
+    pos.isSecuredNearCurrent = true;
+    pos.securedBufferPercent = safeBuffer;
+
+    this.saveState();
+
+    mobileNotifications.notifyPositionSecured({
+      position: pos,
+      currentPrice: safeCurrent,
+      stopLossPrice,
+    });
+
+    return pos;
+  }
+
+  /**
+   * Automatically checks and executes any triggered Stop-Loss on open positions across all accounts
+   */
+  public checkAndExecuteStopLosses(currentPrices: Record<string, number>): CopiedSyncLog[] {
+    const logs: CopiedSyncLog[] = [];
+    if (!currentPrices || Object.keys(currentPrices).length === 0) return logs;
+
+    for (const acc of this.accounts) {
+      const openList = acc.positions.filter((p) => p.status === 'OPEN');
+      for (const pos of openList) {
+        const livePrice = currentPrices[pos.symbol];
+        if (!livePrice || livePrice <= 0) continue;
+
+        if (
+          pos.stopLossPrice &&
+          pos.stopLossPrice > 0 &&
+          isStopLossTriggered({
+            side: pos.side,
+            stopLossPrice: pos.stopLossPrice,
+            currentMarketPrice: livePrice,
+          })
+        ) {
+          try {
+            const closed = this.closePosition(pos.id, livePrice, Date.now(), acc.id);
+            logs.push({
+              id: `log_sl_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              timestamp: Date.now(),
+              traderId: pos.sourceTraderId || 'secured_sl',
+              traderName: pos.sourceTraderName || 'تأمين الصفقة',
+              source: pos.sourceType === 'SMART_MONEY' ? 'SMART_MONEY' : 'COPY_TRADING',
+              action: 'EXIT',
+              volumePercent: -100,
+              symbol: closed.symbol,
+              side: closed.side,
+              price: livePrice,
+              quantity: closed.quantity,
+              leverage: closed.leverage,
+              accountId: acc.id,
+              accountName: acc.name,
+              messageAr: `[${acc.name}] تم تفعيل وقف الخسارة الآمن (تأمين الصفقة) وإغلاق ${closed.symbol} بالسعر الحالي ${livePrice.toFixed(4)} USDT`,
+            });
+          } catch (e) {
+            console.warn('Stop-loss execution failed:', e);
+          }
+        }
+      }
+    }
+    return logs;
   }
 
   /**
@@ -1056,7 +1258,117 @@ export class PaperEngine {
   }
 
   /**
-   * Synchronize a trader's open Positions and Latest records into a specific virtual account
+   * Execute a pending reconnect/previous trade choice at the current live market price
+   */
+  public executePendingReconnectChoice(
+    choiceId: string,
+    currentPrices: Record<string, number> = {}
+  ): PaperPosition | null {
+    const idx = this.pendingReconnectChoices.findIndex((c) => c.id === choiceId);
+    if (idx === -1) return null;
+    const choice = this.pendingReconnectChoices[idx];
+    this.pendingReconnectChoices.splice(idx, 1);
+    this.savePendingChoices();
+
+    const livePrice = resolveLiveMarketExecutionPrice(
+      choice.symbol,
+      currentPrices,
+      choice.currentMarketPrice,
+      choice.traderEntryPrice
+    );
+
+    const opened = this.openPositionWithUserSettings({
+      symbol: choice.symbol,
+      side: choice.side,
+      entryPrice: livePrice,
+      traderEntryPrice: choice.traderEntryPrice,
+      traderLeverage: choice.leverage,
+      customMarginUsdt: choice.marginUsdt,
+      customLeverage: choice.leverage,
+      sourceTraderId: choice.traderId,
+      sourceTraderName: choice.traderName,
+      sourceType: choice.source,
+      traderEntryTime: choice.traderEntryTime,
+      traderScaleAdjustments: choice.traderScaleAdjustments,
+      currentScalePercent: choice.currentScalePercent,
+      accountId: choice.accountId,
+    });
+
+    return opened;
+  }
+
+  /**
+   * Dismiss a pending reconnect/previous trade choice so it is not executed
+   */
+  public dismissPendingReconnectChoice(choiceId: string): void {
+    const idx = this.pendingReconnectChoices.findIndex((c) => c.id === choiceId);
+    if (idx !== -1) {
+      const choice = this.pendingReconnectChoices[idx];
+      this.dismissedReconnectChoiceIds.add(choice.id);
+      this.pendingReconnectChoices.splice(idx, 1);
+      this.savePendingChoices();
+    } else {
+      this.dismissedReconnectChoiceIds.add(choiceId);
+      this.savePendingChoices();
+    }
+  }
+
+  /**
+   * Trigger a realistic sample previous trade choice notification (for testing/demonstration)
+   */
+  public triggerSampleReconnectChoiceNotification(
+    currentPrices: Record<string, number> = {},
+    accountId?: string
+  ): PendingReconnectTradeChoice {
+    const acc = this.getAccount(accountId);
+    const liveBtc = resolveLiveMarketExecutionPrice('BTCUSDT', currentPrices, 68450, 68450);
+    // Simulate a previous SHORT trade where current price is LOWER than entry price (unfavorable for new SHORT entry)
+    const traderEntry = Number((liveBtc * 1.015).toFixed(2));
+    const evalRes = evaluatePreviousTradePriceAdvantage({
+      side: 'SHORT',
+      traderEntryPrice: traderEntry,
+      currentMarketPrice: liveBtc,
+    });
+
+    const sampleChoice: PendingReconnectTradeChoice = {
+      id: `choice_sample_${Date.now()}`,
+      createdAt: Date.now(),
+      traderId: 'ct_lead_whale_1',
+      traderName: 'AlphaWhale_Pro',
+      source: 'COPY_TRADING',
+      accountId: acc.id,
+      accountName: acc.name,
+      symbol: 'BTCUSDT',
+      side: 'SHORT',
+      traderEntryPrice: traderEntry,
+      currentMarketPrice: liveBtc,
+      priceDiffPercent: evalRes.priceDiffPercent,
+      leverage: acc.settings.leverage || 5,
+      marginUsdt: acc.settings.tradeValueUsdt || 25,
+      traderEntryTime: Date.now() - 1800000,
+      currentScalePercent: 100,
+    };
+
+    this.pendingReconnectChoices = [
+      sampleChoice,
+      ...this.pendingReconnectChoices.filter((c) => c.id !== sampleChoice.id),
+    ];
+    this.savePendingChoices();
+    mobileNotifications.notifyReconnectTradeChoice({
+      ...sampleChoice,
+      choiceId: sampleChoice.id,
+      sourceType: sampleChoice.source,
+    });
+    return sampleChoice;
+  }
+
+  /**
+   * Synchronize a trader's open Positions and Latest records into a specific virtual account:
+   * - Automatically executes full EXIT and PARTIAL_EXIT when the trader withdraws or closes positions
+   * - Opens trades at the current live market price (السعر الحالي للسوق)
+   * - For existing/previous trades upon opening/reconnecting:
+   *   - Executes immediately if current price is favorable (SHORT & current >= entry, or LONG & current <= entry)
+   *   - Prompts user with an in-app notification choice if current price is unfavorable
    */
   public syncTraderPositionsAndRecords(params: {
     traderId: string;
@@ -1066,29 +1378,41 @@ export class PaperEngine {
     latestRecords: TraderLatestRecord[];
     marginPerTradeUsdt?: number;
     accountId?: string;
+    currentPrices?: Record<string, number>;
+    checkReconnectAdvantage?: boolean;
   }): CopiedSyncLog[] {
     const acc = this.getAccount(params.accountId);
     const logs: CopiedSyncLog[] = [];
+    const liveMap = params.currentPrices || {};
+    const shouldCheckAdvantage = params.checkReconnectAdvantage !== false;
+
     const userMarginUsdt =
       acc.settings.enforceUserSizeOnCopy
         ? acc.settings.tradeValueUsdt
         : params.marginPerTradeUsdt || acc.settings.tradeValueUsdt;
     const userLeverage = acc.settings.leverage;
 
-    // 1. Process EXIT, PARTIAL_EXIT, and SCALE_IN records on already open copied positions in this account
-    const recentRecords = params.latestRecords.slice(0, 10);
+    // 1. Process EXIT, PARTIAL_EXIT, and SCALE_IN records from `latestRecords` on already open copied positions
+    const recentRecords = params.latestRecords.slice(0, 15);
     for (const rec of recentRecords) {
       const matchingOpen = acc.positions.find(
         (p) =>
           p.status === 'OPEN' &&
-          p.symbol === rec.symbol.toUpperCase() &&
-          p.sourceTraderName === params.traderName
+          p.symbol.toUpperCase() === rec.symbol.toUpperCase() &&
+          (p.sourceTraderId === params.traderId || p.sourceTraderName === params.traderName)
       );
 
-      if (matchingOpen && rec.avgPrice > 0) {
+      if (matchingOpen) {
+        const liveExecPrice = resolveLiveMarketExecutionPrice(
+          rec.symbol,
+          liveMap,
+          rec.avgPrice,
+          matchingOpen.entryPrice
+        );
+
         if (rec.actionType === 'EXIT') {
           try {
-            const closed = this.closePosition(matchingOpen.id, rec.avgPrice, rec.orderTime, acc.id);
+            const closed = this.closePosition(matchingOpen.id, liveExecPrice, rec.orderTime, acc.id);
             logs.push({
               id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               timestamp: rec.orderTime || Date.now(),
@@ -1099,12 +1423,12 @@ export class PaperEngine {
               volumePercent: -100,
               symbol: closed.symbol,
               side: closed.side,
-              price: rec.avgPrice,
+              price: liveExecPrice,
               quantity: closed.quantity,
               leverage: closed.leverage,
               accountId: acc.id,
               accountName: acc.name,
-              messageAr: `[${acc.name}] خروج كامل (-100%) من ${closed.symbol} بسعر ${rec.avgPrice.toFixed(2)} USDT (الصافي: ${(closed.realizedPnl || 0).toFixed(2)} USDT)`,
+              messageAr: `[${acc.name}] خروج آلي كامل (-100%) من ${closed.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT عند انسحاب المتداول (الصافي: ${(closed.realizedPnl || 0).toFixed(2)} USDT)`,
             });
           } catch (e) {
             console.warn('Exit sync skipped:', e);
@@ -1119,7 +1443,7 @@ export class PaperEngine {
               const updated = this.partialExitPosition(
                 matchingOpen.id,
                 withdrawPct,
-                rec.avgPrice,
+                liveExecPrice,
                 rec.orderTime,
                 acc.id
               );
@@ -1133,12 +1457,12 @@ export class PaperEngine {
                 volumePercent: -withdrawPct,
                 symbol: updated.symbol,
                 side: updated.side,
-                price: rec.avgPrice,
+                price: liveExecPrice,
                 quantity: updated.quantity,
                 leverage: updated.leverage,
                 accountId: acc.id,
                 accountName: acc.name,
-                messageAr: `[${acc.name}] انسحاب جزئي بنفس النسبة (-${withdrawPct}%) من ${updated.symbol} بسعر ${rec.avgPrice.toFixed(2)} USDT (متبقي ${updated.currentScalePercent}%)`,
+                messageAr: `[${acc.name}] انسحاب جزئي آلي بنفس النسبة (-${withdrawPct}%) من ${updated.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT (متبقي ${updated.currentScalePercent}%)`,
               });
             } catch (e) {
               console.warn('Partial exit sync skipped:', e);
@@ -1154,7 +1478,7 @@ export class PaperEngine {
               const updated = this.scaleInFromTraderSignal(
                 matchingOpen.id,
                 addPct,
-                rec.avgPrice,
+                liveExecPrice,
                 rec.orderTime,
                 acc.id
               );
@@ -1173,12 +1497,12 @@ export class PaperEngine {
                 volumePercent: lastAdj?.volumePercent || addPct,
                 symbol: updated.symbol,
                 side: updated.side,
-                price: rec.avgPrice,
+                price: liveExecPrice,
                 quantity: updated.quantity,
                 leverage: updated.leverage,
                 accountId: acc.id,
                 accountName: acc.name,
-                messageAr: `[${acc.name}] تدعيم الصفقة ${modeLabel} على ${updated.symbol} بسعر ${rec.avgPrice.toFixed(2)} USDT (الحجم الحالي ${updated.currentScalePercent}%)`,
+                messageAr: `[${acc.name}] تدعيم الصفقة ${modeLabel} على ${updated.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT (الحجم الحالي ${updated.currentScalePercent}%)`,
               });
             } catch (e) {
               console.warn('Scale-in sync skipped:', e);
@@ -1188,7 +1512,160 @@ export class PaperEngine {
       }
     }
 
-    // 2. Copy Open Positions from `Positions` tab using target account's tradeValueUsdt and leverage
+    // 1.B: Detect full exits and partial withdrawals directly from `params.positions` changes
+    const openTraderPositionsInAcc = acc.positions.filter(
+      (p) =>
+        p.status === 'OPEN' &&
+        (p.sourceTraderId === params.traderId || p.sourceTraderName === params.traderName)
+    );
+
+    for (const userOpenPos of openTraderPositionsInAcc) {
+      const stillOpenByTrader = params.positions.find(
+        (tp) =>
+          tp.symbol.toUpperCase() === userOpenPos.symbol.toUpperCase() &&
+          tp.side === userOpenPos.side
+      );
+
+      const liveExecPrice = resolveLiveMarketExecutionPrice(
+        userOpenPos.symbol,
+        liveMap,
+        stillOpenByTrader?.markPrice,
+        userOpenPos.entryPrice
+      );
+
+      if (!stillOpenByTrader) {
+        // Trader no longer holds this position -> automatically execute Full Exit!
+        // (Only skip if positions array is empty AND the position was just opened from latestRecords within the last 5 seconds)
+        const justOpenedFromRecord =
+          params.positions.length === 0 && Date.now() - userOpenPos.openTime < 5000;
+        if (!justOpenedFromRecord) {
+          try {
+            const closed = this.closePosition(userOpenPos.id, liveExecPrice, Date.now(), acc.id);
+            logs.push({
+              id: `log_auto_exit_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              timestamp: Date.now(),
+              traderId: params.traderId,
+              traderName: params.traderName,
+              source: params.source,
+              action: 'EXIT',
+              volumePercent: -100,
+              symbol: closed.symbol,
+              side: closed.side,
+              price: liveExecPrice,
+              quantity: closed.quantity,
+              leverage: closed.leverage,
+              accountId: acc.id,
+              accountName: acc.name,
+              messageAr: `[${acc.name}] إغلاق آلي كامل (-100%) لصفقة ${closed.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT بعد خروج المتداول ${params.traderName}`,
+            });
+          } catch (e) {
+            console.warn('Auto close on missing trader position failed:', e);
+          }
+        }
+      } else {
+        // Position is still open by trader: check if trader added a new PARTIAL_EXIT or reduced currentScalePercent
+        if (stillOpenByTrader.scaleAdjustments && stillOpenByTrader.scaleAdjustments.length > 0) {
+          for (const adj of stillOpenByTrader.scaleAdjustments) {
+            if (adj.actionType === 'PARTIAL_EXIT') {
+              const alreadyApplied = userOpenPos.scaleAdjustments?.some(
+                (ua) =>
+                  ua.actionType === 'PARTIAL_EXIT' &&
+                  (ua.id === adj.id || Math.abs(ua.timestamp - adj.timestamp) < 60000)
+              );
+              if (!alreadyApplied && adj.timestamp > userOpenPos.openTime - 5000) {
+                try {
+                  const withdrawPct = Math.abs(adj.volumePercent || 30);
+                  const updated = this.partialExitPosition(
+                    userOpenPos.id,
+                    withdrawPct,
+                    liveExecPrice,
+                    adj.timestamp,
+                    acc.id
+                  );
+                  logs.push({
+                    id: `log_auto_partial_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                    timestamp: adj.timestamp || Date.now(),
+                    traderId: params.traderId,
+                    traderName: params.traderName,
+                    source: params.source,
+                    action: 'PARTIAL_EXIT',
+                    volumePercent: -withdrawPct,
+                    symbol: updated.symbol,
+                    side: updated.side,
+                    price: liveExecPrice,
+                    quantity: updated.quantity,
+                    leverage: updated.leverage,
+                    accountId: acc.id,
+                    accountName: acc.name,
+                    messageAr: `[${acc.name}] انسحاب جزئي آلي (-${withdrawPct}%) من ${updated.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT تزامناً مع المتداول`,
+                  });
+                } catch (e) {
+                  console.warn('Auto partial exit from position adjustments skipped:', e);
+                }
+              }
+            }
+          }
+        }
+
+        // Also check if trader's currentScalePercent dropped significantly below userOpenPos.currentScalePercent
+        const userScale = userOpenPos.currentScalePercent || 100;
+        const traderScale = stillOpenByTrader.currentScalePercent || 100;
+        if (traderScale > 0 && userScale - traderScale >= 5) {
+          const withdrawPct = Math.min(
+            95,
+            Math.max(5, Math.round(((userScale - traderScale) / userScale) * 100))
+          );
+          try {
+            const updated = this.partialExitPosition(
+              userOpenPos.id,
+              withdrawPct,
+              liveExecPrice,
+              stillOpenByTrader.lastUpdateTime || Date.now(),
+              acc.id
+            );
+            logs.push({
+              id: `log_scale_diff_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              timestamp: Date.now(),
+              traderId: params.traderId,
+              traderName: params.traderName,
+              source: params.source,
+              action: 'PARTIAL_EXIT',
+              volumePercent: -withdrawPct,
+              symbol: updated.symbol,
+              side: updated.side,
+              price: liveExecPrice,
+              quantity: updated.quantity,
+              leverage: updated.leverage,
+              accountId: acc.id,
+              accountName: acc.name,
+              messageAr: `[${acc.name}] سحب جزئي آلي (-${withdrawPct}%) من ${updated.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT لمطابقة تقليص المتداول لمركزه`,
+            });
+          } catch (e) {
+            console.warn('Scale diff partial exit skipped:', e);
+          }
+        }
+      }
+    }
+
+    // Remove any pending choices for this trader in this account that are no longer open in `params.positions` or are already open in `acc.positions`
+    this.pendingReconnectChoices = this.pendingReconnectChoices.filter((c) => {
+      if ((c.accountId || 'acc_default') !== acc.id) return true;
+      if (c.traderId !== params.traderId && c.traderName !== params.traderName) return true;
+      const stillOpenInTrader = params.positions.some(
+        (tp) => tp.symbol.toUpperCase() === c.symbol.toUpperCase() && tp.side === c.side
+      );
+      const alreadyOpenInAcc = acc.positions.some(
+        (p) =>
+          p.status === 'OPEN' &&
+          p.symbol.toUpperCase() === c.symbol.toUpperCase() &&
+          p.side === c.side &&
+          (p.sourceTraderId === params.traderId || p.sourceTraderName === params.traderName)
+      );
+      return stillOpenInTrader && !alreadyOpenInAcc;
+    });
+    this.savePendingChoices();
+
+    // 2. Copy Open Positions from `Positions` tab
     for (const pos of params.positions) {
       if (this.getOpenPositionsCount(acc.id) >= acc.settings.maxConcurrentTrades) {
         logs.push({
@@ -1213,18 +1690,79 @@ export class PaperEngine {
       const alreadyOpen = acc.positions.find(
         (p) =>
           p.status === 'OPEN' &&
-          p.symbol === pos.symbol.toUpperCase() &&
+          p.symbol.toUpperCase() === pos.symbol.toUpperCase() &&
           p.side === pos.side &&
-          p.sourceTraderName === params.traderName
+          (p.sourceTraderId === params.traderId || p.sourceTraderName === params.traderName)
       );
 
       if (!alreadyOpen) {
-        const price = pos.markPrice > 0 ? pos.markPrice : pos.entryPrice;
+        // Resolve the LIVE current market price (السعر الحالي للسوق وليس رقماً ثابتاً)
+        const liveMarketPrice = resolveLiveMarketExecutionPrice(
+          pos.symbol,
+          liveMap,
+          pos.markPrice,
+          pos.entryPrice
+        );
+        const traderEntryPrice = pos.entryPrice > 0 ? pos.entryPrice : liveMarketPrice;
+
+        // Check if this is a previous trade where we should compare current price vs trader entry price
+        const evalResult = evaluatePreviousTradePriceAdvantage({
+          side: pos.side,
+          traderEntryPrice,
+          currentMarketPrice: liveMarketPrice,
+        });
+
+        const choiceId = `choice_${acc.id}_${params.traderId}_${pos.symbol.toUpperCase()}_${pos.side}`;
+
+        if (shouldCheckAdvantage && evalResult.decision === 'PROMPT_USER_CHOICE') {
+          if (!this.dismissedReconnectChoiceIds.has(choiceId)) {
+            const existingChoice = this.pendingReconnectChoices.find((c) => c.id === choiceId);
+            const choiceObj: PendingReconnectTradeChoice = {
+              id: choiceId,
+              createdAt: existingChoice?.createdAt || Date.now(),
+              traderId: params.traderId,
+              traderName: params.traderName,
+              source: params.source,
+              accountId: acc.id,
+              accountName: acc.name,
+              symbol: pos.symbol.toUpperCase(),
+              side: pos.side,
+              traderEntryPrice,
+              currentMarketPrice: liveMarketPrice,
+              priceDiffPercent: evalResult.priceDiffPercent,
+              leverage: userLeverage,
+              marginUsdt: userMarginUsdt,
+              traderEntryTime: pos.entryTime,
+              traderScaleAdjustments: pos.scaleAdjustments,
+              currentScalePercent: pos.currentScalePercent,
+            };
+
+            if (!existingChoice) {
+              this.pendingReconnectChoices.unshift(choiceObj);
+              this.savePendingChoices();
+              mobileNotifications.notifyReconnectTradeChoice({
+                ...choiceObj,
+                choiceId: choiceObj.id,
+                sourceType: choiceObj.source,
+              });
+            } else {
+              Object.assign(existingChoice, choiceObj);
+              this.savePendingChoices();
+            }
+          }
+          continue;
+        }
+
+        // Price is in the user's favor (or equal) -> Execute immediately at the CURRENT LIVE MARKET PRICE!
+        this.pendingReconnectChoices = this.pendingReconnectChoices.filter((c) => c.id !== choiceId);
+        this.savePendingChoices();
+
         try {
           const opened = this.openPositionWithUserSettings({
             symbol: pos.symbol,
             side: pos.side,
-            entryPrice: price,
+            entryPrice: liveMarketPrice,
+            traderEntryPrice,
             traderLeverage: pos.leverage,
             customMarginUsdt: userMarginUsdt,
             customLeverage: userLeverage,
@@ -1251,7 +1789,7 @@ export class PaperEngine {
             leverage: opened.leverage,
             accountId: acc.id,
             accountName: acc.name,
-            messageAr: `[${acc.name}] نسخ مركز (${opened.symbol} ${opened.side}) بقيمة ${opened.marginUsdt.toFixed(2)}$ (${opened.leverage}x) • نسبة الحجم الحالية ${opened.currentScalePercent || 100}%`,
+            messageAr: `[${acc.name}] تنفيذ فوري بالسعر الحالي (${opened.symbol} ${opened.side} @ ${opened.entryPrice.toFixed(4)}) بقيمة ${opened.marginUsdt.toFixed(2)}$ (${opened.leverage}x) — ${evalResult.reasonAr}`,
           });
         } catch (err: any) {
           console.warn('Could not open synced position:', err);
@@ -1259,7 +1797,8 @@ export class PaperEngine {
       }
     }
 
-    // 3. If trader had no open `Positions`, check `Latest records` ENTRY signals
+    // 3. Only if trader had no open `Positions` AND it's a favorable immediate execution, check `Latest records` ENTRY signals
+    // (Never add closed/historical latestRecords into pendingReconnectChoices — only show open positions of the copied trader!)
     if (params.positions.length === 0) {
       for (const rec of recentRecords) {
         if (rec.actionType === 'ENTRY' || rec.actionType === 'SCALE_IN') {
@@ -1274,15 +1813,33 @@ export class PaperEngine {
           const existingOpen = acc.positions.find(
             (p) =>
               p.status === 'OPEN' &&
-              p.symbol === rec.symbol.toUpperCase() &&
-              p.sourceTraderName === params.traderName
+              p.symbol.toUpperCase() === rec.symbol.toUpperCase() &&
+              (p.sourceTraderId === params.traderId || p.sourceTraderName === params.traderName)
           );
           if (!existingOpen && rec.avgPrice > 0) {
+            const liveMarketPrice = resolveLiveMarketExecutionPrice(
+              rec.symbol,
+              liveMap,
+              rec.avgPrice,
+              rec.avgPrice
+            );
+            const traderEntryPrice = rec.avgPrice;
+            const evalResult = evaluatePreviousTradePriceAdvantage({
+              side: targetSide,
+              traderEntryPrice,
+              currentMarketPrice: liveMarketPrice,
+            });
+
+            if (shouldCheckAdvantage && evalResult.decision === 'PROMPT_USER_CHOICE') {
+              continue;
+            }
+
             try {
               const opened = this.openPositionWithUserSettings({
                 symbol: rec.symbol,
                 side: targetSide,
-                entryPrice: rec.avgPrice,
+                entryPrice: liveMarketPrice,
+                traderEntryPrice,
                 customMarginUsdt: userMarginUsdt,
                 customLeverage: userLeverage,
                 sourceTraderId: params.traderId,
@@ -1306,7 +1863,7 @@ export class PaperEngine {
                 leverage: opened.leverage,
                 accountId: acc.id,
                 accountName: acc.name,
-                messageAr: `[${acc.name}] دخول من Latest records (${opened.symbol} ${opened.side}) بحجمك المحدد (${userMarginUsdt}$ × ${opened.leverage}x)`,
+                messageAr: `[${acc.name}] دخول بالسعر الحالي (${opened.symbol} ${opened.side} @ ${opened.entryPrice.toFixed(4)}) بحجمك المحدد (${userMarginUsdt}$ × ${opened.leverage}x)`,
               });
             } catch (e) {
               console.warn('Entry sync skipped:', e);
@@ -1320,6 +1877,9 @@ export class PaperEngine {
   }
 
   public getSnapshot(currentPrices: Record<string, number>, accountId?: string): PaperAccountSnapshot {
+    // Automatically check and execute any Stop-Loss (including secured near-current-price stop-loss)
+    this.checkAndExecuteStopLosses(currentPrices);
+
     const acc = this.getAccount(accountId);
     let totalUnrealized = 0;
     let openPositionsMargin = 0;
@@ -1342,6 +1902,24 @@ export class PaperEngine {
     // Check if any virtual account reached the configured Drawdown threshold and dispatch an instant Push Notification
     mobileNotifications.checkAccountsDrawdown(summaries);
 
+    // Strictly filter pendingReconnectChoices to only trades belonging to the copied trader(s) in this active account
+    const storedCopiedTraders = this.loadStoredCopiedTraders();
+    this.prunePendingChoicesForCopiedTraders(storedCopiedTraders);
+    const activeAccountPendingChoices = filterPendingChoicesForCopiedTradersOnPage(
+      this.pendingReconnectChoices,
+      storedCopiedTraders,
+      acc.id
+    ).filter(
+      (c) =>
+        !acc.positions.some(
+          (p) =>
+            p.status === 'OPEN' &&
+            p.symbol.toUpperCase() === c.symbol.toUpperCase() &&
+            p.side === c.side &&
+            (p.sourceTraderId === c.traderId || p.sourceTraderName === c.traderName)
+        )
+    );
+
     return {
       activeAccountId: acc.id,
       activeAccountName: acc.name,
@@ -1353,6 +1931,7 @@ export class PaperEngine {
       totalCommissionsPaid: parseFloat(acc.totalCommissionsPaid.toFixed(4)),
       positions: [...acc.positions],
       settings: { ...acc.settings },
+      pendingReconnectChoices: activeAccountPendingChoices,
     };
   }
 }

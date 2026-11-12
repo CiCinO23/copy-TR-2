@@ -1075,6 +1075,119 @@ class MobileNotificationService {
     this.settings.enabled = prevEnabled;
     return created!;
   }
+
+  /**
+   * Dispatch an interactive In-App Notification when a previous/reconnection trade has an unfavorable price
+   * compared to the trader's entry price, giving the user the choice to execute now at current price or skip.
+   */
+  public notifyReconnectTradeChoice(params: {
+    choiceId: string;
+    symbol: string;
+    side: 'LONG' | 'SHORT';
+    leverage: number;
+    marginUsdt: number;
+    traderName: string;
+    sourceType: 'COPY_TRADING' | 'SMART_MONEY';
+    traderEntryPrice: number;
+    currentMarketPrice: number;
+    priceDiffPercent: number;
+    accountId: string;
+    accountName: string;
+    executionMode?: 'VIRTUAL' | 'REAL';
+  }): MobileTradeNotification | null {
+    const isShort = params.side === 'SHORT';
+    const sideAr = isShort ? 'بيع (SHORT)' : 'شراء (LONG)';
+    const comparisonAr = isShort
+      ? `السعر الحالي (${this.formatPrice(params.currentMarketPrice)}$) أقل من سعر دخول المتداول (${this.formatPrice(params.traderEntryPrice)}$)`
+      : `السعر الحالي (${this.formatPrice(params.currentMarketPrice)}$) أعلى من سعر دخول المتداول (${this.formatPrice(params.traderEntryPrice)}$)`;
+
+    const notification: MobileTradeNotification = {
+      id: `notif_choice_${params.choiceId}`,
+      timestamp: Date.now(),
+      read: false,
+      actionType: 'RECONNECT_TRADE_CHOICE',
+      actionTitleAr: `⏳ خيار تنفيذ صفقة سابقة (${sideAr})`,
+      symbol: params.symbol,
+      side: params.side,
+      leverage: params.leverage,
+      executionMode: params.executionMode || 'VIRTUAL',
+      traderName: params.traderName,
+      sourceType: params.sourceType,
+      price: params.currentMarketPrice,
+      entryPrice: params.traderEntryPrice,
+      exitPrice: params.currentMarketPrice,
+      quantity: Number(((params.marginUsdt * params.leverage) / Math.max(0.0001, params.currentMarketPrice)).toFixed(5)),
+      marginUsdt: params.marginUsdt,
+      volumePercent: params.priceDiffPercent,
+      remainingScalePercent: 100,
+      commissionUsdt: 0,
+      accountId: params.accountId,
+      accountName: params.accountName,
+      pendingTradeChoiceId: params.choiceId,
+      traderOriginalEntryPrice: params.traderEntryPrice,
+      summaryTextAr: `صفقة ${sideAr} سابقة على ${params.symbol} لدى "${params.traderName}": ${comparisonAr}. السعر الحالي ليس في مصلحتك مقارنة بسعر دخول المتداول — اختر التنفيذ بالسعر الحالي أو التجاهل.`,
+    };
+
+    // Avoid duplicate unread notifications for the exact same choiceId
+    this.notifications = [
+      notification,
+      ...this.notifications.filter((n) => n.pendingTradeChoiceId !== params.choiceId),
+    ].slice(0, MAX_STORED_NOTIFICATIONS);
+    this.saveNotifications();
+
+    this.playChime('PARTIAL_EXIT', false);
+    this.triggerVibration('PARTIAL_EXIT');
+    this.sendBrowserSystemNotification(notification);
+    this.emitChange(notification);
+    return notification;
+  }
+
+  /**
+   * Dispatch a notification when the user secures an open position with a Stop-Loss near the current price
+   */
+  public notifyPositionSecured(params: {
+    position: PaperPosition;
+    currentPrice: number;
+    stopLossPrice: number;
+  }): MobileTradeNotification | null {
+    if (!this.settings.enabled) return null;
+    const { position, currentPrice, stopLossPrice } = params;
+    const notification: MobileTradeNotification = {
+      id: `notif_sec_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      timestamp: Date.now(),
+      read: false,
+      actionType: 'POSITION_SECURED',
+      actionTitleAr: '🛡️ تأمين الصفقة بوقف خسارة',
+      symbol: position.symbol,
+      side: position.side,
+      leverage: position.leverage,
+      executionMode: position.executionMode || 'VIRTUAL',
+      traderName: position.sourceTraderName || 'تأمين يدوي',
+      sourceType: position.sourceType || 'MANUAL',
+      price: currentPrice,
+      entryPrice: position.entryPrice,
+      exitPrice: stopLossPrice,
+      quantity: position.quantity,
+      marginUsdt: position.marginUsdt,
+      volumePercent: position.currentScalePercent || 100,
+      remainingScalePercent: position.currentScalePercent || 100,
+      commissionUsdt: position.commissionUsdt || 0,
+      accountId: position.accountId,
+      accountName: position.accountName,
+      stopLossPrice,
+      summaryTextAr: `تم تأمين صفقة ${position.symbol} (${position.side}) بوضع وقف خسارة قرب السعر الحالي عند ${this.formatPrice(stopLossPrice)}$ (السعر الحالي: ${this.formatPrice(currentPrice)}$).`,
+    };
+
+    this.notifications.unshift(notification);
+    if (this.notifications.length > MAX_STORED_NOTIFICATIONS) {
+      this.notifications = this.notifications.slice(0, MAX_STORED_NOTIFICATIONS);
+    }
+    this.saveNotifications();
+    this.playChime('OPEN_TRADE', true);
+    this.emitChange(notification);
+    return notification;
+  }
 }
 
 export const mobileNotifications = new MobileNotificationService();
+

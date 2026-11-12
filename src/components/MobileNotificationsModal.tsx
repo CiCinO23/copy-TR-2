@@ -58,10 +58,12 @@ interface MobilePushToastBannerProps {
   onOpenSimulation: () => void;
   onOpenCenter: () => void;
   onSelectAccount?: (accountId: string) => void;
+  onExecutePendingChoice?: (choiceId: string) => void;
+  onDismissPendingChoice?: (choiceId: string) => void;
 }
 
 /**
- * In-App Mobile Push Banner (drops from top of screen on mobile/desktop when a trade event or drawdown alert fires)
+ * In-App Mobile Push Banner (drops from top of screen on mobile/desktop when a trade event, reconnect trade choice, or drawdown alert fires)
  */
 export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
   notification,
@@ -69,10 +71,14 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
   onOpenSimulation,
   onOpenCenter,
   onSelectAccount,
+  onExecutePendingChoice,
+  onDismissPendingChoice,
 }) => {
   if (!notification) return null;
 
   const isDrawdownAlert = notification.actionType === 'DRAWDOWN_ALERT';
+  const isReconnectChoice = notification.actionType === 'RECONNECT_TRADE_CHOICE';
+  const isPositionSecured = notification.actionType === 'POSITION_SECURED';
   const isLong = notification.side === 'LONG';
   const hasPnl = notification.realizedPnlUsdt !== undefined;
   const pnlVal = notification.realizedPnlUsdt || 0;
@@ -81,6 +87,10 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
 
   const actionColorClass = isDrawdownAlert
     ? 'border-[#F6465D] shadow-[0_10px_40px_rgba(246,70,93,0.45)]'
+    : isReconnectChoice
+    ? 'border-[#F59E0B] shadow-[0_10px_40px_rgba(245,158,11,0.45)]'
+    : isPositionSecured
+    ? 'border-[#01BC8D] shadow-[0_10px_35px_rgba(1,188,141,0.4)]'
     : notification.actionType === 'OPEN_TRADE'
     ? 'border-[#01BC8D] shadow-[0_10px_35px_rgba(1,188,141,0.35)]'
     : notification.actionType === 'SCALE_IN'
@@ -93,6 +103,10 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
 
   const headerBadgeClass = isDrawdownAlert
     ? 'bg-[#3A1219] text-[#F6465D] border-[#F6465D]/60'
+    : isReconnectChoice
+    ? 'bg-[#3B2606] text-[#FBBF24] border-[#F59E0B]/60'
+    : isPositionSecured
+    ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/60'
     : notification.actionType === 'OPEN_TRADE'
     ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/50'
     : notification.actionType === 'SCALE_IN'
@@ -107,7 +121,7 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
     <div
       dir="rtl"
       data-testid="mobile_push_toast_banner"
-      className="fixed top-[calc(0.5rem+env(safe-area-inset-top,0px))] inset-x-2 sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 sm:w-[500px] z-50 animate-in slide-in-from-top duration-200"
+      className="fixed top-[calc(0.5rem+env(safe-area-inset-top,0px))] inset-x-2 sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 sm:w-[520px] z-50 animate-in slide-in-from-top duration-200"
     >
       <div
         className={`bg-[#12171D]/98 backdrop-blur-xl border-2 rounded-2xl p-3.5 text-white ${actionColorClass}`}
@@ -218,12 +232,54 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
               </span>
             </div>
           </div>
+        ) : isReconnectChoice ? (
+          <div className="grid grid-cols-3 gap-2 my-2.5 text-[11px]">
+            <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">سعر دخول المتداول</span>
+              <span className="font-mono font-bold text-white text-xs block mt-0.5">
+                ${formatPriceClean(notification.traderOriginalEntryPrice || notification.entryPrice)}
+              </span>
+            </div>
+            <div className="bg-[#0B0E11] border border-[#F59E0B]/50 rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">السعر الحالي للسوق</span>
+              <span className="font-mono font-extrabold text-[#FBBF24] text-xs block mt-0.5">
+                ${formatPriceClean(notification.price)}
+              </span>
+            </div>
+            <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">حجم الصفقة المخصص</span>
+              <span className="font-mono font-bold text-[#01BC8D] text-xs block mt-0.5">
+                ${notification.marginUsdt.toFixed(2)} × {notification.leverage}x
+              </span>
+            </div>
+          </div>
+        ) : isPositionSecured ? (
+          <div className="grid grid-cols-3 gap-2 my-2.5 text-[11px]">
+            <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">سعر الدخول</span>
+              <span className="font-mono font-bold text-white text-xs block mt-0.5">
+                ${formatPriceClean(notification.entryPrice)}
+              </span>
+            </div>
+            <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">السعر الحالي</span>
+              <span className="font-mono font-bold text-[#01BC8D] text-xs block mt-0.5">
+                ${formatPriceClean(notification.price)}
+              </span>
+            </div>
+            <div className="bg-[#0B0E11] border border-[#01BC8D]/50 rounded-xl p-2">
+              <span className="text-[#8A99AD] block text-[10px]">وقف الخسارة (تأمين)</span>
+              <span className="font-mono font-extrabold text-[#01BC8D] text-xs block mt-0.5">
+                ${formatPriceClean(notification.stopLossPrice || notification.price)}
+              </span>
+            </div>
+          </div>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 my-2.5 text-[11px]">
             <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
               <span className="text-[#8A99AD] block text-[10px]">
                 {notification.actionType === 'OPEN_TRADE'
-                  ? 'سعر الدخول'
+                  ? 'سعر الدخول (الحالي)'
                   : notification.actionType === 'SCALE_IN'
                   ? 'سعر التدعيم / المتوسط'
                   : 'سعر الدخول ⬅️ الخروج'}
@@ -287,36 +343,69 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
         )}
 
         {/* Bottom Actions */}
-        <div className="flex items-center justify-between gap-2 pt-1">
-          <p className="text-[11px] text-[#EAECEF] line-clamp-1">{notification.summaryTextAr}</p>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1">
+          <p className="text-[11px] text-[#EAECEF] line-clamp-2">{notification.summaryTextAr}</p>
           <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={() => {
-                onDismiss();
-                if (isDrawdownAlert && notification.accountId && onSelectAccount) {
-                  onSelectAccount(notification.accountId);
-                }
-                onOpenSimulation();
-              }}
-              className={`${
-                isDrawdownAlert
-                  ? 'bg-[#F6465D] hover:bg-[#ff5a70] text-white'
-                  : 'bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11]'
-              } font-bold px-2.5 py-1 rounded-lg text-[11px] cursor-pointer`}
-            >
-              {isDrawdownAlert ? 'فحص الحساب الآن' : 'عرض الصفقة'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onDismiss();
-                onOpenCenter();
-              }}
-              className="bg-[#1A222B] hover:bg-[#232E3A] text-[#8A99AD] hover:text-white border border-[#232E3A] px-2.5 py-1 rounded-lg text-[11px] cursor-pointer"
-            >
-              كل التنبيهات
-            </button>
+            {isReconnectChoice && notification.pendingTradeChoiceId ? (
+              <>
+                <button
+                  type="button"
+                  data-testid="banner_execute_pending_choice_btn"
+                  onClick={() => {
+                    if (onExecutePendingChoice && notification.pendingTradeChoiceId) {
+                      onExecutePendingChoice(notification.pendingTradeChoiceId);
+                    }
+                    onDismiss();
+                  }}
+                  className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-extrabold px-3 py-1.5 rounded-lg text-[11px] cursor-pointer"
+                >
+                  ✅ تنفيذ بالسعر الحالي الآن
+                </button>
+                <button
+                  type="button"
+                  data-testid="banner_dismiss_pending_choice_btn"
+                  onClick={() => {
+                    if (onDismissPendingChoice && notification.pendingTradeChoiceId) {
+                      onDismissPendingChoice(notification.pendingTradeChoiceId);
+                    }
+                    onDismiss();
+                  }}
+                  className="bg-[#3A1219] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/40 font-bold px-2.5 py-1.5 rounded-lg text-[11px] cursor-pointer"
+                >
+                  تجاهل الصفقة
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onDismiss();
+                    if (isDrawdownAlert && notification.accountId && onSelectAccount) {
+                      onSelectAccount(notification.accountId);
+                    }
+                    onOpenSimulation();
+                  }}
+                  className={`${
+                    isDrawdownAlert
+                      ? 'bg-[#F6465D] hover:bg-[#ff5a70] text-white'
+                      : 'bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11]'
+                  } font-bold px-2.5 py-1 rounded-lg text-[11px] cursor-pointer`}
+                >
+                  {isDrawdownAlert ? 'فحص الحساب الآن' : 'عرض الصفقة'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onDismiss();
+                    onOpenCenter();
+                  }}
+                  className="bg-[#1A222B] hover:bg-[#232E3A] text-[#8A99AD] hover:text-white border border-[#232E3A] px-2.5 py-1 rounded-lg text-[11px] cursor-pointer"
+                >
+                  كل التنبيهات
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -334,6 +423,8 @@ interface MobileNotificationsCenterModalProps {
   onClearAll: () => void;
   onNavigateToSimulation: () => void;
   onSelectAccount?: (accountId: string) => void;
+  onExecutePendingChoice?: (choiceId: string) => void;
+  onDismissPendingChoice?: (choiceId: string) => void;
 }
 
 export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterModalProps> = ({
@@ -346,6 +437,8 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
   onClearAll,
   onNavigateToSimulation,
   onSelectAccount,
+  onExecutePendingChoice,
+  onDismissPendingChoice,
 }) => {
   const [activeTab, setActiveTab] = useState<'HISTORY' | 'SETTINGS'>('HISTORY');
   const [filterType, setFilterType] = useState<'ALL' | MobileNotificationActionType>('ALL');
@@ -508,6 +601,8 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {[
                     { key: 'ALL', label: 'الكل' },
+                    { key: 'RECONNECT_TRADE_CHOICE', label: '⏳ خيارات صفقات سابقة' },
+                    { key: 'POSITION_SECURED', label: '🛡️ تأمين الصفقة' },
                     { key: 'DRAWDOWN_ALERT', label: '⚠️ تنبيهات التراجع' },
                     { key: 'OPEN_TRADE', label: 'فتح صفقات' },
                     { key: 'SCALE_IN', label: 'التدعيم' },
@@ -570,6 +665,8 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                 <div className="space-y-2.5">
                   {filteredNotifications.map((item) => {
                     const isDrawdownAlert = item.actionType === 'DRAWDOWN_ALERT';
+                    const isReconnectChoice = item.actionType === 'RECONNECT_TRADE_CHOICE';
+                    const isPositionSecured = item.actionType === 'POSITION_SECURED';
                     const isLong = item.side === 'LONG';
                     const hasPnl = item.realizedPnlUsdt !== undefined;
                     const pnlVal = item.realizedPnlUsdt || 0;
@@ -578,6 +675,10 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
 
                     const badgeStyle = isDrawdownAlert
                       ? 'bg-[#3A1219] text-[#F6465D] border-[#F6465D]/50'
+                      : isReconnectChoice
+                      ? 'bg-[#3B2606] text-[#FBBF24] border-[#F59E0B]/50'
+                      : isPositionSecured
+                      ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/50'
                       : item.actionType === 'OPEN_TRADE'
                       ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/40'
                       : item.actionType === 'SCALE_IN'
@@ -594,6 +695,8 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                         className={`bg-[#0B0E11] border rounded-2xl p-3.5 space-y-2.5 transition-all ${
                           isDrawdownAlert
                             ? 'border-[#F6465D]/70 shadow-[0_0_15px_rgba(246,70,93,0.12)]'
+                            : isReconnectChoice
+                            ? 'border-[#F59E0B]/70 shadow-[0_0_15px_rgba(245,158,11,0.15)]'
                             : !item.read
                             ? 'border-[#01BC8D]/60 shadow-[0_0_15px_rgba(1,188,141,0.1)]'
                             : 'border-[#232E3A]'
@@ -726,6 +829,56 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                               </span>
                             </div>
                           </div>
+                        ) : isReconnectChoice ? (
+                          <div className="grid grid-cols-3 gap-2 bg-[#12171D] border border-[#F59E0B]/40 rounded-xl p-2.5 text-[11px]">
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                سعر دخول المتداول
+                              </span>
+                              <span className="font-mono font-bold text-white">
+                                ${formatPriceClean(item.traderOriginalEntryPrice || item.entryPrice)}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                السعر الحالي للسوق
+                              </span>
+                              <span className="font-mono font-extrabold text-[#FBBF24]">
+                                ${formatPriceClean(item.price)}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                قيمة الصفقة والرافعة
+                              </span>
+                              <span className="font-mono font-bold text-[#01BC8D]">
+                                ${item.marginUsdt.toFixed(2)} × {item.leverage}x
+                              </span>
+                            </div>
+                          </div>
+                        ) : isPositionSecured ? (
+                          <div className="grid grid-cols-3 gap-2 bg-[#12171D] border border-[#01BC8D]/40 rounded-xl p-2.5 text-[11px]">
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">سعر الدخول</span>
+                              <span className="font-mono font-bold text-white">
+                                ${formatPriceClean(item.entryPrice)}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">السعر الحالي</span>
+                              <span className="font-mono font-bold text-[#01BC8D]">
+                                ${formatPriceClean(item.price)}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-[#8A99AD] block text-[10px]">
+                                وقف الخسارة (تأمين)
+                              </span>
+                              <span className="font-mono font-extrabold text-[#01BC8D]">
+                                ${formatPriceClean(item.stopLossPrice || item.price)}
+                              </span>
+                            </div>
+                          </div>
                         ) : (
                           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-[#12171D] border border-[#232E3A] rounded-xl p-2.5 text-[11px]">
                             <div>
@@ -797,9 +950,35 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                           </div>
                         )}
 
-                        {/* Summary Line */}
-                        <div className="text-[11px] text-[#8A99AD] flex items-center justify-between">
+                        {/* Summary Line & Optional Reconnect Choice Buttons */}
+                        <div className="text-[11px] text-[#8A99AD] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                           <span>{item.summaryTextAr}</span>
+                          {isReconnectChoice && item.pendingTradeChoiceId && (
+                            <div className="flex items-center gap-2 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (onExecutePendingChoice && item.pendingTradeChoiceId) {
+                                    onExecutePendingChoice(item.pendingTradeChoiceId);
+                                  }
+                                }}
+                                className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-extrabold px-3 py-1 rounded-lg text-[11px] cursor-pointer"
+                              >
+                                ✅ تنفيذ الصفقة بالسعر الحالي الآن
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (onDismissPendingChoice && item.pendingTradeChoiceId) {
+                                    onDismissPendingChoice(item.pendingTradeChoiceId);
+                                  }
+                                }}
+                                className="bg-[#3A1219] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/40 font-bold px-2.5 py-1 rounded-lg text-[11px] cursor-pointer"
+                              >
+                                تجاهل
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                     );
