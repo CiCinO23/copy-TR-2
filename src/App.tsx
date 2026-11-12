@@ -207,6 +207,14 @@ export const App: React.FC = () => {
     handleTestKuCoinConnection(cleared);
   };
 
+  const handleClearKuCoinOrders = () => {
+    clearKuCoinOrderHistory();
+    setKucoinConnectionState((prev) => ({
+      ...prev,
+      recentOrders: [],
+    }));
+  };
+
   // Save Binance config & retest
   const handleSaveAndTestBinance = (updated: BinanceConfig) => {
     setBinanceConfig(updated);
@@ -1123,6 +1131,7 @@ export const App: React.FC = () => {
                 onSaveAndTest={handleSaveKuCoin}
                 onClearKeys={handleClearKuCoin}
                 onRefresh={() => handleTestKuCoinConnection(kucoinConfig)}
+                onClearOrderHistory={handleClearKuCoinOrders}
                 onOpenSimulationTab={() => setSelectedTab('Simulation')}
                 securityConfig={kucoinSecurityConfig}
                 isSecurityUnlocked={isKucoinSecurityUnlocked}

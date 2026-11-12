@@ -249,6 +249,36 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   const openPositions = paperSnapshot.positions.filter((p) => p.status === 'OPEN');
   const closedPositions = paperSnapshot.positions.filter((p) => p.status === 'CLOSED');
 
+  // Closed Positions / Recent Orders Filter State (Side: ALL | LONG | SHORT, Symbol: ALL or specific)
+  const [closedSideFilter, setClosedSideFilter] = useState<'ALL' | 'LONG' | 'SHORT'>('ALL');
+  const [closedSymbolFilter, setClosedSymbolFilter] = useState<string>('ALL');
+  const [closedSymbolSearch, setClosedSymbolSearch] = useState<string>('');
+
+  const uniqueClosedSymbols = useMemo(() => {
+    const set = new Set<string>();
+    closedPositions.forEach((cp) => {
+      if (cp.symbol) set.add(cp.symbol.toUpperCase().trim());
+    });
+    return Array.from(set);
+  }, [closedPositions]);
+
+  const filteredClosedPositions = useMemo(() => {
+    return closedPositions.filter((cp) => {
+      if (closedSideFilter !== 'ALL' && cp.side !== closedSideFilter) {
+        return false;
+      }
+      const sym = (cp.symbol || '').toUpperCase().trim();
+      if (closedSymbolFilter !== 'ALL' && sym !== closedSymbolFilter) {
+        return false;
+      }
+      const q = closedSymbolSearch.toUpperCase().trim();
+      if (q && !sym.includes(q)) {
+        return false;
+      }
+      return true;
+    });
+  }, [closedPositions, closedSideFilter, closedSymbolFilter, closedSymbolSearch]);
+
   // Ensure any active position has its live price fetched from Binance
   const [dynPrices, setDynPrices] = useState<Record<string, number>>({});
 
@@ -4173,9 +4203,107 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </div>
         </div>
 
+        {/* Filter Bar for Closed Trades / Recent Orders (تصفية حسب نوع الصفقة شراء/بيع أو الرمز Symbol) */}
+        <div
+          data-testid="closed_trades_filter_bar"
+          className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3 grid grid-cols-1 sm:grid-cols-3 gap-3 items-end"
+        >
+          <div>
+            <label className="block text-[11px] text-[#8A99AD] font-semibold mb-1.5">
+              تصفية حسب نوع الصفقة (شراء / بيع):
+            </label>
+            <div className="grid grid-cols-3 gap-1 bg-[#12171D] p-1 rounded-xl border border-[#232E3A]">
+              <button
+                type="button"
+                onClick={() => setClosedSideFilter('ALL')}
+                data-testid="closed_filter_side_all"
+                className={`py-1.5 px-2 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                  closedSideFilter === 'ALL'
+                    ? 'bg-[#01BC8D] text-[#0B0E11]'
+                    : 'text-[#8A99AD] hover:text-white'
+                }`}
+              >
+                الكل ({closedPositions.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setClosedSideFilter('LONG')}
+                data-testid="closed_filter_side_long"
+                className={`py-1.5 px-2 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                  closedSideFilter === 'LONG'
+                    ? 'bg-[#01BC8D] text-[#0B0E11]'
+                    : 'text-[#01BC8D] hover:bg-[#0D2B24]/60'
+                }`}
+              >
+                شراء ({closedPositions.filter((c) => c.side === 'LONG').length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setClosedSideFilter('SHORT')}
+                data-testid="closed_filter_side_short"
+                className={`py-1.5 px-2 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                  closedSideFilter === 'SHORT'
+                    ? 'bg-[#F6465D] text-white'
+                    : 'text-[#F6465D] hover:bg-[#2B1216]/60'
+                }`}
+              >
+                بيع ({closedPositions.filter((c) => c.side === 'SHORT').length})
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-[11px] text-[#8A99AD] font-semibold mb-1.5">
+              اختيار الرمز (Symbol):
+            </label>
+            <select
+              value={closedSymbolFilter}
+              onChange={(e) => setClosedSymbolFilter(e.target.value)}
+              data-testid="closed_filter_symbol_select"
+              className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none cursor-pointer"
+            >
+              <option value="ALL">كل الرموز ({uniqueClosedSymbols.length})</option>
+              {uniqueClosedSymbols.map((sym) => (
+                <option key={sym} value={sym}>
+                  {sym}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] text-[#8A99AD] font-semibold mb-1.5">
+              بحث فوري بالرمز (Symbol):
+            </label>
+            <input
+              type="text"
+              value={closedSymbolSearch}
+              onChange={(e) => setClosedSymbolSearch(e.target.value)}
+              data-testid="closed_filter_symbol_input"
+              placeholder="مثال: BTC أو ETH أو SOL..."
+              className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none"
+            />
+          </div>
+        </div>
+
         {closedPositions.length === 0 ? (
           <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-6 text-center text-xs text-[#8A99AD]">
             لا توجد صفقات مغلقة في السجل حتى الآن. بمجرد إغلاق أي صفقة مفتوحة، ستظهر هنا في الجدول مع إمكانية تصديرها كملف Excel شامل (اسم المتداول المنسوخ، نسبة الربح المحققة، والمدة الزمنية).
+          </div>
+        ) : filteredClosedPositions.length === 0 ? (
+          <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-6 text-center space-y-2 text-xs text-[#8A99AD]">
+            <p>لا توجد صفقات مطابقة لخيارات التصفية المحددة (نوع الصفقة أو الرمز).</p>
+            <button
+              type="button"
+              onClick={() => {
+                setClosedSideFilter('ALL');
+                setClosedSymbolFilter('ALL');
+                setClosedSymbolSearch('');
+              }}
+              className="bg-[#01BC8D] text-[#0B0E11] font-bold px-3 py-1.5 rounded-lg text-xs cursor-pointer"
+            >
+              إعادة ضبط التصفية
+            </button>
           </div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-[#232E3A] bg-[#0B0E11]">
@@ -4197,7 +4325,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1A222B]">
-                {closedPositions.map((cp, index) => {
+                {filteredClosedPositions.map((cp, index) => {
                   const rPnl = cp.realizedPnl || 0;
                   const margin = cp.initialMarginUsdt || cp.marginUsdt || settings.tradeValueUsdt;
                   const roiPct = margin > 0 ? (rPnl / margin) * 100 : 0;

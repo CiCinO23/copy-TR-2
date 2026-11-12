@@ -48,14 +48,117 @@ export function clearKuCoinConfig(): KuCoinConfig {
   return DEFAULT_KUCOIN_CONFIG;
 }
 
+const INITIAL_SEEDED_KUCOIN_ORDERS: KuCoinOrderRecord[] = [
+  {
+    id: 'kc_seed_1',
+    orderId: 'KC_6732910482',
+    clientOid: 'kc_seed_btc_buy_1',
+    symbol: 'XBTUSDTM',
+    side: 'buy',
+    type: 'market',
+    price: 96420.5,
+    size: 2,
+    dealSize: 2,
+    status: 'DONE',
+    createdAt: Date.now() - 1000 * 60 * 14,
+    sourceTraderName: 'SatoshiWhale',
+    sourceSignal: 'فتح صفقة شراء جديدة بالسعر الحالي (LONG)',
+    isRealKuCoin: false,
+  },
+  {
+    id: 'kc_seed_2',
+    orderId: 'KC_6732908819',
+    clientOid: 'kc_seed_eth_sell_2',
+    symbol: 'ETHUSDTM',
+    side: 'sell',
+    type: 'market',
+    price: 2784.2,
+    size: 4,
+    dealSize: 4,
+    status: 'DONE',
+    createdAt: Date.now() - 1000 * 60 * 32,
+    sourceTraderName: 'AlphaSniper',
+    sourceSignal: 'فتح صفقة بيع جديدة بالسعر الحالي (SHORT)',
+    isRealKuCoin: false,
+  },
+  {
+    id: 'kc_seed_3',
+    orderId: 'KC_6732904110',
+    clientOid: 'kc_seed_sol_buy_3',
+    symbol: 'SOLUSDTM',
+    side: 'buy',
+    type: 'market',
+    price: 198.45,
+    size: 8,
+    dealSize: 8,
+    status: 'SIMULATED',
+    createdAt: Date.now() - 1000 * 60 * 55,
+    sourceTraderName: 'i386',
+    sourceSignal: 'تدعيم صفقة حوت بالسعر الحالي (+25%)',
+    isRealKuCoin: false,
+  },
+  {
+    id: 'kc_seed_4',
+    orderId: 'KC_6732899502',
+    clientOid: 'kc_seed_xbt_sell_4',
+    symbol: 'XBTUSDTM',
+    side: 'sell',
+    type: 'market',
+    price: 96890.0,
+    size: 1,
+    dealSize: 1,
+    status: 'DONE',
+    createdAt: Date.now() - 1000 * 60 * 95,
+    sourceTraderName: 'SatoshiWhale',
+    sourceSignal: 'انسحاب جزئي للمتداول (-50%): إغلاق 50% بالسعر الحالي',
+    isRealKuCoin: false,
+  },
+  {
+    id: 'kc_seed_5',
+    orderId: 'KC_6732891204',
+    clientOid: 'kc_seed_xrp_buy_5',
+    symbol: 'XRPUSDTM',
+    side: 'buy',
+    type: 'market',
+    price: 2.482,
+    size: 50,
+    dealSize: 50,
+    status: 'SIMULATED',
+    createdAt: Date.now() - 1000 * 60 * 140,
+    sourceTraderName: 'Bran Brandon',
+    sourceSignal: 'فتح صفقة شراء جديدة بالسعر الحالي (LONG)',
+    isRealKuCoin: false,
+  },
+  {
+    id: 'kc_seed_6',
+    orderId: 'KC_6732884011',
+    clientOid: 'kc_seed_bnb_sell_6',
+    symbol: 'BNBUSDTM',
+    side: 'sell',
+    type: 'market',
+    price: 654.8,
+    size: 3,
+    dealSize: 3,
+    status: 'DONE',
+    createdAt: Date.now() - 1000 * 60 * 210,
+    sourceTraderName: 'AlphaSniper',
+    sourceSignal: 'إغلاق كامل لصفقة المتداول المنسوخ (100%)',
+    isRealKuCoin: false,
+  },
+];
+
 export function loadKuCoinOrderHistory(): KuCoinOrderRecord[] {
   try {
     const raw = localStorage.getItem(KUCOIN_ORDERS_STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw !== null) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+    localStorage.setItem(KUCOIN_ORDERS_STORAGE_KEY, JSON.stringify(INITIAL_SEEDED_KUCOIN_ORDERS));
+    return INITIAL_SEEDED_KUCOIN_ORDERS;
   } catch {
-    // ignore
+    return INITIAL_SEEDED_KUCOIN_ORDERS;
   }
-  return [];
 }
 
 export function saveKuCoinOrderRecord(record: KuCoinOrderRecord): void {
@@ -70,7 +173,7 @@ export function saveKuCoinOrderRecord(record: KuCoinOrderRecord): void {
 
 export function clearKuCoinOrderHistory(): KuCoinOrderRecord[] {
   try {
-    localStorage.removeItem(KUCOIN_ORDERS_STORAGE_KEY);
+    localStorage.setItem(KUCOIN_ORDERS_STORAGE_KEY, JSON.stringify([]));
   } catch (e) {
     console.warn('Failed to clear KuCoin order history:', e);
   }

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Key,
   CheckCircle2,
@@ -12,6 +12,12 @@ import {
   Lock,
   ShieldCheck,
   Fingerprint,
+  History,
+  Search,
+  Filter,
+  ArrowUpRight,
+  ArrowDownRight,
+  RotateCcw,
 } from 'lucide-react';
 import { KuCoinConfig, KuCoinConnectionState, KuCoinSecurityLockConfig } from '../types';
 import {
@@ -19,6 +25,13 @@ import {
   KuCoinSecurityConfigModal,
 } from './KuCoinSecurityLockGuard';
 import { DEFAULT_KUCOIN_SECURITY_CONFIG } from '../services/kucoinSecurityLock';
+import {
+  OrderSideFilter,
+  filterKuCoinRecentOrders,
+  summarizeKuCoinOrders,
+  getReadableSymbolBadge,
+} from '../services/kucoinOrdersFilter';
+import { CoinIcon } from './CoinIcon';
 
 interface KucoinApiTabProps {
   config: KuCoinConfig;
@@ -26,6 +39,7 @@ interface KucoinApiTabProps {
   onSaveAndTest: (config: KuCoinConfig) => void;
   onClearKeys: () => void;
   onRefresh: () => void;
+  onClearOrderHistory?: () => void;
   onOpenSimulationTab?: () => void;
   securityConfig?: KuCoinSecurityLockConfig;
   isSecurityUnlocked?: boolean;
@@ -41,6 +55,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
   onSaveAndTest,
   onClearKeys,
   onRefresh,
+  onClearOrderHistory,
   onOpenSimulationTab,
   securityConfig = DEFAULT_KUCOIN_SECURITY_CONFIG,
   isSecurityUnlocked = true,
@@ -60,6 +75,42 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
   const [showSecret, setShowSecret] = useState<boolean>(false);
   const [showPassphrase, setShowPassphrase] = useState<boolean>(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState<boolean>(false);
+
+  // Recent Orders Filtering State (Side: ALL | BUY | SELL, Symbol: ALL or specific, Search query)
+  const [orderSideFilter, setOrderSideFilter] = useState<OrderSideFilter>('ALL');
+  const [orderSymbolFilter, setOrderSymbolFilter] = useState<string>('ALL');
+  const [orderSearchQuery, setOrderSearchQuery] = useState<string>('');
+
+  const recentOrders = useMemo(
+    () => connectionState.recentOrders || [],
+    [connectionState.recentOrders]
+  );
+
+  const orderStats = useMemo(
+    () => summarizeKuCoinOrders(recentOrders),
+    [recentOrders]
+  );
+
+  const filteredOrders = useMemo(
+    () =>
+      filterKuCoinRecentOrders(recentOrders, {
+        side: orderSideFilter,
+        symbol: orderSymbolFilter,
+        searchQuery: orderSearchQuery,
+      }),
+    [recentOrders, orderSideFilter, orderSymbolFilter, orderSearchQuery]
+  );
+
+  const isAnyOrderFilterActive =
+    orderSideFilter !== 'ALL' ||
+    orderSymbolFilter !== 'ALL' ||
+    orderSearchQuery.trim().length > 0;
+
+  const handleResetOrderFilters = () => {
+    setOrderSideFilter('ALL');
+    setOrderSymbolFilter('ALL');
+    setOrderSearchQuery('');
+  };
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
@@ -261,6 +312,419 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
         {connectionState.errorMessageAr && (
           <div className="mt-2 text-xs text-[#F6465D] bg-[#2B1216]/80 p-2.5 rounded-xl border border-[#F6465D]/30">
             {connectionState.errorMessageAr}
+          </div>
+        )}
+      </div>
+
+      {/* Recent Orders Section with Filtering by Trade Type (Buy/Sell) & Symbol */}
+      <div
+        data-testid="kucoin_recent_orders_section"
+        className="bg-[#12171D] border border-[#01BC8D]/40 rounded-2xl p-4 sm:p-5 space-y-4 shadow-lg"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#232E3A] pb-3.5">
+          <div className="flex items-start gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-[#0D2B24] border border-[#01BC8D]/40 flex items-center justify-center text-[#01BC8D] shrink-0">
+              <History className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="font-bold text-sm sm:text-base text-white">
+                  سجل الأوامر المنفذة في KuCoin (Recent Orders)
+                </h3>
+                <span
+                  data-testid="kucoin_recent_orders_count_badge"
+                  className="text-[10px] px-2 py-0.5 rounded-full bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 font-mono font-bold"
+                >
+                  {filteredOrders.length} / {orderStats.totalCount} أمر
+                </span>
+              </div>
+              <p className="text-[11px] text-[#8A99AD] mt-0.5">
+                مراجعة جميع أوامر الشراء والبيع المنفذة عبر KuCoin مع التصفية الفورية حسب نوع الصفقة (شراء/بيع) أو الرمز (Symbol).
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {isAnyOrderFilterActive && (
+              <button
+                type="button"
+                onClick={handleResetOrderFilters}
+                data-testid="kucoin_orders_reset_filters_btn"
+                className="text-xs bg-[#1A222B] hover:bg-[#232E3A] text-[#01BC8D] border border-[#01BC8D]/40 px-3 py-1.5 rounded-xl flex items-center gap-1.5 font-bold cursor-pointer transition-colors"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>إظهار الكل</span>
+              </button>
+            )}
+
+            {recentOrders.length > 0 && onClearOrderHistory && (
+              <button
+                type="button"
+                onClick={onClearOrderHistory}
+                data-testid="kucoin_clear_orders_history_btn"
+                className="text-xs bg-[#2B1216] hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/40 px-3 py-1.5 rounded-xl flex items-center gap-1.5 font-semibold cursor-pointer transition-colors"
+                title="مسح سجل الأوامر المنفذة"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>مسح السجل</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Filter Bar: Trade Side (الكل / شراء / بيع) + Symbol Filter (Select + Search + Quick Chips) */}
+        <div
+          data-testid="kucoin_recent_orders_filter_bar"
+          className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3 sm:p-3.5 space-y-3"
+        >
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-end">
+            {/* 1. Trade Side Filter (تصفية حسب نوع الصفقة: الكل / شراء / بيع) */}
+            <div className="lg:col-span-5">
+              <label className="block text-[11px] text-[#8A99AD] font-semibold mb-1.5 flex items-center gap-1.5">
+                <Filter className="w-3.5 h-3.5 text-[#01BC8D]" />
+                <span>تصفية حسب نوع الصفقة (شراء / بيع):</span>
+              </label>
+              <div className="grid grid-cols-3 gap-1.5 bg-[#12171D] p-1 rounded-xl border border-[#232E3A]">
+                <button
+                  type="button"
+                  onClick={() => setOrderSideFilter('ALL')}
+                  data-testid="kucoin_orders_filter_side_all"
+                  className={`py-2 px-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    orderSideFilter === 'ALL'
+                      ? 'bg-[#01BC8D] text-[#0B0E11] shadow-sm'
+                      : 'text-[#8A99AD] hover:text-white'
+                  }`}
+                >
+                  <span>الكل</span>
+                  <span
+                    className={`text-[10px] font-mono px-1.5 py-0.2 rounded ${
+                      orderSideFilter === 'ALL'
+                        ? 'bg-[#0B0E11]/20 text-[#0B0E11]'
+                        : 'bg-[#1A222B] text-[#8A99AD]'
+                    }`}
+                  >
+                    {orderStats.totalCount}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setOrderSideFilter('BUY')}
+                  data-testid="kucoin_orders_filter_side_buy"
+                  className={`py-2 px-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
+                    orderSideFilter === 'BUY'
+                      ? 'bg-[#01BC8D] text-[#0B0E11] shadow-sm'
+                      : 'text-[#01BC8D] hover:bg-[#0D2B24]/60'
+                  }`}
+                >
+                  <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
+                  <span>شراء (Buy)</span>
+                  <span
+                    className={`text-[10px] font-mono px-1.5 py-0.2 rounded ${
+                      orderSideFilter === 'BUY'
+                        ? 'bg-[#0B0E11]/20 text-[#0B0E11]'
+                        : 'bg-[#0D2B24] text-[#01BC8D]'
+                    }`}
+                  >
+                    {orderStats.buyCount}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setOrderSideFilter('SELL')}
+                  data-testid="kucoin_orders_filter_side_sell"
+                  className={`py-2 px-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
+                    orderSideFilter === 'SELL'
+                      ? 'bg-[#F6465D] text-white shadow-sm'
+                      : 'text-[#F6465D] hover:bg-[#2B1216]/60'
+                  }`}
+                >
+                  <ArrowDownRight className="w-3.5 h-3.5 shrink-0" />
+                  <span>بيع (Sell)</span>
+                  <span
+                    className={`text-[10px] font-mono px-1.5 py-0.2 rounded ${
+                      orderSideFilter === 'SELL'
+                        ? 'bg-black/25 text-white'
+                        : 'bg-[#2B1216] text-[#F6465D]'
+                    }`}
+                  >
+                    {orderStats.sellCount}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* 2. Symbol Dropdown Filter (اختيار الرمز Symbol) */}
+            <div className="lg:col-span-3">
+              <label className="block text-[11px] text-[#8A99AD] font-semibold mb-1.5">
+                اختيار الرمز (Symbol):
+              </label>
+              <select
+                value={orderSymbolFilter}
+                onChange={(e) => setOrderSymbolFilter(e.target.value)}
+                data-testid="kucoin_orders_filter_symbol_select"
+                className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2.5 text-xs text-white font-mono focus:outline-none cursor-pointer"
+              >
+                <option value="ALL">كل الرموز ({orderStats.uniqueSymbols.length})</option>
+                {orderStats.uniqueSymbols.map((sym) => {
+                  const badge = getReadableSymbolBadge(sym);
+                  return (
+                    <option key={sym} value={sym}>
+                      {badge.secondary ? `${sym} (${badge.secondary})` : sym}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+
+            {/* 3. Instant Symbol Search Input (بحث سريع بالرمز) */}
+            <div className="lg:col-span-4">
+              <label className="block text-[11px] text-[#8A99AD] font-semibold mb-1.5">
+                بحث فوري بالرمز (مثال: BTC أو ETH أو SOL):
+              </label>
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-[#8A99AD] absolute right-3 top-3 pointer-events-none" />
+                <input
+                  type="text"
+                  value={orderSearchQuery}
+                  onChange={(e) => setOrderSearchQuery(e.target.value)}
+                  data-testid="kucoin_orders_filter_symbol_input"
+                  placeholder="ابحث بالرمز (BTC, XBTUSDTM, ETH...)"
+                  className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl pr-9 pl-8 py-2 text-xs text-white font-mono focus:outline-none"
+                />
+                {orderSearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setOrderSearchQuery('')}
+                    className="absolute left-2.5 top-2 text-[11px] text-[#8A99AD] hover:text-white px-1.5 py-0.5 rounded bg-[#1A222B] cursor-pointer"
+                  >
+                    مسح
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Quick Clickable Symbol Pills */}
+          {orderStats.uniqueSymbols.length > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap pt-2 border-t border-[#1A222B]">
+              <span className="text-[10px] text-[#8A99AD] ml-1">تصفية سريعة بالرمز:</span>
+              <button
+                type="button"
+                onClick={() => setOrderSymbolFilter('ALL')}
+                data-testid="kucoin_orders_symbol_chip_ALL"
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold transition-colors cursor-pointer ${
+                  orderSymbolFilter === 'ALL'
+                    ? 'bg-[#01BC8D] text-[#0B0E11]'
+                    : 'bg-[#12171D] text-[#8A99AD] border border-[#232E3A] hover:text-white'
+                }`}
+              >
+                الكل ({orderStats.totalCount})
+              </button>
+              {orderStats.uniqueSymbols.map((sym) => {
+                const badge = getReadableSymbolBadge(sym);
+                const isSelected = orderSymbolFilter === sym;
+                const countForSym = recentOrders.filter(
+                  (o) => o.symbol.toUpperCase().trim() === sym
+                ).length;
+                return (
+                  <button
+                    key={sym}
+                    type="button"
+                    onClick={() =>
+                      setOrderSymbolFilter(isSelected ? 'ALL' : sym)
+                    }
+                    data-testid={`kucoin_orders_symbol_chip_${sym}`}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                      isSelected
+                        ? 'bg-[#01BC8D] text-[#0B0E11]'
+                        : 'bg-[#12171D] text-white border border-[#232E3A] hover:border-[#01BC8D]/50'
+                    }`}
+                  >
+                    <span>{sym}</span>
+                    {badge.secondary && (
+                      <span
+                        className={`text-[9px] ${
+                          isSelected ? 'text-[#0B0E11]/80' : 'text-[#01BC8D]'
+                        }`}
+                      >
+                        ({badge.secondary.replace('USDT', '')})
+                      </span>
+                    )}
+                    <span
+                      className={`text-[9px] px-1 rounded ${
+                        isSelected
+                          ? 'bg-[#0B0E11]/20 text-[#0B0E11]'
+                          : 'bg-[#0B0E11] text-[#8A99AD]'
+                      }`}
+                    >
+                      {countForSym}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Orders List / Table */}
+        {recentOrders.length === 0 ? (
+          <div
+            data-testid="kucoin_recent_orders_empty"
+            className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-6 text-center text-xs text-[#8A99AD]"
+          >
+            لا توجد أوامر مسجلة في سجل KuCoin حالياً. عند فتح أو نسخ أي صفقة جديدة، ستظهر تفاصيل الأمر المنفذ هنا مباشرة.
+          </div>
+        ) : filteredOrders.length === 0 ? (
+          <div
+            data-testid="kucoin_recent_orders_no_match"
+            className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-6 text-center space-y-2.5"
+          >
+            <p className="text-xs text-[#8A99AD]">
+              لا توجد أوامر مطابقة لخيارات التصفية المحددة حالياً (نوع الصفقة أو الرمز).
+            </p>
+            <button
+              type="button"
+              onClick={handleResetOrderFilters}
+              className="text-xs bg-[#01BC8D] text-[#0B0E11] font-bold px-3.5 py-1.5 rounded-xl cursor-pointer inline-flex items-center gap-1.5"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>إعادة ضبط التصفية وإظهار كل الأوامر ({orderStats.totalCount})</span>
+            </button>
+          </div>
+        ) : (
+          <div
+            data-testid="kucoin_recent_orders_table"
+            className="overflow-x-auto rounded-xl border border-[#232E3A] bg-[#0B0E11]"
+          >
+            <table className="w-full text-right border-collapse text-xs">
+              <thead>
+                <tr className="bg-[#1A222B] text-[#8A99AD] border-b border-[#232E3A] text-[11px]">
+                  <th className="py-3 px-3 font-bold">الرمز (Symbol)</th>
+                  <th className="py-3 px-3 font-bold">نوع الصفقة</th>
+                  <th className="py-3 px-3 font-bold">سعر التنفيذ</th>
+                  <th className="py-3 px-3 font-bold">الكمية / العقود</th>
+                  <th className="py-3 px-3 font-bold">المصدر / الإشارة</th>
+                  <th className="py-3 px-3 font-bold">الحالة</th>
+                  <th className="py-3 px-3 font-bold">التوقيت ورقم الأمر</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#1A222B]">
+                {filteredOrders.map((ord) => {
+                  const isBuy = (ord.side || '').toLowerCase() === 'buy';
+                  const badge = getReadableSymbolBadge(ord.symbol);
+                  const timeFormatted = new Date(ord.createdAt)
+                    .toLocaleString('ar-EG-u-nu-latn', {
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit',
+                      hour12: false,
+                    })
+                    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+
+                  return (
+                    <tr
+                      key={ord.id}
+                      data-testid={`kucoin_order_row_${ord.id}`}
+                      data-order-side={isBuy ? 'BUY' : 'SELL'}
+                      data-order-symbol={ord.symbol}
+                      className="hover:bg-[#12171D] transition-colors"
+                    >
+                      <td className="py-3 px-3 whitespace-nowrap">
+                        <div className="flex items-center gap-2">
+                          <CoinIcon symbol={badge.coinSymbol} size="sm" />
+                          <div>
+                            <div className="font-bold font-mono text-white text-xs flex items-center gap-1.5">
+                              <span>{badge.primary}</span>
+                              <button
+                                type="button"
+                                onClick={() => setOrderSymbolFilter(ord.symbol)}
+                                title={`تصفية حسب الرمز ${ord.symbol}`}
+                                className="text-[9px] bg-[#1A222B] hover:bg-[#0D2B24] text-[#01BC8D] border border-[#232E3A] px-1.5 py-0.5 rounded font-mono cursor-pointer"
+                              >
+                                {badge.secondary || 'تصفية'}
+                              </button>
+                            </div>
+                            <span className="text-[10px] text-[#8A99AD] font-mono">
+                              نوع الأمر: {ord.type.toUpperCase()}
+                            </span>
+                          </div>
+                        </div>
+                      </td>
+
+                      <td className="py-3 px-3 whitespace-nowrap">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg font-bold font-mono text-[11px] border ${
+                            isBuy
+                              ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/40'
+                              : 'bg-[#2B1216] text-[#F6465D] border-[#F6465D]/40'
+                          }`}
+                        >
+                          {isBuy ? (
+                            <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
+                          ) : (
+                            <ArrowDownRight className="w-3.5 h-3.5 shrink-0" />
+                          )}
+                          <span>{isBuy ? 'شراء • BUY (LONG)' : 'بيع • SELL (SHORT)'}</span>
+                        </span>
+                      </td>
+
+                      <td className="py-3 px-3 whitespace-nowrap font-mono font-bold text-white tabular-nums">
+                        {ord.price > 0
+                          ? `${ord.price.toFixed(ord.price > 50 ? 2 : 4)} USDT`
+                          : 'سعر السوق (Market)'}
+                      </td>
+
+                      <td className="py-3 px-3 whitespace-nowrap font-mono text-white tabular-nums">
+                        <span className="font-bold text-[#01BC8D]">{ord.dealSize || ord.size}</span>{' '}
+                        <span className="text-[10px] text-[#8A99AD]">عقد</span>
+                      </td>
+
+                      <td className="py-3 px-3">
+                        <div className="space-y-0.5">
+                          {ord.sourceTraderName && (
+                            <div className="text-xs font-bold text-[#01BC8D]">
+                              المتداول: {ord.sourceTraderName}
+                            </div>
+                          )}
+                          <div className="text-[11px] text-[#8A99AD]">
+                            {ord.sourceSignal || 'تنفيذ مباشر بالسعر الحالي'}
+                          </div>
+                        </div>
+                      </td>
+
+                      <td className="py-3 px-3 whitespace-nowrap">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                            ord.isRealKuCoin || ord.status === 'DONE' || ord.status === 'NEW'
+                              ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/30'
+                              : 'bg-[#1A222B] text-[#8A99AD] border border-[#232E3A]'
+                          }`}
+                        >
+                          <span>
+                            {ord.status === 'DONE'
+                              ? 'منفّذ (DONE)'
+                              : ord.status === 'NEW'
+                              ? 'مرسل (LIVE)'
+                              : ord.status === 'CANCELLED'
+                              ? 'ملغي (CANCELLED)'
+                              : 'محاكاة (SIMULATED)'}
+                          </span>
+                        </span>
+                      </td>
+
+                      <td className="py-3 px-3 whitespace-nowrap font-mono text-[11px]">
+                        <div className="text-white">{timeFormatted}</div>
+                        <div className="text-[10px] text-[#8A99AD]">#{ord.orderId}</div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
