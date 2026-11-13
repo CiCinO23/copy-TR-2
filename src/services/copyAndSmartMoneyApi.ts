@@ -471,6 +471,41 @@ export async function fetchCopyTradersList(
   return { list: fallback, total: fallback.length, isLiveBinance: false };
 }
 
+interface RawCopyTraderSubCache {
+  detailData?: any;
+  rawOrders?: any[];
+  rawPositions?: any[];
+  rawHist?: any[];
+  fetchedAt: number;
+}
+
+const rawCopyTraderCache = new Map<string, RawCopyTraderSubCache>();
+const copyTraderInFlight = new Map<
+  string,
+  Promise<{
+    detail: CopyTraderDetail;
+    positions: TraderOpenPosition[];
+    latestRecords: TraderLatestRecord[];
+    positionHistory: TraderPositionHistoryItem[];
+    positionsArePublic: boolean;
+    isPartialOrRateLimited?: boolean;
+  }>
+>();
+const copyTraderResultCache = new Map<
+  string,
+  {
+    timestamp: number;
+    result: {
+      detail: CopyTraderDetail;
+      positions: TraderOpenPosition[];
+      latestRecords: TraderLatestRecord[];
+      positionHistory: TraderPositionHistoryItem[];
+      positionsArePublic: boolean;
+      isPartialOrRateLimited?: boolean;
+    };
+  }
+>();
+
 /**
  * 2. Fetch Full Details + Positions + Latest records + Position History for a Selected Copy Trader
  */
@@ -484,87 +519,121 @@ export async function fetchCopyTraderFullData(
   latestRecords: TraderLatestRecord[];
   positionHistory: TraderPositionHistoryItem[];
   positionsArePublic: boolean;
+  isPartialOrRateLimited?: boolean;
 }> {
-  // 1) Detail
-  let detail: CopyTraderDetail = {
-    leadPortfolioId: portfolioId,
-    nickname: traderSummary?.nickname || 'Binance Lead Trader',
-    avatarUrl: traderSummary?.avatarUrl || '',
-    description:
-      'متداول عقود آجلة USDⓈ-M على منصة باينانس (Binance Copy Trading). يتم تحديث المراكز وسجل الدخول والخروج والتدعيم آلياً.',
-    currentCopyCount: traderSummary?.currentCopyCount || 0,
-    maxCopyCount: traderSummary?.maxCopyCount || 500,
-    totalCopyCount: (traderSummary?.currentCopyCount || 50) * 3,
-    roi: traderSummary?.roi || 0,
-    pnl: traderSummary?.pnl || 0,
-    copierPnl: traderSummary?.copierPnl || 0,
-    aum: traderSummary?.aum || 0,
-    marginBalance: (traderSummary?.aum || 50000) * 0.25,
-    mdd: traderSummary?.mdd || 0,
-    winRate: traderSummary?.winRate || 0,
-    sharpRatio: traderSummary?.sharpRatio ?? null,
-    profitSharingRate: 10,
-    winOrders: 48,
-    totalOrders: 56,
-    tag: ['USDⓈ-M Futures', 'Copy Trading'],
-    positionShow: true,
-    leadingDays: traderSummary?.leadingDays || 120,
-  };
+  const cachedRecent = copyTraderResultCache.get(portfolioId);
+  if (cachedRecent && Date.now() - cachedRecent.timestamp < 5_000) {
+    return cachedRecent.result;
+  }
 
-  const [detailRes, ordRes, posRes, histRes] = await Promise.all([
-    fetch(
-      `/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/detail?portfolioId=${encodeURIComponent(
-        portfolioId
-      )}`
-    ).catch((e) => {
-      console.warn('Error fetching copy trader detail:', e);
-      return null;
-    }),
-    fetch('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        pageNumber: 1,
-        pageSize: 25,
-        portfolioId,
-      }),
-    }).catch((e) => {
-      console.warn('Error fetching copy trader latest records:', e);
-      return null;
-    }),
-    fetch(
-      `/bapi/futures/v1/friendly/future/copy-trade/lead-data/positions?portfolioId=${encodeURIComponent(
-        portfolioId
-      )}`
-    ).catch((e) => {
-      console.warn('Error fetching copy trader open positions:', e);
-      return null;
-    }),
-    fetch('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-history', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        pageNumber: 1,
-        pageSize: 15,
-        portfolioId,
-      }),
-    }).catch((e) => {
-      console.warn('Error fetching copy trader position history:', e);
-      return null;
-    }),
-  ]);
+  const existingInFlight = copyTraderInFlight.get(portfolioId);
+  if (existingInFlight) {
+    return existingInFlight;
+  }
 
-  try {
-    if (detailRes && detailRes.ok) {
-      const detailJson = await detailRes.json();
-      const d = detailJson?.data;
-      if (d && d.leadPortfolioId) {
+  const promise = (async () => {
+    try {
+      const prevSubCache = rawCopyTraderCache.get(portfolioId) || { fetchedAt: 0 };
+      let isPartialOrRateLimited = false;
+
+      // 1) Detail
+      let detail: CopyTraderDetail = {
+        leadPortfolioId: portfolioId,
+        nickname: traderSummary?.nickname || 'Binance Lead Trader',
+        avatarUrl: traderSummary?.avatarUrl || '',
+        description:
+          'متداول عقود آجلة USDⓈ-M على منصة باينانس (Binance Copy Trading). يتم تحديث المراكز وسجل الدخول والخروج والتدعيم آلياً.',
+        currentCopyCount: traderSummary?.currentCopyCount || 0,
+        maxCopyCount: traderSummary?.maxCopyCount || 500,
+        totalCopyCount: (traderSummary?.currentCopyCount || 50) * 3,
+        roi: traderSummary?.roi || 0,
+        pnl: traderSummary?.pnl || 0,
+        copierPnl: traderSummary?.copierPnl || 0,
+        aum: traderSummary?.aum || 0,
+        marginBalance: (traderSummary?.aum || 50000) * 0.25,
+        mdd: traderSummary?.mdd || 0,
+        winRate: traderSummary?.winRate || 0,
+        sharpRatio: traderSummary?.sharpRatio ?? null,
+        profitSharingRate: 10,
+        winOrders: 48,
+        totalOrders: 56,
+        tag: ['USDⓈ-M Futures', 'Copy Trading'],
+        positionShow: true,
+        leadingDays: traderSummary?.leadingDays || 120,
+      };
+
+      const [detailRes, ordRes, posRes, histRes] = await Promise.all([
+        fetch(
+          `/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/detail?portfolioId=${encodeURIComponent(
+            portfolioId
+          )}`
+        ).catch((e) => {
+          console.warn('Error fetching copy trader detail:', e);
+          return null;
+        }),
+        fetch('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            pageNumber: 1,
+            pageSize: 50,
+            portfolioId,
+          }),
+        }).catch((e) => {
+          console.warn('Error fetching copy trader latest records:', e);
+          return null;
+        }),
+        fetch(
+          `/bapi/futures/v1/friendly/future/copy-trade/lead-data/positions?portfolioId=${encodeURIComponent(
+            portfolioId
+          )}`
+        ).catch((e) => {
+          console.warn('Error fetching copy trader open positions:', e);
+          return null;
+        }),
+        fetch('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-history', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            pageNumber: 1,
+            pageSize: 25,
+            portfolioId,
+          }),
+        }).catch((e) => {
+          console.warn('Error fetching copy trader position history:', e);
+          return null;
+        }),
+      ]);
+
+      let detailDataObj: any = null;
+      try {
+        if (detailRes && detailRes.ok) {
+          const detailJson = await detailRes.json();
+          if (detailJson?.data && detailJson.data.leadPortfolioId) {
+            detailDataObj = detailJson.data;
+            prevSubCache.detailData = detailDataObj;
+          } else {
+            isPartialOrRateLimited = true;
+            detailDataObj = prevSubCache.detailData || null;
+          }
+        } else {
+          isPartialOrRateLimited = true;
+          detailDataObj = prevSubCache.detailData || null;
+        }
+      } catch (e) {
+        isPartialOrRateLimited = true;
+        detailDataObj = prevSubCache.detailData || null;
+        console.warn('Error parsing copy trader detail:', e);
+      }
+
+      if (detailDataObj && detailDataObj.leadPortfolioId) {
+        const d = detailDataObj;
         const startTs = Number(d.startTime || 0);
         const computedDays =
           startTs > 1000000000000
@@ -598,234 +667,52 @@ export async function fetchCopyTraderFullData(
           leadingDays: Number(d.leadingDays || computedDays),
         };
       }
-    }
-  } catch (e) {
-    console.warn('Error parsing copy trader detail:', e);
-  }
 
-  let latestRecords: TraderLatestRecord[] = [];
-  try {
-    if (ordRes && ordRes.ok) {
-      const ordJson = await ordRes.json();
-      const rawOrders = ordJson?.data?.list;
-      if (Array.isArray(rawOrders)) {
-        const chronological = [...rawOrders].reverse();
-        const symbolActiveState = new Map<string, { openQty: number; initialQty: number; entryTime: number }>();
-
-        const processedChronological: TraderLatestRecord[] = chronological.map((o: any, idx: number) => {
-          const symbol = String(o.symbol || 'BTCUSDT');
-          const side: 'BUY' | 'SELL' = String(o.side || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
-          const posSide: 'LONG' | 'SHORT' | 'BOTH' =
-            o.positionSide === 'LONG' || o.positionSide === 'SHORT' ? o.positionSide : 'BOTH';
-          const totalPnl = Number(o.totalPnl || 0);
-          const executedQty = Number(o.executedQty || 0);
-          const orderTime = Number(o.orderTime || STABLE_FALLBACK_ANCHOR - (chronological.length - idx) * 1800000);
-
-          const isClosingAction =
-            (side === 'SELL' && posSide === 'LONG') ||
-            (side === 'BUY' && posSide === 'SHORT') ||
-            Math.abs(totalPnl) > 0.00001;
-
-          const stateKey = `${symbol}_${posSide}`;
-          const currentState = symbolActiveState.get(stateKey);
-
-          let actionType: RecordActionCategory = 'ENTRY';
-          let volumePercent = 100;
-          let remainingPercentAfter = 100;
-          let actionLabelAr = '';
-          let entryTimeVal = orderTime;
-          let exitTimeVal: number | undefined = undefined;
-
-          if (!isClosingAction) {
-            if (!currentState || currentState.openQty <= 0.000001) {
-              actionType = 'ENTRY';
-              volumePercent = 100;
-              remainingPercentAfter = 100;
-              entryTimeVal = orderTime;
-              symbolActiveState.set(stateKey, {
-                openQty: Math.max(0.0001, executedQty),
-                initialQty: Math.max(0.0001, executedQty),
-                entryTime: orderTime,
-              });
-              const dirAr =
-                posSide === 'SHORT' || (posSide === 'BOTH' && side === 'SELL')
-                  ? 'بيع / Short'
-                  : 'شراء / Long';
-              actionLabelAr = `دخول أولي (${dirAr} • 100%)`;
-            } else {
-              actionType = 'SCALE_IN';
-              const baseQty = Math.max(0.0001, currentState.initialQty);
-              const rawPct = Math.round((executedQty / baseQty) * 100);
-              volumePercent = Math.min(Math.max(10, rawPct || 35), 200);
-              currentState.openQty += executedQty;
-              remainingPercentAfter = Math.round((currentState.openQty / baseQty) * 100);
-              entryTimeVal = currentState.entryTime;
-              actionLabelAr = `تدعيم الصفقة (+${volumePercent}% إضافي)`;
-            }
+      // Parse position-history first: separate still-open rows (closed === null / "Partially Closed")
+      // from genuinely closed historical positions ("All Closed" with closed > 0).
+      let positionHistory: TraderPositionHistoryItem[] = [];
+      const openHistRows: any[] = [];
+      let rawHist: any[] | null = null;
+      try {
+        if (histRes && histRes.ok) {
+          const histJson = await histRes.json();
+          if (Array.isArray(histJson?.data?.list)) {
+            const list: any[] = histJson.data.list;
+            rawHist = list;
+            prevSubCache.rawHist = list;
           } else {
-            exitTimeVal = orderTime;
-            if (currentState && currentState.openQty > 0) {
-              entryTimeVal = currentState.entryTime;
-              const ratioClosed = executedQty / currentState.openQty;
-              if (ratioClosed < 0.88) {
-                actionType = 'PARTIAL_EXIT';
-                const pctWithdrawn = Math.min(Math.max(10, Math.round(ratioClosed * 100)), 90);
-                volumePercent = -pctWithdrawn;
-                currentState.openQty = Math.max(0, currentState.openQty - executedQty);
-                remainingPercentAfter = Math.max(
-                  5,
-                  Math.round((currentState.openQty / currentState.initialQty) * 100)
-                );
-                actionLabelAr = `انسحاب جزئي من الصفقة (-${pctWithdrawn}% • متبقي ${remainingPercentAfter}%)`;
-              } else {
-                actionType = 'EXIT';
-                volumePercent = -100;
-                remainingPercentAfter = 0;
-                currentState.openQty = 0;
-                const dirAr =
-                  posSide === 'SHORT' || (posSide === 'BOTH' && side === 'BUY')
-                    ? 'إغلاق Short'
-                    : 'إغلاق Long';
-                actionLabelAr = `خروج كامل من الصفقة (${dirAr} • -100%)`;
-              }
-            } else {
-              const h = deterministicHash(`${portfolioId}_${symbol}_${orderTime}_${executedQty}`);
-              entryTimeVal = orderTime - ((h % 5) + 1) * 3600000;
-              if (h % 3 === 1) {
-                const pct = ((h % 4) + 2) * 15;
-                actionType = 'PARTIAL_EXIT';
-                volumePercent = -pct;
-                remainingPercentAfter = 100 - pct;
-                actionLabelAr = `انسحاب جزئي من الصفقة (-${pct}% • متبقي ${100 - pct}%)`;
-              } else {
-                actionType = 'EXIT';
-                volumePercent = -100;
-                remainingPercentAfter = 0;
-                const dirAr =
-                  posSide === 'SHORT' || (posSide === 'BOTH' && side === 'BUY')
-                    ? 'إغلاق Short'
-                    : 'إغلاق Long';
-                actionLabelAr = `خروج كامل من الصفقة (${dirAr} • -100%)`;
-              }
-            }
+            isPartialOrRateLimited = true;
+            rawHist = prevSubCache.rawHist || null;
           }
-
-          return {
-            id: `${portfolioId}_ord_${symbol}_${posSide}_${side}_${orderTime}_${executedQty}`,
-            symbol,
-            baseAsset: String(o.baseAsset || symbol.replace('USDT', '')),
-            quoteAsset: String(o.quoteAsset || 'USDT'),
-            side,
-            type: String(o.type || 'MARKET'),
-            positionSide: posSide,
-            actionType,
-            actionLabelAr,
-            volumePercent,
-            remainingPercentAfter,
-            executedQty,
-            avgPrice: Number(o.avgPrice || 0),
-            totalPnl,
-            orderTime,
-            entryTime: entryTimeVal,
-            exitTime: exitTimeVal,
-          };
-        });
-
-        latestRecords = processedChronological.reverse();
+        } else {
+          isPartialOrRateLimited = true;
+          rawHist = prevSubCache.rawHist || null;
+        }
+      } catch (e) {
+        isPartialOrRateLimited = true;
+        rawHist = prevSubCache.rawHist || null;
+        console.warn('Error parsing copy trader position history:', e);
       }
-    }
-  } catch (e) {
-    console.warn('Error parsing copy trader latest records:', e);
-  }
 
-  let positions: TraderOpenPosition[] = [];
-  let hasAuthoritativePositions = false;
-  const positionsArePublic = detail.positionShow;
-  try {
-    if (posRes && posRes.ok) {
-      const posJson = await posRes.json();
-      const rawPositions = posJson?.data;
-      if (Array.isArray(rawPositions)) {
-        hasAuthoritativePositions = true;
-        const active = rawPositions.filter(
-          (p: any) => Math.abs(parseFloat(p.positionAmount || '0')) > 0
-        );
-        positions = active.map((p: any, idx: number) => {
-          const symbol = String(p.symbol || 'BTCUSDT');
-          const amt = Math.abs(parseFloat(p.positionAmount || '0'));
-          const entry = parseFloat(p.entryPrice || '0');
-          const mark =
-            parseFloat(p.markPrice || '0') || getLivePriceForSymbol(symbol, tickers);
-          const lev = Number(p.leverage || 5);
-          const uPnl = parseFloat(p.unrealizedProfit || '0');
-          const notional = Math.abs(parseFloat(p.notionalValue || String(amt * mark)));
-          const side: 'LONG' | 'SHORT' =
-            p.positionSide === 'SHORT' || parseFloat(p.positionAmount || '0') < 0
-              ? 'SHORT'
-              : 'LONG';
-          const margin = notional > 0 && lev > 0 ? notional / lev : 1;
-          const roePercent = margin > 0 ? (uPnl / margin) * 100 : 0;
-
-          const posId = String(p.id || `${symbol}_${p.positionSide || side}`);
-          const matchingOrders = latestRecords.filter((r) => r.symbol === symbol);
-          const rawEntryTime =
-            matchingOrders.find((r) => r.actionType === 'ENTRY')?.orderTime ||
-            Number(p.time || p.updateTime || 0) ||
-            STABLE_FALLBACK_ANCHOR - (idx + 2) * 5400000;
-
-          const scaling = buildOpenPositionScaleAdjustments({
-            posId,
-            symbol,
-            side,
-            currentQty: amt,
-            entryPrice: entry,
-            markPrice: mark,
-            entryTime: rawEntryTime,
-            matchingOrders,
-            allowSyntheticSteps: false,
-          });
-
-          return {
-            id: posId,
-            symbol,
-            collateral: String(p.collateral || 'USDT'),
-            positionAmount: amt,
-            initialPositionAmount: scaling.initialPositionAmount,
-            side,
-            entryPrice: entry,
-            markPrice: mark,
-            breakEvenPrice: parseFloat(p.breakEvenPrice || String(entry)),
-            unrealizedProfit: uPnl,
-            cumRealized: parseFloat(p.cumRealized || '0'),
-            notionalValue: notional,
-            leverage: lev,
-            isolated: Boolean(p.isolated),
-            roePercent,
-            entryTime: rawEntryTime,
-            lastUpdateTime: Number(p.updateTime || scaling.lastUpdateTime || rawEntryTime),
-            currentScalePercent: scaling.currentScalePercent,
-            scaleAdjustments: scaling.scaleAdjustments,
-          };
-        });
-      }
-    }
-  } catch (e) {
-    console.warn('Error parsing copy trader open positions:', e);
-  }
-
-  let positionHistory: TraderPositionHistoryItem[] = [];
-  try {
-    if (histRes && histRes.ok) {
-      const histJson = await histRes.json();
-      const rawHist = histJson?.data?.list;
       if (Array.isArray(rawHist)) {
-        positionHistory = rawHist.map((h: any, idx: number) => {
+        const closedHistRows: any[] = [];
+        for (const h of rawHist) {
+          const statusStr = String(h?.status || '').trim().toLowerCase();
+          const closedTs = Number(h?.closed || 0);
+          if (closedTs > 0 && statusStr !== 'partially closed') {
+            closedHistRows.push(h);
+          } else if (Number(h?.opened || 0) > 0) {
+            openHistRows.push(h);
+          }
+        }
+
+        positionHistory = closedHistRows.map((h: any, idx: number) => {
           const histId = String(h.id || `${portfolioId}_hist_${idx}`);
           const symbol = String(h.symbol || 'BTCUSDT');
           const side: 'LONG' | 'SHORT' =
             String(h.side || 'Long').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
           const opened = Number(h.opened || STABLE_FALLBACK_ANCHOR - (idx + 2) * 7200000);
-          const closed = Number(h.closed || STABLE_FALLBACK_ANCHOR - idx * 1800000);
+          const closed = Number(h.closed);
           const avgCost = Number(h.avgCost || 0);
           const avgClosePrice = Number(h.avgClosePrice || 0);
           const closingPnl = Number(h.closingPnl || 0);
@@ -857,111 +744,539 @@ export async function fetchCopyTraderFullData(
           };
         });
       }
-    }
-  } catch (e) {
-    console.warn('Error parsing copy trader position history:', e);
-  }
 
-  // Only if the trader hides public positions (positionShow === false) and live positions API was unavailable,
-  // check if any recent (<= 24h) chronological symbol still appears open (never closed by EXIT or positionHistory).
-  if (
-    !hasAuthoritativePositions &&
-    !positionsArePublic &&
-    positions.length === 0 &&
-    latestRecords.length > 0
-  ) {
-    const recentCutoff = Date.now() - 86_400_000;
-    const recentEntry = latestRecords.find((r) => {
-      if (r.actionType !== 'ENTRY' && r.actionType !== 'SCALE_IN') return false;
-      if ((r.orderTime || 0) < recentCutoff) return false;
-      const candidateSide: 'LONG' | 'SHORT' =
-        r.positionSide === 'SHORT' || (r.positionSide === 'BOTH' && r.side === 'SELL')
-          ? 'SHORT'
-          : 'LONG';
-      return !isTraderTradePermanentlyClosed({
-        symbol: r.symbol,
-        side: candidateSide,
-        entryTime: r.entryTime || r.orderTime,
-        latestRecords,
-        positionHistory,
-      });
-    });
+      let latestRecords: TraderLatestRecord[] = [];
+      const symbolActiveState = new Map<
+        string,
+        {
+          symbol: string;
+          posSide: 'LONG' | 'SHORT';
+          openQty: number;
+          initialQty: number;
+          entryTime: number;
+          avgEntryPrice: number;
+          lastUpdateTime: number;
+          realizedPnl: number;
+        }
+      >();
 
-    if (recentEntry) {
-      const mark = getLivePriceForSymbol(recentEntry.symbol, tickers);
-      const entry = recentEntry.avgPrice > 0 ? recentEntry.avgPrice : mark * 0.996;
+      let rawOrders: any[] | null = null;
+      try {
+        if (ordRes && ordRes.ok) {
+          const ordJson = await ordRes.json();
+          if (Array.isArray(ordJson?.data?.list)) {
+            const list: any[] = ordJson.data.list;
+            rawOrders = list;
+            prevSubCache.rawOrders = list;
+          } else {
+            isPartialOrRateLimited = true;
+            rawOrders = prevSubCache.rawOrders || null;
+          }
+        } else {
+          isPartialOrRateLimited = true;
+          rawOrders = prevSubCache.rawOrders || null;
+        }
+      } catch (e) {
+        isPartialOrRateLimited = true;
+        rawOrders = prevSubCache.rawOrders || null;
+        console.warn('Error parsing copy trader latest records:', e);
+      }
+
+      if (Array.isArray(rawOrders)) {
+        // Sort strictly ascending by orderTime because Binance order-history is not always strictly ordered
+        const chronological = [...rawOrders].sort(
+          (a: any, b: any) => Number(a.orderTime || 0) - Number(b.orderTime || 0)
+        );
+        const earliestOrderTime =
+          chronological.length > 0 ? Number(chronological[0]?.orderTime || Date.now()) : Date.now();
+
+        // Pre-seed symbolActiveState ONLY with unclosed openHistRows opened BEFORE this 50-order window,
+        // so consecutive entry/scale-in fills inside the window are never skipped or double-counted.
+        for (const h of openHistRows) {
+          const sym = String(h.symbol || 'BTCUSDT');
+          const side: 'LONG' | 'SHORT' =
+            String(h.side || 'Long').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+          const openedTs = Number(h.opened || 0);
+          const maxOi = Number(h.maxOpenInterest || h.closedVolume || 0);
+          const avgCost = Number(h.avgCost || 0);
+          if (openedTs > 0 && openedTs < earliestOrderTime - 5000 && maxOi > 0) {
+            symbolActiveState.set(`${sym}_${side}`, {
+              symbol: sym,
+              posSide: side,
+              openQty: maxOi,
+              initialQty: maxOi,
+              entryTime: openedTs,
+              avgEntryPrice: avgCost,
+              lastUpdateTime: Number(h.updateTime || openedTs),
+              realizedPnl: Number(h.closingPnl || 0),
+            });
+          }
+        }
+
+        const processedChronological: TraderLatestRecord[] = chronological.map((o: any, idx: number) => {
+          const symbol = String(o.symbol || 'BTCUSDT');
+          const side: 'BUY' | 'SELL' = String(o.side || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+          const posSide: 'LONG' | 'SHORT' | 'BOTH' =
+            o.positionSide === 'LONG' || o.positionSide === 'SHORT' ? o.positionSide : 'BOTH';
+          const totalPnl = Number(o.totalPnl || 0);
+          const executedQty = Number(o.executedQty || 0);
+          const avgPrice = Number(o.avgPrice || 0);
+          const orderTime = Number(o.orderTime || STABLE_FALLBACK_ANCHOR - (chronological.length - idx) * 1800000);
+
+          const openLongForBoth = posSide === 'BOTH' ? symbolActiveState.get(`${symbol}_LONG`) : undefined;
+          const openShortForBoth = posSide === 'BOTH' ? symbolActiveState.get(`${symbol}_SHORT`) : undefined;
+          const isClosingBothOpposite =
+            posSide === 'BOTH' &&
+            ((side === 'SELL' && openLongForBoth && openLongForBoth.openQty > 0.000001) ||
+              (side === 'BUY' && openShortForBoth && openShortForBoth.openQty > 0.000001));
+
+          const isClosingAction =
+            (side === 'SELL' && posSide === 'LONG') ||
+            (side === 'BUY' && posSide === 'SHORT') ||
+            isClosingBothOpposite ||
+            Math.abs(totalPnl) > 0.00001;
+
+          const effectiveSide: 'LONG' | 'SHORT' =
+            posSide === 'SHORT'
+              ? 'SHORT'
+              : posSide === 'LONG'
+              ? 'LONG'
+              : isClosingAction
+              ? side === 'BUY'
+                ? 'SHORT'
+                : 'LONG'
+              : side === 'SELL'
+              ? 'SHORT'
+              : 'LONG';
+
+          const stateKey = `${symbol}_${effectiveSide}`;
+          const currentState = symbolActiveState.get(stateKey);
+
+          let actionType: RecordActionCategory = 'ENTRY';
+          let volumePercent = 100;
+          let remainingPercentAfter = 100;
+          let actionLabelAr = '';
+          let entryTimeVal = orderTime;
+          let exitTimeVal: number | undefined = undefined;
+
+          if (!isClosingAction) {
+            if (!currentState || currentState.openQty <= 0.000001) {
+              actionType = 'ENTRY';
+              volumePercent = 100;
+              remainingPercentAfter = 100;
+              entryTimeVal = orderTime;
+              symbolActiveState.set(stateKey, {
+                symbol,
+                posSide: effectiveSide,
+                openQty: Math.max(0.0001, executedQty),
+                initialQty: Math.max(0.0001, executedQty),
+                entryTime: orderTime,
+                avgEntryPrice: avgPrice,
+                lastUpdateTime: orderTime,
+                realizedPnl: 0,
+              });
+              const dirAr = effectiveSide === 'SHORT' ? 'بيع / Short' : 'شراء / Long';
+              actionLabelAr = `دخول أولي (${dirAr} • 100%)`;
+            } else {
+              actionType = 'SCALE_IN';
+              const baseQty = Math.max(0.0001, currentState.initialQty);
+              const rawPct = Math.round((executedQty / baseQty) * 100);
+              volumePercent = Math.min(Math.max(10, rawPct || 35), 200);
+              const prevQty = currentState.openQty;
+              currentState.openQty += executedQty;
+              if (avgPrice > 0) {
+                currentState.avgEntryPrice =
+                  prevQty > 0 && currentState.avgEntryPrice > 0
+                    ? (currentState.avgEntryPrice * prevQty + avgPrice * executedQty) /
+                      currentState.openQty
+                    : avgPrice;
+              }
+              currentState.lastUpdateTime = orderTime;
+              remainingPercentAfter = Math.round((currentState.openQty / baseQty) * 100);
+              entryTimeVal = currentState.entryTime;
+              actionLabelAr = `تدعيم الصفقة (+${volumePercent}% إضافي)`;
+            }
+          } else {
+            exitTimeVal = orderTime;
+            if (currentState && currentState.openQty > 0) {
+              entryTimeVal = currentState.entryTime;
+              const ratioClosed = executedQty / currentState.openQty;
+              const nextOpenQty = Math.max(0, currentState.openQty - executedQty);
+              const remainingRatioOfInitial =
+                nextOpenQty / Math.max(0.0001, currentState.initialQty);
+              currentState.lastUpdateTime = orderTime;
+              currentState.realizedPnl += totalPnl;
+
+              if (ratioClosed < 0.88 && remainingRatioOfInitial > 0.12) {
+                actionType = 'PARTIAL_EXIT';
+                const pctWithdrawn = Math.min(Math.max(10, Math.round(ratioClosed * 100)), 90);
+                volumePercent = -pctWithdrawn;
+                currentState.openQty = nextOpenQty;
+                remainingPercentAfter = Math.max(5, Math.round(remainingRatioOfInitial * 100));
+                actionLabelAr = `انسحاب جزئي من الصفقة (-${pctWithdrawn}% • متبقي ${remainingPercentAfter}%)`;
+              } else {
+                actionType = 'EXIT';
+                volumePercent = -100;
+                remainingPercentAfter = 0;
+                currentState.openQty = 0;
+                const dirAr = effectiveSide === 'SHORT' ? 'إغلاق Short' : 'إغلاق Long';
+                actionLabelAr = `خروج كامل من الصفقة (${dirAr} • -100%)`;
+              }
+            } else {
+              // Closing order with no active open state in the window:
+              // Only classify as PARTIAL_EXIT if openHistRows explicitly says this symbol+side is still open
+              const matchingOpenHist = openHistRows.find(
+                (h: any) =>
+                  String(h.symbol || '').toUpperCase() === symbol.toUpperCase() &&
+                  (String(h.side || 'Long').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG') ===
+                    effectiveSide
+              );
+              if (matchingOpenHist) {
+                entryTimeVal = Number(matchingOpenHist.opened || orderTime - 3600000);
+                actionType = 'PARTIAL_EXIT';
+                volumePercent = -30;
+                remainingPercentAfter = 70;
+                actionLabelAr = `انسحاب جزئي من الصفقة (-30% • متبقي 70%)`;
+              } else {
+                const matchingClosedHist = positionHistory.find(
+                  (h) =>
+                    h.symbol.toUpperCase() === symbol.toUpperCase() &&
+                    h.side === effectiveSide &&
+                    Math.abs(h.closed - orderTime) < 3600_000
+                );
+                entryTimeVal = matchingClosedHist?.opened || orderTime - 3600000;
+                actionType = 'EXIT';
+                volumePercent = -100;
+                remainingPercentAfter = 0;
+                const dirAr = effectiveSide === 'SHORT' ? 'إغلاق Short' : 'إغلاق Long';
+                actionLabelAr = `خروج كامل من الصفقة (${dirAr} • -100%)`;
+              }
+            }
+          }
+
+          return {
+            id: `${portfolioId}_ord_${symbol}_${posSide}_${side}_${orderTime}_${executedQty}`,
+            symbol,
+            baseAsset: String(o.baseAsset || symbol.replace('USDT', '')),
+            quoteAsset: String(o.quoteAsset || 'USDT'),
+            side,
+            type: String(o.type || 'MARKET'),
+            positionSide: posSide,
+            actionType,
+            actionLabelAr,
+            volumePercent,
+            remainingPercentAfter,
+            executedQty,
+            avgPrice,
+            totalPnl,
+            orderTime,
+            entryTime: entryTimeVal,
+            exitTime: exitTimeVal,
+          };
+        });
+
+        latestRecords = processedChronological.reverse();
+      }
+
+      let positions: TraderOpenPosition[] = [];
+      let hasAuthoritativeLivePositions = false;
+      const positionsArePublic = detail.positionShow;
+      let rawPositions: any[] | null = null;
+      try {
+        if (posRes && posRes.ok) {
+          const posJson = await posRes.json();
+          if (Array.isArray(posJson?.data)) {
+            const list: any[] = posJson.data;
+            rawPositions = list;
+            prevSubCache.rawPositions = list;
+          } else {
+            isPartialOrRateLimited = true;
+            rawPositions = prevSubCache.rawPositions || null;
+          }
+        } else {
+          isPartialOrRateLimited = true;
+          rawPositions = prevSubCache.rawPositions || null;
+        }
+      } catch (e) {
+        isPartialOrRateLimited = true;
+        rawPositions = prevSubCache.rawPositions || null;
+        console.warn('Error parsing copy trader open positions:', e);
+      }
+
+      if (Array.isArray(rawPositions)) {
+        const active = rawPositions.filter(
+          (p: any) => Math.abs(parseFloat(p.positionAmount || '0')) > 0
+        );
+        if (active.length > 0) {
+          hasAuthoritativeLivePositions = true;
+        }
+        positions = active.map((p: any, idx: number) => {
+          const symbol = String(p.symbol || 'BTCUSDT');
+          const amt = Math.abs(parseFloat(p.positionAmount || '0'));
+          const entry = parseFloat(p.entryPrice || '0');
+          const mark =
+            parseFloat(p.markPrice || '0') || getLivePriceForSymbol(symbol, tickers);
+          const lev = Number(p.leverage || 5);
+          const uPnl = parseFloat(p.unrealizedProfit || '0');
+          const notional = Math.abs(parseFloat(p.notionalValue || String(amt * mark)));
+          const side: 'LONG' | 'SHORT' =
+            p.positionSide === 'SHORT' || parseFloat(p.positionAmount || '0') < 0
+              ? 'SHORT'
+              : 'LONG';
+          const margin = notional > 0 && lev > 0 ? notional / lev : 1;
+          const roePercent = margin > 0 ? (uPnl / margin) * 100 : 0;
+
+          const posId = String(p.id || `${symbol}_${p.positionSide || side}`);
+          const matchingOrders = latestRecords.filter((r) => r.symbol === symbol);
+          const ascMatchingOrders = [...matchingOrders].sort((a, b) => a.orderTime - b.orderTime);
+          const matchingOpenHist = openHistRows.find(
+            (h: any) =>
+              String(h.symbol || '').toUpperCase() === symbol.toUpperCase() &&
+              (String(h.side || 'Long').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG') === side
+          );
+          const latestClosedForSymSide = positionHistory
+            .filter((h) => h.symbol.toUpperCase() === symbol.toUpperCase() && h.side === side)
+            .reduce((max, h) => Math.max(max, h.closed || 0), 0);
+          const entryOrderAfterClose =
+            ascMatchingOrders.find(
+              (r) => r.actionType === 'ENTRY' && r.orderTime > latestClosedForSymSide
+            ) || ascMatchingOrders.find((r) => r.actionType === 'ENTRY');
+
+          const rawEntryTime =
+            Number(matchingOpenHist?.opened || 0) ||
+            entryOrderAfterClose?.orderTime ||
+            Number(p.time || p.updateTime || 0) ||
+            Math.max(
+              STABLE_FALLBACK_ANCHOR - (idx + 2) * 5400000,
+              latestClosedForSymSide > 0 ? latestClosedForSymSide + 60_000 : 0
+            );
+
+          const scaling = buildOpenPositionScaleAdjustments({
+            posId,
+            symbol,
+            side,
+            currentQty: amt,
+            entryPrice: entry,
+            markPrice: mark,
+            entryTime: rawEntryTime,
+            matchingOrders,
+            allowSyntheticSteps: false,
+          });
+
+          const initialAdjTs = scaling.scaleAdjustments[0]?.timestamp || rawEntryTime;
+          const resolvedEntryTime =
+            Number(matchingOpenHist?.opened || 0) > 0
+              ? Number(matchingOpenHist.opened)
+              : Math.min(rawEntryTime, initialAdjTs);
+          const resolvedLastUpdateTime = Math.max(
+            resolvedEntryTime,
+            Number(p.updateTime || 0),
+            scaling.lastUpdateTime || 0
+          );
+
+          return {
+            id: posId,
+            symbol,
+            collateral: String(p.collateral || 'USDT'),
+            positionAmount: amt,
+            initialPositionAmount: scaling.initialPositionAmount,
+            side,
+            entryPrice: entry,
+            markPrice: mark,
+            breakEvenPrice: parseFloat(p.breakEvenPrice || String(entry)),
+            unrealizedProfit: uPnl,
+            cumRealized: parseFloat(p.cumRealized || '0'),
+            notionalValue: notional,
+            leverage: lev,
+            isolated: Boolean(p.isolated),
+            roePercent,
+            entryTime: resolvedEntryTime,
+            lastUpdateTime: resolvedLastUpdateTime,
+            currentScalePercent: scaling.currentScalePercent,
+            scaleAdjustments: scaling.scaleAdjustments,
+          };
+        });
+      }
+
+  // If /lead-data/positions returned no rows (e.g. when trader sets positionShow: false, or position is only in openHistRows),
+  // reconstruct all genuinely open positions from unclosed position-history rows (closed: null) and unclosed symbolActiveState.
+  if (!hasAuthoritativeLivePositions && positions.length === 0) {
+    const derivedPositions: TraderOpenPosition[] = [];
+    const seenSymSides = new Set<string>();
+
+    // 1. Add any unclosed positions explicitly reported by Binance position-history (closed === null / "Partially Closed")
+    for (let idx = 0; idx < openHistRows.length; idx++) {
+      const h = openHistRows[idx];
+      const symbol = String(h.symbol || 'BTCUSDT');
       const side: 'LONG' | 'SHORT' =
-        recentEntry.positionSide === 'SHORT' ||
-        (recentEntry.positionSide === 'BOTH' && recentEntry.side === 'SELL')
-          ? 'SHORT'
-          : 'LONG';
+        String(h.side || 'Long').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+      const key = `${symbol.toUpperCase()}_${side}`;
+      if (seenSymSides.has(key)) continue;
+
+      const entryTime = Number(h.opened || STABLE_FALLBACK_ANCHOR - (idx + 1) * 3600000);
+      if (
+        isTraderTradePermanentlyClosed({
+          symbol,
+          side,
+          entryTime,
+          latestRecords,
+          positionHistory,
+        })
+      ) {
+        continue;
+      }
+
+      const mark = getLivePriceForSymbol(symbol, tickers);
+      const entry = Number(h.avgCost || 0) > 0 ? Number(h.avgCost) : mark;
+      const maxOi = Number(h.maxOpenInterest || 0);
+      const closedVol = Number(h.closedVolume || 0);
+      const stateInfo = symbolActiveState.get(key);
       const qty =
-        recentEntry.executedQty > 0 ? recentEntry.executedQty : Number((1500 / mark).toFixed(3));
+        stateInfo && stateInfo.openQty > 0
+          ? Number(stateInfo.openQty.toFixed(4))
+          : maxOi > closedVol
+          ? Number((maxOi - closedVol).toFixed(4))
+          : maxOi > 0
+          ? Number((maxOi * 0.5).toFixed(4))
+          : closedVol > 0
+          ? Number(closedVol.toFixed(4))
+          : Number((1500 / Math.max(mark, 0.0001)).toFixed(3));
+
       const dir = side === 'LONG' ? 1 : -1;
       const uPnl = (mark - entry) * qty * dir;
       const notional = qty * mark;
-      const lev = 10;
-      const posId = `${portfolioId}_derived_pos_1`;
-      const entryTime =
-        recentEntry.entryTime || recentEntry.orderTime || STABLE_FALLBACK_ANCHOR - 5400000;
+      const lev = Number(h.leverage || 10);
+      const posId = `${portfolioId}_openhist_${symbol}_${side}`;
 
       const scaling = buildOpenPositionScaleAdjustments({
         posId,
-        symbol: recentEntry.symbol,
+        symbol,
         side,
         currentQty: qty,
         entryPrice: entry,
         markPrice: mark,
         entryTime,
-        matchingOrders: latestRecords.filter((r) => r.symbol === recentEntry.symbol),
+        matchingOrders: latestRecords.filter((r) => r.symbol === symbol),
         allowSyntheticSteps: false,
       });
 
-      positions = [
-        {
+      derivedPositions.push({
+        id: posId,
+        symbol,
+        collateral: 'USDT',
+        positionAmount: qty,
+        initialPositionAmount: maxOi > 0 ? maxOi : scaling.initialPositionAmount,
+        side,
+        entryPrice: entry,
+        markPrice: mark,
+        breakEvenPrice: entry * 1.0005,
+        unrealizedProfit: uPnl,
+        cumRealized: Number(h.closingPnl || 0),
+        notionalValue: notional,
+        leverage: lev,
+        isolated: Boolean(h.isolated),
+        roePercent: notional > 0 ? (uPnl / (notional / lev)) * 100 : 0,
+        entryTime,
+        lastUpdateTime: Number(h.updateTime || scaling.lastUpdateTime || entryTime),
+        currentScalePercent: scaling.currentScalePercent,
+        scaleAdjustments: scaling.scaleAdjustments,
+      });
+      seenSymSides.add(key);
+    }
+
+    // 2. When trader hides public positions (positionShow === false) or live positions endpoint wasn't public,
+    // also include any symbols in symbolActiveState whose openQty > 0 and which have not been closed in positionHistory
+    if (!positionsArePublic) {
+      const recentCutoff = Date.now() - 14 * 86_400_000;
+      for (const [key, state] of symbolActiveState.entries()) {
+        if (seenSymSides.has(key)) continue;
+        if (state.openQty <= 0.000001) continue;
+        if (state.entryTime < recentCutoff) continue;
+
+        if (
+          isTraderTradePermanentlyClosed({
+            symbol: state.symbol,
+            side: state.posSide,
+            entryTime: state.entryTime,
+            latestRecords,
+            positionHistory,
+          })
+        ) {
+          continue;
+        }
+
+        const mark = getLivePriceForSymbol(state.symbol, tickers);
+        const entry = state.avgEntryPrice > 0 ? state.avgEntryPrice : mark;
+        const qty = Number(state.openQty.toFixed(4));
+        const dir = state.posSide === 'LONG' ? 1 : -1;
+        const uPnl = (mark - entry) * qty * dir;
+        const notional = qty * mark;
+        const lev = 10;
+        const posId = `${portfolioId}_derived_${state.symbol}_${state.posSide}`;
+
+        const scaling = buildOpenPositionScaleAdjustments({
+          posId,
+          symbol: state.symbol,
+          side: state.posSide,
+          currentQty: qty,
+          entryPrice: entry,
+          markPrice: mark,
+          entryTime: state.entryTime,
+          matchingOrders: latestRecords.filter((r) => r.symbol === state.symbol),
+          allowSyntheticSteps: false,
+        });
+
+        derivedPositions.push({
           id: posId,
-          symbol: recentEntry.symbol,
+          symbol: state.symbol,
           collateral: 'USDT',
           positionAmount: qty,
-          initialPositionAmount: scaling.initialPositionAmount,
-          side,
+          initialPositionAmount: Number(state.initialQty.toFixed(4)) || scaling.initialPositionAmount,
+          side: state.posSide,
           entryPrice: entry,
           markPrice: mark,
           breakEvenPrice: entry * 1.0005,
           unrealizedProfit: uPnl,
-          cumRealized: recentEntry.totalPnl || 0,
+          cumRealized: state.realizedPnl || 0,
           notionalValue: notional,
           leverage: lev,
           isolated: false,
           roePercent: notional > 0 ? (uPnl / (notional / lev)) * 100 : 0,
-          entryTime,
-          lastUpdateTime: scaling.lastUpdateTime,
+          entryTime: state.entryTime,
+          lastUpdateTime: state.lastUpdateTime || scaling.lastUpdateTime,
           currentScalePercent: scaling.currentScalePercent,
           scaleAdjustments: scaling.scaleAdjustments,
-        },
-      ];
+        });
+        seenSymSides.add(key);
+      }
     }
-  }
 
-  // Final defense-in-depth: exclude any position already marked permanently closed in latestRecords or positionHistory
-  positions = positions.filter(
-    (p) =>
-      !isTraderTradePermanentlyClosed({
-        symbol: p.symbol,
-        side: p.side,
-        entryTime: p.entryTime,
+        positions = derivedPositions;
+      }
+
+      prevSubCache.fetchedAt = Date.now();
+      rawCopyTraderCache.set(portfolioId, prevSubCache);
+
+      const finalResult = {
+        detail,
+        positions,
         latestRecords,
         positionHistory,
-      })
-  );
+        positionsArePublic,
+        isPartialOrRateLimited,
+      };
+      copyTraderResultCache.set(portfolioId, {
+        timestamp: Date.now(),
+        result: finalResult,
+      });
+      return finalResult;
+    } finally {
+      copyTraderInFlight.delete(portfolioId);
+    }
+  })();
 
-  return {
-    detail,
-    positions,
-    latestRecords,
-    positionHistory,
-    positionsArePublic,
-  };
+  copyTraderInFlight.set(portfolioId, promise);
+  return promise;
 }
 
 /**
@@ -1147,10 +1462,17 @@ export async function fetchSmartMoneyWhaleDetail(
     console.warn('Error fetching smart money profile:', e);
   }
 
+  const isWhaleActiveInPosition =
+    profile.sharingPosition !== false &&
+    (!summaryItem?.positionStatus || summaryItem.positionStatus === 'IN_POSITION');
+
   // If this Smart Money whale also has a linked Copy Trade portfolio ID, try fetching public positions from there
   if (profile.leadPortfolioId) {
     const linked = await fetchCopyTraderFullData(profile.leadPortfolioId, null, tickers);
-    if (linked.positions.length > 0 || linked.positionHistory.length > 0) {
+    if (
+      linked.positions.length > 0 ||
+      (!isWhaleActiveInPosition && linked.positionHistory.length > 0)
+    ) {
       return {
         profile,
         positions: linked.positions,
@@ -1237,9 +1559,6 @@ export async function fetchSmartMoneyWhaleDetail(
 
   const whaleBalance = Math.max(profile.umMarginBalance || 250000, 50000);
   const now = STABLE_FALLBACK_ANCHOR;
-  const isWhaleActiveInPosition =
-    profile.sharingPosition !== false &&
-    (!summaryItem?.positionStatus || summaryItem.positionStatus === 'IN_POSITION');
 
   if (!hasAuthoritativeSmPositions && positions.length === 0 && isWhaleActiveInPosition) {
     const activeSymbols = [primarySym, secondarySym, tertiarySym].filter(

@@ -605,5 +605,75 @@ test('hasTraderEntryAlreadyBeenSynced blocks re-opening closed historical entrie
   );
 });
 
+test('isTraderTradePermanentlyClosed ignores Partially Closed rows and hasTraderEntryAlreadyBeenSynced permits syncing open positions after account reset', () => {
+  const tOpened = 1700005000000;
+  const openPosHistItem = {
+    id: 'hist_open_1',
+    symbol: 'SPCXUSDT',
+    side: 'LONG' as const,
+    opened: tOpened,
+    closed: 0,
+    avgCost: 130,
+    avgClosePrice: 0,
+    closingPnl: 0,
+    maxOpenInterest: 100,
+    closedVolume: 20,
+    isolated: false,
+    scaleAdjustments: [],
+    status: 'Partially Closed',
+  };
+
+  assert.equal(
+    isTraderTradePermanentlyClosed({
+      symbol: 'SPCXUSDT',
+      side: 'LONG',
+      entryTime: tOpened,
+      latestRecords: [],
+      positionHistory: [openPosHistItem as TraderPositionHistoryItem],
+    }),
+    false
+  );
+
+  // If accountPositions is empty (e.g. after clearing history / resetting), an ENTRY checkpoint must NOT block syncing the open position
+  const entryActionId = buildTraderActionId({
+    traderId: 'trader_open',
+    symbol: 'BTCUSDT',
+    actionType: 'ENTRY',
+    rawId: 'pos_1',
+    timestamp: tOpened,
+  });
+
+  assert.equal(
+    hasTraderEntryAlreadyBeenSynced({
+      traderId: 'trader_open',
+      symbol: 'BTCUSDT',
+      side: 'LONG',
+      rawPositionId: 'pos_1',
+      entryTime: tOpened,
+      accountPositions: [],
+      checkpoint: {
+        key: 'acc_default::COPY_TRADING::trader_open',
+        accountId: 'acc_default',
+        source: 'COPY_TRADING',
+        traderId: 'trader_open',
+        traderName: 'OpenTrader',
+        version: 1,
+        lastProcessedActionId: entryActionId,
+        lastProcessedTimestamp: tOpened,
+        processedActionIds: [entryActionId],
+        lastActionsBySymbol: {
+          BTCUSDT: {
+            actionId: entryActionId,
+            actionType: 'ENTRY',
+            timestamp: tOpened,
+          },
+        },
+        updatedAt: tOpened,
+      },
+    }),
+    false
+  );
+});
+
 
 

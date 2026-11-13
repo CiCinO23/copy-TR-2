@@ -778,6 +778,21 @@ export class PaperEngine {
       acc.availableBalance = validBalance;
       acc.totalCommissionsPaid = 0;
       acc.positions = [];
+      this.pendingReconnectChoices = this.pendingReconnectChoices.filter(
+        (c) => (c.accountId || 'acc_default') !== acc.id
+      );
+      for (const id of Array.from(this.dismissedReconnectChoiceIds)) {
+        if (id.startsWith(`choice_${acc.id}_`)) {
+          this.dismissedReconnectChoiceIds.delete(id);
+        }
+      }
+      for (const key of Object.keys(this.traderSyncCheckpoints)) {
+        if (this.traderSyncCheckpoints[key]?.accountId === acc.id) {
+          delete this.traderSyncCheckpoints[key];
+        }
+      }
+      this.savePendingChoices();
+      this.saveTraderSyncCheckpoints();
     } else {
       let openMargin = 0;
       for (const p of acc.positions) {
@@ -1558,6 +1573,7 @@ export class PaperEngine {
     checkReconnectAdvantage?: boolean;
     syncVersion?: number;
     actionId?: string;
+    isPartialOrRateLimited?: boolean;
   }): CopiedSyncLog[] {
     const acc = this.getAccount(params.accountId);
     const checkpoint = this.getOrCreateTraderSyncCheckpoint({
@@ -1910,10 +1926,14 @@ export class PaperEngine {
         userOpenPos.entryPrice
       );
 
-      if (!stillOpenByTrader) {
+      if (!stillOpenByTrader && !params.isPartialOrRateLimited) {
+        const isTransientEmptyResponse =
+          params.positions.length === 0 &&
+          params.latestRecords.length === 0 &&
+          (!params.positionHistory || params.positionHistory.length === 0);
         const justOpenedFromRecord =
           params.positions.length === 0 && Date.now() - userOpenPos.openTime < 5000;
-        if (!justOpenedFromRecord) {
+        if (!justOpenedFromRecord && !isTransientEmptyResponse) {
           try {
             const eventKey = buildStableTraderEventKey({
               kind: 'QTY_DROP',
@@ -1975,7 +1995,7 @@ export class PaperEngine {
             console.warn('Auto close on missing trader position failed:', e);
           }
         }
-      } else {
+      } else if (stillOpenByTrader) {
         // Initialize baseline trader quantity on first observation so subsequent real reductions are accurately detected
         if (userOpenPos.lastSyncedTraderQty === undefined && stillOpenByTrader.positionAmount > 0) {
           userOpenPos.lastSyncedTraderQty = stillOpenByTrader.positionAmount;

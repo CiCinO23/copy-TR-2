@@ -650,16 +650,19 @@ export function isTraderTradePermanentlyClosed(params: {
   for (const h of history) {
     if (String(h.symbol || '').toUpperCase().trim() !== sym) continue;
     if (h.side !== params.side) continue;
+    const statusStr = String((h as any).status || '').trim().toLowerCase();
+    if (statusStr === 'partially closed') continue;
     const closedTs = Number(h.closed || 0);
     const openedTs = Number(h.opened || 0);
     if (closedTs <= 0) continue;
 
     // Only consider closed if no newer ENTRY record opened after that close
-    const hasNewerEntryAfterClose = latestEntryAfterExitTs > closedTs + 5_000;
+    const hasNewerEntryAfterClose =
+      latestEntryAfterExitTs > closedTs + 5_000 || (entryTs > 0 && entryTs > closedTs + 5_000);
     if (hasNewerEntryAfterClose) continue;
 
     if (entryTs > 0) {
-      if (closedTs >= entryTs - 60_000 || Math.abs(openedTs - entryTs) < 120_000) {
+      if (closedTs >= entryTs - 60_000 || (openedTs > 0 && Math.abs(openedTs - entryTs) < 120_000)) {
         return true;
       }
     } else {
@@ -700,8 +703,10 @@ export function hasTraderEntryAlreadyBeenSynced(params: {
   }
 
   // 2. Already copied & closed for this same trader entry (or closed after/around this entryTime)
+  let hasClosedMatchInAccount = false;
   for (const p of params.accountPositions) {
     if (p.status !== 'CLOSED' || !belongsToTrader(p)) continue;
+    hasClosedMatchInAccount = true;
     const pTraderEntry = Number(p.traderEntryTime || 0);
     const pCloseTime = Number(p.closeTime || 0);
     const pOpenTime = Number(p.openTime || 0);
@@ -713,49 +718,57 @@ export function hasTraderEntryAlreadyBeenSynced(params: {
       if (pCloseTime > 0 && entryTs <= pCloseTime + 5_000) {
         return true;
       }
-      if (pOpenTime > 0 && entryTs <= pOpenTime) {
-        // Check if we already opened and closed a copy of an entry that predates our open
-        if (pCloseTime > 0) {
-          return true;
-        }
+      if (pOpenTime > 0 && entryTs <= pOpenTime && pCloseTime > 0) {
+        return true;
       }
     } else if (pCloseTime > 0) {
       return true;
     }
   }
 
-  // 3. Per-trader checkpoint already recorded this ENTRY or a FULL_EXIT at/after this entryTime
+  // 3. Per-trader checkpoint already recorded a FULL_EXIT at/after this entryTime,
+  // or recorded this exact ENTRY when the account still holds history for this trader+symbol
   const cp = params.checkpoint;
   if (cp) {
-    const idWithRaw = buildTraderActionId({
-      traderId: params.traderId,
-      symbol: sym,
-      actionType: 'ENTRY',
-      rawId: params.rawPositionId,
-      timestamp: entryTs,
-    });
-    const idByTime = buildTraderActionId({
-      traderId: params.traderId,
-      symbol: sym,
-      actionType: 'ENTRY',
-      timestamp: entryTs,
-    });
-    const processed = new Set(cp.processedActionIds || []);
-    if (
-      (params.rawPositionId && processed.has(idWithRaw)) ||
-      (entryTs > 0 && processed.has(idByTime))
-    ) {
-      return true;
-    }
-
     const lastForSym = cp.lastActionsBySymbol?.[sym];
     if (
       lastForSym &&
-      (lastForSym.actionType === 'ENTRY' || lastForSym.actionType === 'FULL_EXIT') &&
+      lastForSym.actionType === 'FULL_EXIT' &&
       entryTs > 0 &&
       lastForSym.timestamp >= entryTs - 5_000
     ) {
       return true;
+    }
+
+    if (hasClosedMatchInAccount) {
+      const idWithRaw = buildTraderActionId({
+        traderId: params.traderId,
+        symbol: sym,
+        actionType: 'ENTRY',
+        rawId: params.rawPositionId,
+        timestamp: entryTs,
+      });
+      const idByTime = buildTraderActionId({
+        traderId: params.traderId,
+        symbol: sym,
+        actionType: 'ENTRY',
+        timestamp: entryTs,
+      });
+      const processed = new Set(cp.processedActionIds || []);
+      if (
+        (params.rawPositionId && processed.has(idWithRaw)) ||
+        (entryTs > 0 && processed.has(idByTime))
+      ) {
+        return true;
+      }
+      if (
+        lastForSym &&
+        lastForSym.actionType === 'ENTRY' &&
+        entryTs > 0 &&
+        lastForSym.timestamp >= entryTs - 5_000
+      ) {
+        return true;
+      }
     }
   }
 

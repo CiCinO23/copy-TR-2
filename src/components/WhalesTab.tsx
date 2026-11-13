@@ -541,8 +541,14 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                     <span className="text-xs text-[#8A99AD]">
                       معلومات الصفقات الحية المسحوبة من نافذة <strong className="text-white">Positions</strong> الخاصة بالحوت (مع وقت الدخول وسجل التدعيم والانسحاب الجزئي %):
                     </span>
-                    <span className="text-[11px] text-[#01BC8D] font-mono">
-                      Sharing Position: {whaleProfile.sharingPosition ? 'ON' : 'SYNCED'}
+                    <span
+                      className={`text-[11px] font-medium ${
+                        whaleProfile.sharingPosition ? 'text-[#01BC8D]' : 'text-[#F59E0B]'
+                      }`}
+                    >
+                      {whaleProfile.sharingPosition
+                        ? 'مشاركة المراكز: مفعّلة'
+                        : 'مشاركة المراكز: خاصة (غير معلنة)'}
                     </span>
                   </div>
 

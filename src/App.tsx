@@ -414,6 +414,7 @@ export const App: React.FC = () => {
       marginPerTradeUsdt: number;
       accountId?: string;
       overridePrices?: Record<string, number>;
+      isPartialOrRateLimited?: boolean;
     }): CopiedSyncLog[] => {
       const targetAcc = paperEngine.getAccount(params.accountId);
       const currentSettings = targetAcc.settings;
@@ -438,6 +439,7 @@ export const App: React.FC = () => {
         accountId: targetAcc.id,
         currentPrices: livePrices,
         checkReconnectAdvantage: currentSettings.promptOnUnfavorableLateEntry !== false,
+        isPartialOrRateLimited: params.isPartialOrRateLimited,
       });
       setPaperSnapshot(paperEngine.getSnapshot(livePrices));
       setTimeout(refreshCopiedTradersList, 50);
@@ -631,6 +633,7 @@ export const App: React.FC = () => {
             marginPerTradeUsdt: targetAcc.settings.tradeValueUsdt,
             accountId: targetAcc.id,
             overridePrices: mergedPrices,
+            isPartialOrRateLimited: Boolean((data as any).isPartialOrRateLimited),
           });
         } else {
           console.warn('Failed syncing trader:', res.reason);
@@ -667,7 +670,7 @@ export const App: React.FC = () => {
     const syncWorker = startRealtimeSyncTicker(() => {
       if (mobileNotifications.isAppStoppedByFullExit()) return;
       handleSyncAllCopiedTraders();
-    }, 2500);
+    }, 8000);
 
     // Refresh full 24h market metadata every 15s independently without ever blocking copied-trader sync
     const marketInfoInterval = setInterval(() => {
