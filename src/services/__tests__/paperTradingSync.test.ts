@@ -1,0 +1,199 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+// Lightweight localStorage polyfill for running PaperEngine deterministically in Node
+const memoryStorage = new Map<string, string>();
+(globalThis as any).localStorage = {
+  getItem: (key: string) => memoryStorage.get(key) ?? null,
+  setItem: (key: string, val: string) => {
+    memoryStorage.set(key, String(val));
+  },
+  removeItem: (key: string) => {
+    memoryStorage.delete(key);
+  },
+  clear: () => {
+    memoryStorage.clear();
+  },
+};
+
+import { PaperEngine } from '../paperTrading';
+import { mobileNotifications } from '../mobileNotifications';
+import type { TraderLatestRecord, TraderOpenPosition } from '../../types';
+
+test('PaperEngine syncTraderPositionsAndRecords executes PARTIAL_EXIT once and never loops across repeated polls', () => {
+  memoryStorage.clear();
+  mobileNotifications.clearAllNotifications();
+  const engine = new PaperEngine();
+  engine.clearAllDataAndReset({ scope: 'ALL_ACCOUNTS' });
+
+  const baseTime = Date.now() - 10_000;
+  const openPos: TraderOpenPosition = {
+    id: 'pos_btc_1',
+    symbol: 'BTCUSDT',
+    collateral: 'USDT',
+    positionAmount: 1.0,
+    initialPositionAmount: 1.0,
+    side: 'LONG',
+    entryPrice: 90000,
+    markPrice: 90000,
+    breakEvenPrice: 90000,
+    unrealizedProfit: 0,
+    cumRealized: 0,
+    notionalValue: 90000,
+    leverage: 5,
+    isolated: false,
+    roePercent: 0,
+    entryTime: baseTime,
+    lastUpdateTime: baseTime,
+    currentScalePercent: 100,
+    scaleAdjustments: [
+      {
+        id: 'pos_btc_1_entry',
+        actionType: 'INITIAL_ENTRY',
+        actionLabelAr: 'فتح',
+        timestamp: baseTime,
+        volumePercent: 100,
+        remainingPercentAfter: 100,
+        executedQty: 1.0,
+        price: 90000,
+      },
+    ],
+  };
+
+  // Initial sync: opens 1 copied position
+  const initialLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_1',
+    traderName: 'ProWhale',
+    source: 'COPY_TRADING',
+    positions: [openPos],
+    latestRecords: [],
+    currentPrices: { BTCUSDT: 90000 },
+  });
+  assert.equal(initialLogs.filter((l) => l.action === 'POSITION_SYNC').length, 1);
+
+  // Now trader withdraws 40% (remaining 0.60 BTC, scale 60%) AFTER user openTime
+  const partialExitTs = Date.now() + 2000;
+  const partialRecord: TraderLatestRecord = {
+    id: 'trader_1_ord_BTCUSDT_LONG_SELL_1',
+    symbol: 'BTCUSDT',
+    baseAsset: 'BTC',
+    quoteAsset: 'USDT',
+    side: 'SELL',
+    type: 'MARKET',
+    positionSide: 'LONG',
+    actionType: 'PARTIAL_EXIT',
+    actionLabelAr: 'انسحاب جزئي -40%',
+    volumePercent: -40,
+    remainingPercentAfter: 60,
+    executedQty: 0.4,
+    avgPrice: 91500,
+    totalPnl: 600,
+    orderTime: partialExitTs,
+    entryTime: baseTime,
+    exitTime: partialExitTs,
+  };
+
+  const reducedPos: TraderOpenPosition = {
+    ...openPos,
+    positionAmount: 0.6,
+    lastUpdateTime: partialExitTs,
+    currentScalePercent: 60,
+    scaleAdjustments: [
+      ...openPos.scaleAdjustments,
+      {
+        id: 'pos_btc_1_partial_40',
+        actionType: 'PARTIAL_EXIT',
+        actionLabelAr: 'انسحاب جزئي -40%',
+        timestamp: partialExitTs,
+        volumePercent: -40,
+        remainingPercentAfter: 60,
+        executedQty: 0.4,
+        price: 91500,
+      },
+    ],
+  };
+
+  // Poll #1 with partial exit signal (present in latestRecords, scaleAdjustments, AND quantity drop)
+  const firstWithdrawLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_1',
+    traderName: 'ProWhale',
+    source: 'COPY_TRADING',
+    positions: [reducedPos],
+    latestRecords: [partialRecord],
+    currentPrices: { BTCUSDT: 91500 },
+  });
+  assert.equal(
+    firstWithdrawLogs.filter((l) => l.action === 'PARTIAL_EXIT').length,
+    1,
+    'PARTIAL_EXIT must execute immediately and exactly once on first detection'
+  );
+
+  const partialNotifsAfterFirst = mobileNotifications
+    .getNotifications()
+    .filter((n) => n.actionType === 'PARTIAL_EXIT');
+  assert.equal(partialNotifsAfterFirst.length, 1);
+
+  // Polls #2 .. #13: exact same data polled repeatedly (even with >60s drift on order_id/updateTime)
+  for (let i = 0; i < 12; i++) {
+    const repeatLogs = engine.syncTraderPositionsAndRecords({
+      traderId: 'trader_1',
+      traderName: 'ProWhale',
+      source: 'COPY_TRADING',
+      positions: [reducedPos],
+      latestRecords: [partialRecord],
+      currentPrices: { BTCUSDT: 91500 + i },
+    });
+    assert.equal(
+      repeatLogs.filter((l) => l.action === 'PARTIAL_EXIT').length,
+      0,
+      `Poll repeat #${i + 1} must NOT re-emit PARTIAL_EXIT`
+    );
+  }
+
+  assert.equal(
+    mobileNotifications.getNotifications().filter((n) => n.actionType === 'PARTIAL_EXIT').length,
+    1,
+    'Total PARTIAL_EXIT notifications must remain 1 across 12 repeated polls'
+  );
+
+  // Now simulate a live quantity drop WITHOUT an order-history record yet (0.6 -> 0.3 = -50%)
+  const liveDropTs = partialExitTs + 90_000;
+  const secondReducedPos: TraderOpenPosition = {
+    ...reducedPos,
+    positionAmount: 0.3,
+    lastUpdateTime: liveDropTs,
+    currentScalePercent: 30,
+  };
+
+  const liveDropLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_1',
+    traderName: 'ProWhale',
+    source: 'COPY_TRADING',
+    positions: [secondReducedPos],
+    latestRecords: [partialRecord],
+    currentPrices: { BTCUSDT: 92000 },
+  });
+  assert.equal(
+    liveDropLogs.filter((l) => l.action === 'PARTIAL_EXIT').length,
+    1,
+    'Live positionAmount drop must execute partial withdrawal immediately in 1 sync cycle'
+  );
+
+  // Repeat 5 more polls with the 0.3 quantity — must NEVER fire again
+  for (let i = 0; i < 5; i++) {
+    const repeatDropLogs = engine.syncTraderPositionsAndRecords({
+      traderId: 'trader_1',
+      traderName: 'ProWhale',
+      source: 'COPY_TRADING',
+      positions: [secondReducedPos],
+      latestRecords: [partialRecord],
+      currentPrices: { BTCUSDT: 92000 },
+    });
+    assert.equal(repeatDropLogs.filter((l) => l.action === 'PARTIAL_EXIT').length, 0);
+  }
+
+  assert.equal(
+    mobileNotifications.getNotifications().filter((n) => n.actionType === 'PARTIAL_EXIT').length,
+    2
+  );
+});

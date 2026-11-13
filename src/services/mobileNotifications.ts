@@ -741,16 +741,29 @@ class MobileNotificationService {
     volumePercent?: number;
     marginDeltaUsdt?: number;
     realizedPnlDeltaUsdt?: number;
+    eventKey?: string;
   }): MobileTradeNotification | null {
     if (!this.settings.enabled) return null;
 
-    const { actionType, position, executionPrice, volumePercent, marginDeltaUsdt, realizedPnlDeltaUsdt } =
-      params;
+    const {
+      actionType,
+      position,
+      executionPrice,
+      volumePercent,
+      marginDeltaUsdt,
+      realizedPnlDeltaUsdt,
+      eventKey,
+    } = params;
 
     if (actionType === 'OPEN_TRADE' && !this.settings.notifyOnOpen) return null;
     if (actionType === 'SCALE_IN' && !this.settings.notifyOnScaleIn) return null;
     if (actionType === 'PARTIAL_EXIT' && !this.settings.notifyOnPartialExit) return null;
     if (actionType === 'FULL_EXIT' && !this.settings.notifyOnFullExit) return null;
+
+    // Deduplicate identical eventKey or identical rapid PARTIAL_EXIT / FULL_EXIT notifications
+    if (eventKey && this.notifications.some((n) => n.eventKey === eventKey)) {
+      return null;
+    }
 
     const traderName =
       position.sourceTraderName ||
@@ -832,9 +845,27 @@ class MobileNotificationService {
       summaryTextAr = `تم الخروج الكامل من صفقة ${position.symbol} بسعر ${this.formatPrice(executionPrice)}$ (دخول: ${this.formatPrice(position.entryPrice)}$) • صافي النتيجة: ${pnlSign}${pnlUsdt.toFixed(2)}$ (${pnlSign}${pnlPercent.toFixed(2)}%)`;
     }
 
+    const nowTs = Date.now();
+    if (!eventKey && (actionType === 'PARTIAL_EXIT' || actionType === 'FULL_EXIT')) {
+      const recentDuplicate = this.notifications.find(
+        (n) =>
+          n.actionType === actionType &&
+          n.symbol === position.symbol &&
+          n.side === position.side &&
+          n.traderName === traderName &&
+          (n.accountId || 'acc_default') === (position.accountId || 'acc_default') &&
+          n.volumePercent === volPct &&
+          n.remainingScalePercent === remainingPct &&
+          nowTs - n.timestamp < 5000
+      );
+      if (recentDuplicate) {
+        return null;
+      }
+    }
+
     const notification: MobileTradeNotification = {
-      id: `notif_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      timestamp: Date.now(),
+      id: `notif_${nowTs}_${Math.random().toString(36).substring(2, 7)}`,
+      timestamp: nowTs,
       read: false,
       actionType,
       actionTitleAr,
@@ -861,6 +892,9 @@ class MobileNotificationService {
       commissionUsdt: position.commissionUsdt || 0,
       realizedPnlUsdt: pnlUsdt,
       realizedPnlPercent: pnlPercent,
+      accountId: position.accountId,
+      accountName: position.accountName,
+      eventKey,
       summaryTextAr,
     };
 

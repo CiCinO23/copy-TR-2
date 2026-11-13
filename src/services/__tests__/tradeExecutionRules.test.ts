@@ -9,6 +9,9 @@ import {
   calculateLateEntryNetPositionState,
   shouldApplyTraderRecordAfterEntry,
   formatLateEntryComparisonDetails,
+  buildStableTraderEventKey,
+  hasSyncEventBeenApplied,
+  calculatePositionQuantityDropPartialExitPct,
 } from '../tradeExecutionRules';
 import type {
   ActiveCopiedTrader,
@@ -278,5 +281,63 @@ test('formatLateEntryComparisonDetails and calculateLateEntryNetPositionState fo
   assert.equal(stateWithLateInfo.singleDirectAdjustment.timestamp, userTime);
   assert.ok(stateWithLateInfo.singleDirectAdjustment.actionLabelAr.includes('سعر دخول المتداول: 91250.50$'));
   assert.ok(stateWithLateInfo.singleDirectAdjustment.actionLabelAr.includes('سعر دخولي: 90840.25$'));
+});
+
+test('buildStableTraderEventKey, hasSyncEventBeenApplied, and calculatePositionQuantityDropPartialExitPct prevent duplicate partial exits', () => {
+  const keyA = buildStableTraderEventKey({
+    kind: 'REC',
+    symbol: 'BTCUSDT',
+    actionType: 'PARTIAL_EXIT',
+    timestamp: 1700000100000,
+    volumePercent: 35,
+    quantity: 0.25,
+  });
+  const keyB = buildStableTraderEventKey({
+    kind: 'REC',
+    symbol: 'btcusdt',
+    actionType: 'PARTIAL_EXIT',
+    timestamp: 1700000100000,
+    volumePercent: -35,
+    quantity: 0.25,
+  });
+  assert.equal(keyA, keyB);
+
+  assert.equal(
+    hasSyncEventBeenApplied({
+      appliedSyncEventIds: [keyA],
+      scaleAdjustments: [],
+      candidateKeys: [keyB],
+      actionType: 'PARTIAL_EXIT',
+      eventTimestamp: 1700009999999, // even far in the future, ID match blocks re-execution
+    }),
+    true
+  );
+
+  assert.equal(
+    hasSyncEventBeenApplied({
+      appliedSyncEventIds: [],
+      scaleAdjustments: [
+        {
+          id: 'pos_partial_1',
+          actionType: 'PARTIAL_EXIT',
+          actionLabelAr: 'انسحاب',
+          timestamp: 1700000100000,
+          volumePercent: -35,
+          remainingPercentAfter: 65,
+          executedQty: 0.1,
+          price: 90000,
+          sourceEventId: keyA,
+        },
+      ],
+      candidateKeys: [keyA],
+      actionType: 'PARTIAL_EXIT',
+      eventTimestamp: 1700009999999,
+    }),
+    true
+  );
+
+  assert.equal(calculatePositionQuantityDropPartialExitPct({ previousQty: 10, currentQty: 9.7 }), 0);
+  assert.equal(calculatePositionQuantityDropPartialExitPct({ previousQty: 10, currentQty: 12 }), 0);
+  assert.equal(calculatePositionQuantityDropPartialExitPct({ previousQty: 10, currentQty: 6 }), 40);
 });
 

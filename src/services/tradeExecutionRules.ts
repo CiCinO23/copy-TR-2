@@ -425,3 +425,88 @@ export function shouldApplyTraderRecordAfterEntry(params: {
   if (!params.recordTimestamp || !params.userPositionOpenTime) return false;
   return params.recordTimestamp > params.userPositionOpenTime;
 }
+
+/**
+ * Builds a deterministic, poll-invariant deduplication key for any trader sync event
+ * (order record, scale adjustment, or live position quantity reduction).
+ */
+export function buildStableTraderEventKey(params: {
+  kind: 'REC' | 'ADJ' | 'QTY_DROP' | 'QTY_SCALE';
+  symbol: string;
+  actionType: 'ENTRY' | 'SCALE_IN' | 'PARTIAL_EXIT' | 'EXIT' | 'FULL_EXIT';
+  timestamp?: number;
+  volumePercent?: number;
+  quantity?: number;
+  rawId?: string;
+}): string {
+  const sym = String(params.symbol || '').toUpperCase().trim();
+  const ts = Math.round(Number(params.timestamp || 0));
+  const pct = Math.round(Math.abs(Number(params.volumePercent || 0)));
+  const qty = Number(params.quantity || 0).toFixed(5);
+  if (params.kind === 'ADJ' && params.rawId) {
+    return `adj:${sym}:${params.actionType}:${params.rawId}`;
+  }
+  return `${params.kind.toLowerCase()}:${sym}:${params.actionType}:${ts}:${pct}:${qty}`;
+}
+
+/**
+ * Multi-layer idempotency check ensuring a PARTIAL_EXIT / SCALE_IN / EXIT event
+ * can NEVER execute or emit notifications more than once across repeated polls or page reloads.
+ */
+export function hasSyncEventBeenApplied(params: {
+  appliedSyncEventIds?: string[];
+  scaleAdjustments?: PositionScaleAdjustment[];
+  candidateKeys: string[];
+  actionType: 'SCALE_IN' | 'PARTIAL_EXIT' | 'FULL_EXIT';
+  eventTimestamp?: number;
+}): boolean {
+  const keys = params.candidateKeys.filter(Boolean);
+  const storedSet = new Set(params.appliedSyncEventIds || []);
+  for (const key of keys) {
+    if (storedSet.has(key)) {
+      return true;
+    }
+  }
+
+  const adjustments = params.scaleAdjustments || [];
+  for (const adj of adjustments) {
+    if (adj.sourceEventId && keys.includes(adj.sourceEventId)) {
+      return true;
+    }
+    if (keys.includes(adj.id)) {
+      return true;
+    }
+    if (
+      adj.actionType === params.actionType &&
+      params.eventTimestamp &&
+      params.eventTimestamp > 0 &&
+      adj.timestamp > 0 &&
+      Math.abs(adj.timestamp - params.eventTimestamp) < 60000
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Computes the partial exit percentage when a trader reduces their live open position quantity
+ * between polls (ignoring noise under 5%). Returns 0 if no genuine reduction occurred.
+ */
+export function calculatePositionQuantityDropPartialExitPct(params: {
+  previousQty?: number;
+  currentQty?: number;
+}): number {
+  const prev = Number(params.previousQty || 0);
+  const curr = Number(params.currentQty || 0);
+  if (prev <= 0 || curr <= 0 || curr >= prev) {
+    return 0;
+  }
+  const dropRatio = (prev - curr) / prev;
+  if (dropRatio < 0.05) {
+    return 0;
+  }
+  return Math.min(95, Math.max(5, Math.round(dropRatio * 100)));
+}
+

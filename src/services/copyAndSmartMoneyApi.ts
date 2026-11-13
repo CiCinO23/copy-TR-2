@@ -79,9 +79,12 @@ function deterministicHash(seed: string): number {
   return Math.abs(hash);
 }
 
+// Quantized hour anchor so fallback/derived timestamps NEVER shift forward on every poll cycle
+const STABLE_FALLBACK_ANCHOR = Math.floor(Date.now() / 3600000) * 3600000;
+
 /**
- * Helper to build realistic or order-correlated scale-in (تدعيم) and partial-exit (انسحاب جزئي) adjustments
- * with exact timestamps and percentage volumes for an open position.
+ * Helper to build deterministic scale-in (تدعيم) and partial-exit (انسحاب جزئي) adjustments
+ * from real matching orders when available, or strictly anchored (poll-invariant) steps for simulation fallback.
  */
 function buildOpenPositionScaleAdjustments(params: {
   posId: string;
@@ -92,17 +95,123 @@ function buildOpenPositionScaleAdjustments(params: {
   markPrice: number;
   entryTime: number;
   matchingOrders: TraderLatestRecord[];
+  allowSyntheticSteps?: boolean;
 }): {
   initialPositionAmount: number;
   currentScalePercent: number;
   lastUpdateTime: number;
   scaleAdjustments: PositionScaleAdjustment[];
 } {
-  const { posId, symbol, side, currentQty, entryPrice, markPrice, entryTime, matchingOrders } = params;
-  const seed = deterministicHash(posId + symbol);
-  const now = Date.now();
+  const {
+    posId,
+    symbol,
+    side,
+    currentQty,
+    entryPrice,
+    markPrice,
+    entryTime,
+    matchingOrders,
+    allowSyntheticSteps = false,
+  } = params;
 
-  // If we have matching recent records for this symbol, derive adjustments from them; otherwise generate realistic institutional scaling steps
+  const sideLabel = side === 'LONG' ? 'شراء Long' : 'بيع Short';
+
+  // 1) If real matching orders exist from Binance order-history, derive adjustments deterministically from them
+  const openOrders = [...matchingOrders]
+    .filter((o) => o.actionType !== 'EXIT' && o.orderTime >= entryTime - 86400000)
+    .sort((a, b) => a.orderTime - b.orderTime);
+
+  if (openOrders.length > 0) {
+    const adjustments: PositionScaleAdjustment[] = [];
+    let currentScalePercent = 100;
+    let lastUpdateTime = entryTime;
+    let initialQty = currentQty;
+
+    const entryOrder = openOrders.find((o) => o.actionType === 'ENTRY');
+    const t0 = entryOrder?.orderTime || entryTime;
+    if (entryOrder && entryOrder.executedQty > 0) {
+      initialQty = entryOrder.executedQty;
+    }
+
+    adjustments.push({
+      id: `${posId}_adj_entry_${t0}`,
+      actionType: 'INITIAL_ENTRY',
+      actionLabelAr: `فتح الصفقة الأولي (${sideLabel} 100%)`,
+      timestamp: t0,
+      volumePercent: 100,
+      remainingPercentAfter: 100,
+      executedQty: Number(initialQty.toFixed(4)),
+      price: entryOrder?.avgPrice && entryOrder.avgPrice > 0 ? entryOrder.avgPrice : entryPrice,
+    });
+    lastUpdateTime = t0;
+
+    for (const ord of openOrders) {
+      if (ord.actionType === 'ENTRY') continue;
+      if (ord.actionType === 'SCALE_IN') {
+        const pct = Math.max(5, Math.abs(ord.volumePercent || 25));
+        currentScalePercent += pct;
+        lastUpdateTime = Math.max(lastUpdateTime, ord.orderTime);
+        adjustments.push({
+          id: `${posId}_ord_${ord.id}`,
+          actionType: 'SCALE_IN',
+          actionLabelAr: ord.actionLabelAr || `تدعيم الصفقة (+${pct}%)`,
+          timestamp: ord.orderTime,
+          volumePercent: pct,
+          remainingPercentAfter: currentScalePercent,
+          executedQty: ord.executedQty,
+          price: ord.avgPrice > 0 ? ord.avgPrice : entryPrice,
+        });
+      } else if (ord.actionType === 'PARTIAL_EXIT') {
+        const pct = Math.min(95, Math.max(5, Math.abs(ord.volumePercent || 25)));
+        currentScalePercent = Math.max(5, Math.round(currentScalePercent * (1 - pct / 100)));
+        lastUpdateTime = Math.max(lastUpdateTime, ord.orderTime);
+        adjustments.push({
+          id: `${posId}_ord_${ord.id}`,
+          actionType: 'PARTIAL_EXIT',
+          actionLabelAr: ord.actionLabelAr || `انسحاب جزئي وجني أرباح (-${pct}%)`,
+          timestamp: ord.orderTime,
+          volumePercent: -pct,
+          remainingPercentAfter: currentScalePercent,
+          executedQty: ord.executedQty,
+          price: ord.avgPrice > 0 ? ord.avgPrice : markPrice,
+          realizedPnlDelta: ord.totalPnl || undefined,
+        });
+      }
+    }
+
+    return {
+      initialPositionAmount: Number(initialQty.toFixed(4)),
+      currentScalePercent,
+      lastUpdateTime,
+      scaleAdjustments: adjustments,
+    };
+  }
+
+  // 2) For live Binance positions with no recent matching order-history entries,
+  // NEVER fabricate fake PARTIAL_EXIT steps — keep exact initial entry only!
+  if (!allowSyntheticSteps) {
+    return {
+      initialPositionAmount: Number(currentQty.toFixed(4)),
+      currentScalePercent: 100,
+      lastUpdateTime: entryTime,
+      scaleAdjustments: [
+        {
+          id: `${posId}_adj_entry_${entryTime}`,
+          actionType: 'INITIAL_ENTRY',
+          actionLabelAr: `فتح الصفقة الأولي (${sideLabel} 100%)`,
+          timestamp: entryTime,
+          volumePercent: 100,
+          remainingPercentAfter: 100,
+          executedQty: Number(currentQty.toFixed(4)),
+          price: entryPrice,
+        },
+      ],
+    };
+  }
+
+  // 3) For Smart Money offline/anchor profiles: use FIXED offsets relative to `entryTime`
+  // (NEVER Date.now()) so timestamps and percentages remain 100% immutable across polls.
+  const seed = deterministicHash(posId + symbol);
   const scaleInPct = ((seed % 4) + 2) * 10; // e.g., +20%, +30%, +40%, +50%
   const partialExitPct = ((seed % 3) + 2) * 10; // e.g., -20%, -30%, -40%
   const hasPartialExit = seed % 2 === 0;
@@ -114,15 +223,15 @@ function buildOpenPositionScaleAdjustments(params: {
     ? Number((initialQty * (partialExitPct / 100)).toFixed(4))
     : 0;
 
-  const t0 = matchingOrders.find((o) => o.actionType === 'ENTRY')?.orderTime || entryTime;
-  const t1 = Math.min(now - 900000, t0 + Math.max(600000, Math.floor((now - t0) * 0.45)));
-  const t2 = Math.min(now - 180000, t0 + Math.max(1200000, Math.floor((now - t0) * 0.8)));
+  const t0 = entryTime;
+  const t1 = t0 + 1800000; // fixed +30m after entryTime
+  const t2 = t0 + 3600000; // fixed +60m after entryTime
 
   const adjustments: PositionScaleAdjustment[] = [
     {
       id: `${posId}_adj_entry`,
       actionType: 'INITIAL_ENTRY',
-      actionLabelAr: `فتح الصفقة الأولي (${side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100%)`,
+      actionLabelAr: `فتح الصفقة الأولي (${sideLabel} 100%)`,
       timestamp: t0,
       volumePercent: 100,
       remainingPercentAfter: 100,
@@ -401,13 +510,57 @@ export async function fetchCopyTraderFullData(
     leadingDays: traderSummary?.leadingDays || 120,
   };
 
-  try {
-    const detailRes = await fetch(
+  const [detailRes, ordRes, posRes, histRes] = await Promise.all([
+    fetch(
       `/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/detail?portfolioId=${encodeURIComponent(
         portfolioId
       )}`
-    );
-    if (detailRes.ok) {
+    ).catch((e) => {
+      console.warn('Error fetching copy trader detail:', e);
+      return null;
+    }),
+    fetch('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        pageNumber: 1,
+        pageSize: 25,
+        portfolioId,
+      }),
+    }).catch((e) => {
+      console.warn('Error fetching copy trader latest records:', e);
+      return null;
+    }),
+    fetch(
+      `/bapi/futures/v1/friendly/future/copy-trade/lead-data/positions?portfolioId=${encodeURIComponent(
+        portfolioId
+      )}`
+    ).catch((e) => {
+      console.warn('Error fetching copy trader open positions:', e);
+      return null;
+    }),
+    fetch('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-history', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        pageNumber: 1,
+        pageSize: 15,
+        portfolioId,
+      }),
+    }).catch((e) => {
+      console.warn('Error fetching copy trader position history:', e);
+      return null;
+    }),
+  ]);
+
+  try {
+    if (detailRes && detailRes.ok) {
       const detailJson = await detailRes.json();
       const d = detailJson?.data;
       if (d && d.leadPortfolioId) {
@@ -446,33 +599,15 @@ export async function fetchCopyTraderFullData(
       }
     }
   } catch (e) {
-    console.warn('Error fetching copy trader detail:', e);
+    console.warn('Error parsing copy trader detail:', e);
   }
 
-  // 2) Latest Records (/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history)
-  // Fetch Latest records first so we can correlate exact entry/exit timestamps and scale percentages
   let latestRecords: TraderLatestRecord[] = [];
   try {
-    const ordRes = await fetch(
-      '/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({
-          pageNumber: 1,
-          pageSize: 25,
-          portfolioId,
-        }),
-      }
-    );
-    if (ordRes.ok) {
+    if (ordRes && ordRes.ok) {
       const ordJson = await ordRes.json();
       const rawOrders = ordJson?.data?.list;
       if (Array.isArray(rawOrders)) {
-        // Track symbol occurrences from oldest to newest to classify ENTRY vs SCALE_IN and PARTIAL_EXIT vs EXIT
         const chronological = [...rawOrders].reverse();
         const symbolActiveState = new Map<string, { openQty: number; initialQty: number; entryTime: number }>();
 
@@ -483,7 +618,7 @@ export async function fetchCopyTraderFullData(
             o.positionSide === 'LONG' || o.positionSide === 'SHORT' ? o.positionSide : 'BOTH';
           const totalPnl = Number(o.totalPnl || 0);
           const executedQty = Number(o.executedQty || 0);
-          const orderTime = Number(o.orderTime || Date.now() - (chronological.length - idx) * 1800000);
+          const orderTime = Number(o.orderTime || STABLE_FALLBACK_ANCHOR - (chronological.length - idx) * 1800000);
 
           const isClosingAction =
             (side === 'SELL' && posSide === 'LONG') ||
@@ -502,7 +637,6 @@ export async function fetchCopyTraderFullData(
 
           if (!isClosingAction) {
             if (!currentState || currentState.openQty <= 0.000001) {
-              // Initial Entry (100%)
               actionType = 'ENTRY';
               volumePercent = 100;
               remainingPercentAfter = 100;
@@ -518,7 +652,6 @@ export async function fetchCopyTraderFullData(
                   : 'شراء / Long';
               actionLabelAr = `دخول أولي (${dirAr} • 100%)`;
             } else {
-              // Scale-In / Reinforcement (تدعيم الصفقة)
               actionType = 'SCALE_IN';
               const baseQty = Math.max(0.0001, currentState.initialQty);
               const rawPct = Math.round((executedQty / baseQty) * 100);
@@ -534,7 +667,6 @@ export async function fetchCopyTraderFullData(
               entryTimeVal = currentState.entryTime;
               const ratioClosed = executedQty / currentState.openQty;
               if (ratioClosed < 0.88) {
-                // Partial Withdrawal (انسحاب جزئي)
                 actionType = 'PARTIAL_EXIT';
                 const pctWithdrawn = Math.min(Math.max(10, Math.round(ratioClosed * 100)), 90);
                 volumePercent = -pctWithdrawn;
@@ -545,7 +677,6 @@ export async function fetchCopyTraderFullData(
                 );
                 actionLabelAr = `انسحاب جزئي من الصفقة (-${pctWithdrawn}% • متبقي ${remainingPercentAfter}%)`;
               } else {
-                // Full Exit (-100%)
                 actionType = 'EXIT';
                 volumePercent = -100;
                 remainingPercentAfter = 0;
@@ -557,11 +688,10 @@ export async function fetchCopyTraderFullData(
                 actionLabelAr = `خروج كامل من الصفقة (${dirAr} • -100%)`;
               }
             } else {
-              // Determine if partial or full exit based on deterministic hash when prior entry was before page window
-              const h = deterministicHash(`${portfolioId}_${symbol}_${orderTime}_${idx}`);
+              const h = deterministicHash(`${portfolioId}_${symbol}_${orderTime}_${executedQty}`);
               entryTimeVal = orderTime - ((h % 5) + 1) * 3600000;
               if (h % 3 === 1) {
-                const pct = ((h % 4) + 2) * 15; // 30%, 45%, 60%, 75%
+                const pct = ((h % 4) + 2) * 15;
                 actionType = 'PARTIAL_EXIT';
                 volumePercent = -pct;
                 remainingPercentAfter = 100 - pct;
@@ -580,7 +710,7 @@ export async function fetchCopyTraderFullData(
           }
 
           return {
-            id: `${portfolioId}_ord_${orderTime}_${idx}`,
+            id: `${portfolioId}_ord_${symbol}_${posSide}_${side}_${orderTime}_${executedQty}`,
             symbol,
             baseAsset: String(o.baseAsset || symbol.replace('USDT', '')),
             quoteAsset: String(o.quoteAsset || 'USDT'),
@@ -604,19 +734,13 @@ export async function fetchCopyTraderFullData(
       }
     }
   } catch (e) {
-    console.warn('Error fetching copy trader latest records:', e);
+    console.warn('Error parsing copy trader latest records:', e);
   }
 
-  // 3) Open Positions (/bapi/futures/v1/friendly/future/copy-trade/lead-data/positions)
   let positions: TraderOpenPosition[] = [];
-  let positionsArePublic = detail.positionShow;
+  const positionsArePublic = detail.positionShow;
   try {
-    const posRes = await fetch(
-      `/bapi/futures/v1/friendly/future/copy-trade/lead-data/positions?portfolioId=${encodeURIComponent(
-        portfolioId
-      )}`
-    );
-    if (posRes.ok) {
+    if (posRes && posRes.ok) {
       const posJson = await posRes.json();
       const rawPositions = posJson?.data;
       if (Array.isArray(rawPositions)) {
@@ -639,12 +763,12 @@ export async function fetchCopyTraderFullData(
           const margin = notional > 0 && lev > 0 ? notional / lev : 1;
           const roePercent = margin > 0 ? (uPnl / margin) * 100 : 0;
 
-          const posId = String(p.id || `${symbol}_${p.positionSide || side}_${idx}`);
+          const posId = String(p.id || `${symbol}_${p.positionSide || side}`);
           const matchingOrders = latestRecords.filter((r) => r.symbol === symbol);
           const rawEntryTime =
-            Number(p.updateTime || p.time || 0) ||
             matchingOrders.find((r) => r.actionType === 'ENTRY')?.orderTime ||
-            Date.now() - (idx + 2) * 5400000;
+            Number(p.time || p.updateTime || 0) ||
+            STABLE_FALLBACK_ANCHOR - (idx + 2) * 5400000;
 
           const scaling = buildOpenPositionScaleAdjustments({
             posId,
@@ -655,6 +779,7 @@ export async function fetchCopyTraderFullData(
             markPrice: mark,
             entryTime: rawEntryTime,
             matchingOrders,
+            allowSyntheticSteps: false,
           });
 
           return {
@@ -674,7 +799,7 @@ export async function fetchCopyTraderFullData(
             isolated: Boolean(p.isolated),
             roePercent,
             entryTime: rawEntryTime,
-            lastUpdateTime: scaling.lastUpdateTime,
+            lastUpdateTime: Number(p.updateTime || scaling.lastUpdateTime || rawEntryTime),
             currentScalePercent: scaling.currentScalePercent,
             scaleAdjustments: scaling.scaleAdjustments,
           };
@@ -682,28 +807,12 @@ export async function fetchCopyTraderFullData(
       }
     }
   } catch (e) {
-    console.warn('Error fetching copy trader open positions:', e);
+    console.warn('Error parsing copy trader open positions:', e);
   }
 
-  // 4) Position History (/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-history)
   let positionHistory: TraderPositionHistoryItem[] = [];
   try {
-    const histRes = await fetch(
-      '/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-history',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({
-          pageNumber: 1,
-          pageSize: 15,
-          portfolioId,
-        }),
-      }
-    );
-    if (histRes.ok) {
+    if (histRes && histRes.ok) {
       const histJson = await histRes.json();
       const rawHist = histJson?.data?.list;
       if (Array.isArray(rawHist)) {
@@ -712,8 +821,8 @@ export async function fetchCopyTraderFullData(
           const symbol = String(h.symbol || 'BTCUSDT');
           const side: 'LONG' | 'SHORT' =
             String(h.side || 'Long').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
-          const opened = Number(h.opened || Date.now() - (idx + 2) * 7200000);
-          const closed = Number(h.closed || Date.now() - idx * 1800000);
+          const opened = Number(h.opened || STABLE_FALLBACK_ANCHOR - (idx + 2) * 7200000);
+          const closed = Number(h.closed || STABLE_FALLBACK_ANCHOR - idx * 1800000);
           const avgCost = Number(h.avgCost || 0);
           const avgClosePrice = Number(h.avgClosePrice || 0);
           const closingPnl = Number(h.closingPnl || 0);
@@ -747,7 +856,7 @@ export async function fetchCopyTraderFullData(
       }
     }
   } catch (e) {
-    console.warn('Error fetching copy trader position history:', e);
+    console.warn('Error parsing copy trader position history:', e);
   }
 
   // If the trader currently has no active open positions returned by BAPI, synthesize active positions from their latest ENTRY records
@@ -769,7 +878,7 @@ export async function fetchCopyTraderFullData(
     const notional = qty * mark;
     const lev = 10;
     const posId = `${portfolioId}_derived_pos_1`;
-    const entryTime = recentEntry.entryTime || recentEntry.orderTime || Date.now() - 5400000;
+    const entryTime = recentEntry.entryTime || recentEntry.orderTime || STABLE_FALLBACK_ANCHOR - 5400000;
 
     const scaling = buildOpenPositionScaleAdjustments({
       posId,
@@ -780,6 +889,7 @@ export async function fetchCopyTraderFullData(
       markPrice: mark,
       entryTime,
       matchingOrders: latestRecords.filter((r) => r.symbol === recentEntry.symbol),
+      allowSyntheticSteps: false,
     });
 
     positions = [
@@ -1035,7 +1145,7 @@ export async function fetchSmartMoneyWhaleDetail(
           const notional = amt * mark;
           const side: 'LONG' | 'SHORT' = p.positionSide === 'SHORT' ? 'SHORT' : 'LONG';
           const posId = `${topTraderId}_pos_${idx}`;
-          const entryTime = Number(p.updateTime || Date.now() - (idx + 2) * 5400000);
+          const entryTime = Number(p.updateTime || STABLE_FALLBACK_ANCHOR - (idx + 2) * 5400000);
           const scaling = buildOpenPositionScaleAdjustments({
             posId,
             symbol,
@@ -1045,6 +1155,7 @@ export async function fetchSmartMoneyWhaleDetail(
             markPrice: mark,
             entryTime,
             matchingOrders: [],
+            allowSyntheticSteps: false,
           });
 
           return {
@@ -1083,7 +1194,7 @@ export async function fetchSmartMoneyWhaleDetail(
   const tertiarySym = symbolPool[(seed + 2) % 6];
 
   const whaleBalance = Math.max(profile.umMarginBalance || 250000, 50000);
-  const now = Date.now();
+  const now = STABLE_FALLBACK_ANCHOR;
 
   if (positions.length === 0) {
     const activeSymbols = [primarySym, secondarySym, tertiarySym].filter(
@@ -1116,6 +1227,7 @@ export async function fetchSmartMoneyWhaleDetail(
         markPrice: mark,
         entryTime,
         matchingOrders: [],
+        allowSyntheticSteps: true,
       });
 
       return {

@@ -101,6 +101,7 @@ export interface PositionScaleAdjustment {
   traderEntryTime?: number; // وقت دخول المتداول الأصلي عند الدخول المتأخر
   realizedPnlDelta?: number;
   marginDeltaUsdt?: number; // قيمة الهامش المضاف أو المسحوب بالدولار (USDT)
+  sourceEventId?: string; // معرف فريد ثابت للعملية المصدر لمنع التكرار
 }
 
 export interface PaperPosition {
@@ -132,6 +133,9 @@ export interface PaperPosition {
   executionMode?: TradingExecutionMode;
   accountId?: string;
   accountName?: string;
+  appliedSyncEventIds?: string[];
+  lastSyncedTraderQty?: number;
+  lastSyncedTraderUpdateTime?: number;
 }
 
 export interface PendingReconnectTradeChoice {
@@ -507,6 +511,7 @@ export interface MobileTradeNotification {
   traderOriginalEntryTime?: number; // وقت دخول المتداول الأصلي
   userEntryTime?: number; // وقت دخول المستخدم الفعلي في الصفقة
   stopLossPrice?: number; // سعر وقف الخسارة عند تأمين الصفقة
+  eventKey?: string; // مفتاح فريد لمنع تكرار نفس الإشعار أكثر من مرة
   summaryTextAr: string;
 }
 

@@ -34,6 +34,7 @@ import {
   saveBinanceConfig,
   clearBinanceKeys,
   testConnectionAndFetchData,
+  fetchAllFuturesPrices,
   addWatchedFuturesSymbol,
 } from './services/binanceApi';
 import {
@@ -52,6 +53,7 @@ import {
 } from './services/copyAndSmartMoneyApi';
 import { paperEngine } from './services/paperTrading';
 import { mobileNotifications } from './services/mobileNotifications';
+import { startRealtimeSyncTicker } from './services/realtimeSyncWorker';
 import {
   loadKuCoinSecurityConfig,
   saveKuCoinSecurityConfig,
@@ -380,6 +382,18 @@ export const App: React.FC = () => {
     refreshCopiedTradersList();
   }, [selectedTab, refreshCopiedTradersList]);
 
+  // Stable refs so real-time background workers and intervals NEVER tear down or suffer stale closures
+  const pricesMapRef = useRef<Record<string, number>>(pricesMap);
+  pricesMapRef.current = pricesMap;
+  const tickersRef = useRef(connectionState.tickers);
+  tickersRef.current = connectionState.tickers;
+  const kucoinConfigRef = useRef(kucoinConfig);
+  kucoinConfigRef.current = kucoinConfig;
+  const binanceConfigRef = useRef(binanceConfig);
+  binanceConfigRef.current = binanceConfig;
+  const handleSelectVirtualAccountRef = useRef(handleSelectVirtualAccount);
+  handleSelectVirtualAccountRef.current = handleSelectVirtualAccount;
+
   // Sync a copied trader's Positions and Latest records using the target Account's trade settings
   const handleSyncTraderToEngine = useCallback(
     (params: {
@@ -390,6 +404,7 @@ export const App: React.FC = () => {
       latestRecords: TraderLatestRecord[];
       marginPerTradeUsdt: number;
       accountId?: string;
+      overridePrices?: Record<string, number>;
     }): CopiedSyncLog[] => {
       const targetAcc = paperEngine.getAccount(params.accountId);
       const currentSettings = targetAcc.settings;
@@ -397,17 +412,25 @@ export const App: React.FC = () => {
         ? currentSettings.tradeValueUsdt
         : params.marginPerTradeUsdt || currentSettings.tradeValueUsdt;
       const userLeverage = currentSettings.leverage;
+      const livePrices =
+        params.overridePrices && Object.keys(params.overridePrices).length > 0
+          ? { ...pricesMapRef.current, ...params.overridePrices }
+          : pricesMapRef.current;
 
       // 1. Sync to target virtual account with live market prices, auto exits/partial exits & reconnect price advantage evaluation
       const logs = paperEngine.syncTraderPositionsAndRecords({
-        ...params,
+        traderId: params.traderId,
+        traderName: params.traderName,
+        source: params.source,
+        positions: params.positions,
+        latestRecords: params.latestRecords,
         marginPerTradeUsdt: userTradeValue,
         accountId: targetAcc.id,
-        currentPrices: pricesMap,
+        currentPrices: livePrices,
         checkReconnectAdvantage: true,
       });
-      updatePaperSnapshot();
-      setTimeout(refreshCopiedTradersList, 100);
+      setPaperSnapshot(paperEngine.getSnapshot(livePrices));
+      setTimeout(refreshCopiedTradersList, 50);
 
       // 2. Route synced entries, scale-ins, partial exits, and full exits to KuCoin API at current market price
       for (const log of logs) {
@@ -437,7 +460,7 @@ export const App: React.FC = () => {
 
             executeKuCoinOrder({
               config: {
-                ...kucoinConfig,
+                ...kucoinConfigRef.current,
                 enableLiveExecution: currentSettings.mode === 'REAL',
               },
               binanceSymbol: log.symbol,
@@ -466,7 +489,7 @@ export const App: React.FC = () => {
 
       return logs;
     },
-    [kucoinConfig, pricesMap, updatePaperSnapshot, refreshCopiedTradersList]
+    [refreshCopiedTradersList]
   );
 
   // Copy a single position using the target Account's configured Trade Settings at the CURRENT LIVE MARKET PRICE
@@ -541,47 +564,82 @@ export const App: React.FC = () => {
     [kucoinConfig, pricesMap, updatePaperSnapshot]
   );
 
-  // Sync ALL currently copied traders across both Copy Trading & Whales into their respective virtual accounts
+  // Sync ALL currently copied traders across both Copy Trading & Whales in parallel at real-time speed
+  const isSyncInFlightRef = useRef<boolean>(false);
+  const pendingResyncRef = useRef<boolean>(false);
+  const handleSyncTraderToEngineRef = useRef(handleSyncTraderToEngine);
+  handleSyncTraderToEngineRef.current = handleSyncTraderToEngine;
+
   const handleSyncAllCopiedTraders = useCallback(async () => {
+    if (mobileNotifications.isAppStoppedByFullExit()) return;
     const list = loadAllCopiedTradersFromStorage();
     if (list.length === 0) return;
+
+    if (isSyncInFlightRef.current) {
+      pendingResyncRef.current = true;
+      return;
+    }
+
+    isSyncInFlightRef.current = true;
     setIsSyncingAll(true);
 
-    for (const ct of list) {
-      const targetAcc = paperEngine.getAccount(ct.accountId);
-      try {
+    try {
+      // Fetch fresh live market prices concurrently alongside all copied traders (no sequential blocking!)
+      const freshPricesPromise = fetchAllFuturesPrices(binanceConfigRef.current).catch(
+        () => pricesMapRef.current
+      );
+
+      const traderDataPromises = list.map(async (ct) => {
+        const targetAcc = paperEngine.getAccount(ct.accountId);
         if (ct.source === 'COPY_TRADING') {
-          const data = await fetchCopyTraderFullData(ct.traderId, null, connectionState.tickers);
-          handleSyncTraderToEngine({
+          const data = await fetchCopyTraderFullData(ct.traderId, null, tickersRef.current);
+          return { ct, targetAcc, data };
+        } else {
+          const data = await fetchSmartMoneyWhaleDetail(ct.traderId, null, tickersRef.current);
+          return { ct, targetAcc, data };
+        }
+      });
+
+      const [freshPrices, results] = await Promise.all([
+        freshPricesPromise,
+        Promise.allSettled(traderDataPromises),
+      ]);
+
+      const mergedPrices = { ...pricesMapRef.current, ...(freshPrices || {}) };
+      pricesMapRef.current = mergedPrices;
+
+      for (const res of results) {
+        if (res.status === 'fulfilled') {
+          const { ct, targetAcc, data } = res.value;
+          handleSyncTraderToEngineRef.current({
             traderId: ct.traderId,
             traderName: ct.nickname,
-            source: 'COPY_TRADING',
+            source: ct.source,
             positions: data.positions,
             latestRecords: data.latestRecords,
             marginPerTradeUsdt: targetAcc.settings.tradeValueUsdt,
             accountId: targetAcc.id,
+            overridePrices: mergedPrices,
           });
         } else {
-          const data = await fetchSmartMoneyWhaleDetail(ct.traderId, null, connectionState.tickers);
-          handleSyncTraderToEngine({
-            traderId: ct.traderId,
-            traderName: ct.nickname,
-            source: 'SMART_MONEY',
-            positions: data.positions,
-            latestRecords: data.latestRecords,
-            marginPerTradeUsdt: targetAcc.settings.tradeValueUsdt,
-            accountId: targetAcc.id,
-          });
+          console.warn('Failed syncing trader:', res.reason);
         }
-      } catch (e) {
-        console.warn('Failed syncing trader:', ct.nickname, e);
+      }
+
+      setPaperSnapshot(paperEngine.getSnapshot(mergedPrices));
+    } finally {
+      isSyncInFlightRef.current = false;
+      setIsSyncingAll(false);
+      if (pendingResyncRef.current) {
+        pendingResyncRef.current = false;
+        setTimeout(() => {
+          handleSyncAllCopiedTraders();
+        }, 150);
       }
     }
-    setIsSyncingAll(false);
-    updatePaperSnapshot();
-  }, [connectionState.tickers, handleSyncTraderToEngine, updatePaperSnapshot]);
+  }, []);
 
-  // Automatic background polling & reconnection sync (every 15s + on online / visibilitychange + initial connect)
+  // Immediate initial sync once market tickers connect
   const hasInitialTraderSyncRunRef = useRef(false);
   useEffect(() => {
     if (connectionState.tickers.length > 0 && !hasInitialTraderSyncRunRef.current) {
@@ -590,22 +648,34 @@ export const App: React.FC = () => {
     }
   }, [connectionState.tickers.length, handleSyncAllCopiedTraders]);
 
+  // Real-time continuous background synchronization:
+  // Uses an unthrottled Blob Web Worker ticker (every 2.5s) + Service Worker heartbeat + immediate foreground/network events
   useEffect(() => {
-    const interval = setInterval(() => {
+    const syncWorker = startRealtimeSyncTicker(() => {
       if (mobileNotifications.isAppStoppedByFullExit()) return;
-      testConnectionAndFetchData(binanceConfig).then((res) => {
-        setConnectionState(res);
-        handleSyncAllCopiedTraders();
-      });
+      handleSyncAllCopiedTraders();
+    }, 2500);
+
+    // Refresh full 24h market metadata every 15s independently without ever blocking copied-trader sync
+    const marketInfoInterval = setInterval(() => {
+      if (mobileNotifications.isAppStoppedByFullExit()) return;
+      testConnectionAndFetchData(binanceConfigRef.current)
+        .then((res) => {
+          setConnectionState(res);
+        })
+        .catch(() => {});
     }, 15000);
 
-    const handleReconnectOrForeground = () => {
+    const handleImmediateSyncWakeup = () => {
       if (mobileNotifications.isAppStoppedByFullExit()) return;
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      testConnectionAndFetchData(binanceConfig).then((res) => {
-        setConnectionState(res);
-        handleSyncAllCopiedTraders();
-      });
+      handleSyncAllCopiedTraders();
+      if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
+        testConnectionAndFetchData(binanceConfigRef.current)
+          .then((res) => {
+            setConnectionState(res);
+          })
+          .catch(() => {});
+      }
     };
 
     const handleServiceWorkerMessage = (event: MessageEvent) => {
@@ -613,42 +683,44 @@ export const App: React.FC = () => {
       if (!data || typeof data !== 'object') return;
       if (data.type === 'SW_BACKGROUND_HEARTBEAT') {
         if (!mobileNotifications.isAppStoppedByFullExit()) {
-          testConnectionAndFetchData(binanceConfig).then((res) => {
-            setConnectionState(res);
-            handleSyncAllCopiedTraders();
-          });
+          handleSyncAllCopiedTraders();
         }
       } else if (data.type === 'NOTIFICATION_CLICKED_FROM_LOCKSCREEN') {
         if (data.data?.accountId) {
-          handleSelectVirtualAccount(data.data.accountId);
+          handleSelectVirtualAccountRef.current(data.data.accountId);
         }
         setSelectedTab('Simulation');
       }
     };
 
     if (typeof window !== 'undefined') {
-      window.addEventListener('online', handleReconnectOrForeground);
+      window.addEventListener('online', handleImmediateSyncWakeup);
+      window.addEventListener('focus', handleImmediateSyncWakeup);
+      window.addEventListener('pageshow', handleImmediateSyncWakeup);
     }
     if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', handleReconnectOrForeground);
+      document.addEventListener('visibilitychange', handleImmediateSyncWakeup);
     }
     if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
       navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
     }
 
     return () => {
-      clearInterval(interval);
+      syncWorker.stop();
+      clearInterval(marketInfoInterval);
       if (typeof window !== 'undefined') {
-        window.removeEventListener('online', handleReconnectOrForeground);
+        window.removeEventListener('online', handleImmediateSyncWakeup);
+        window.removeEventListener('focus', handleImmediateSyncWakeup);
+        window.removeEventListener('pageshow', handleImmediateSyncWakeup);
       }
       if (typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', handleReconnectOrForeground);
+        document.removeEventListener('visibilitychange', handleImmediateSyncWakeup);
       }
       if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
         navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
       }
     };
-  }, [binanceConfig, handleSelectVirtualAccount, handleSyncAllCopiedTraders]);
+  }, [handleSyncAllCopiedTraders]);
 
   // Remove a copied trader from storage (optionally scoped to a specific virtual account)
   const handleRemoveCopiedTrader = useCallback(

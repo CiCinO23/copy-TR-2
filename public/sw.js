@@ -29,7 +29,7 @@ function startBackgroundHeartbeat() {
     } catch {
       // ignore
     }
-  }, 20000);
+  }, 4000);
 }
 
 function stopBackgroundHeartbeat() {

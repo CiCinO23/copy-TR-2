@@ -19,6 +19,9 @@ import {
   calculateLateEntryNetPositionState,
   shouldApplyTraderRecordAfterEntry,
   formatLateEntryComparisonDetails,
+  buildStableTraderEventKey,
+  hasSyncEventBeenApplied,
+  calculatePositionQuantityDropPartialExitPct,
 } from './tradeExecutionRules';
 
 const PAPER_STORAGE_KEY = 'whale_copy_paper_state_v3';
@@ -697,6 +700,17 @@ export class PaperEngine {
     return acc.positions.filter((p) => p.status === 'OPEN').length;
   }
 
+  private recordAppliedSyncEventIds(pos: PaperPosition, keys?: string[]): void {
+    if (!keys || keys.length === 0) return;
+    const existing = pos.appliedSyncEventIds ? [...pos.appliedSyncEventIds] : [];
+    for (const key of keys) {
+      if (key && !existing.includes(key)) {
+        existing.push(key);
+      }
+    }
+    pos.appliedSyncEventIds = existing.slice(-100);
+  }
+
   private findAccountAndPosition(
     positionId: string,
     accountId?: string
@@ -994,7 +1008,8 @@ export class PaperEngine {
     executionPrice: number,
     actionTimestamp?: number,
     customAddedMarginUsdt?: number,
-    accountId?: string
+    accountId?: string,
+    options?: { sourceEventId?: string; appliedEventKeys?: string[]; eventKey?: string }
   ): PaperPosition {
     const { acc, pos } = this.findAccountAndPosition(positionId, accountId);
 
@@ -1039,7 +1054,7 @@ export class PaperEngine {
     const ts = actionTimestamp || Date.now();
     if (!pos.scaleAdjustments) pos.scaleAdjustments = [];
     pos.scaleAdjustments.push({
-      id: `${pos.id}_scale_in_${ts}`,
+      id: `${pos.id}_scale_in_${ts}_${pos.scaleAdjustments.length}`,
       actionType: 'SCALE_IN',
       actionLabelAr: isFixedUsdtMode
         ? `تدعيم بالقيمة المحددة (+${addedMargin.toFixed(2)}$ • يعادل +${cleanPct}%)`
@@ -1050,7 +1065,12 @@ export class PaperEngine {
       executedQty: Number(addedQty.toFixed(5)),
       price: safePrice,
       marginDeltaUsdt: addedMargin,
+      sourceEventId: options?.sourceEventId,
     });
+    this.recordAppliedSyncEventIds(
+      pos,
+      options?.appliedEventKeys || (options?.sourceEventId ? [options.sourceEventId] : undefined)
+    );
 
     this.saveState();
 
@@ -1060,6 +1080,7 @@ export class PaperEngine {
       executionPrice: safePrice,
       volumePercent: cleanPct,
       marginDeltaUsdt: addedMargin,
+      eventKey: options?.eventKey || options?.sourceEventId,
     });
 
     return pos;
@@ -1070,15 +1091,16 @@ export class PaperEngine {
     traderVolumePercent: number,
     executionPrice: number,
     actionTimestamp?: number,
-    accountId?: string
+    accountId?: string,
+    options?: { sourceEventId?: string; appliedEventKeys?: string[]; eventKey?: string }
   ): PaperPosition {
     const { acc } = this.findAccountAndPosition(positionId, accountId);
     if (acc.settings.scaleInSamePercentAsTrader !== false) {
       const pct = Math.max(5, Math.abs(traderVolumePercent || 25));
-      return this.scaleInPosition(positionId, pct, executionPrice, actionTimestamp, undefined, acc.id);
+      return this.scaleInPosition(positionId, pct, executionPrice, actionTimestamp, undefined, acc.id, options);
     } else {
       const fixedVal = Math.max(1, acc.settings.scaleInFixedValueUsdt || 10);
-      return this.scaleInPosition(positionId, 0, executionPrice, actionTimestamp, fixedVal, acc.id);
+      return this.scaleInPosition(positionId, 0, executionPrice, actionTimestamp, fixedVal, acc.id, options);
     }
   }
 
@@ -1090,7 +1112,8 @@ export class PaperEngine {
     withdrawPercent: number,
     executionPrice: number,
     actionTimestamp?: number,
-    accountId?: string
+    accountId?: string,
+    options?: { sourceEventId?: string; appliedEventKeys?: string[]; eventKey?: string }
   ): PaperPosition {
     const { acc, pos } = this.findAccountAndPosition(positionId, accountId);
 
@@ -1112,18 +1135,18 @@ export class PaperEngine {
     acc.totalCommissionsPaid += exitCommission;
 
     pos.quantity = Number(Math.max(0.00001, pos.quantity - closedQty).toFixed(5));
-    pos.marginUsdt = Number(Math.max(0.5, pos.marginUsdt - releasedMargin).toFixed(2));
+    pos.marginUsdt = Number(Math.max(0.25, pos.marginUsdt - releasedMargin).toFixed(2));
     pos.commissionUsdt = Number(((pos.commissionUsdt || 0) + exitCommission).toFixed(4));
     pos.realizedPnl = Number(((pos.realizedPnl || 0) + netPartialPnl).toFixed(4));
 
     const prevScale = pos.currentScalePercent || 100;
-    const nextScale = Math.max(5, Math.round(prevScale * (1 - fraction)));
+    const nextScale = Math.max(1, Math.round(prevScale * (1 - fraction)));
     pos.currentScalePercent = nextScale;
 
     const ts = actionTimestamp || Date.now();
     if (!pos.scaleAdjustments) pos.scaleAdjustments = [];
     pos.scaleAdjustments.push({
-      id: `${pos.id}_partial_exit_${ts}`,
+      id: `${pos.id}_partial_exit_${ts}_${pos.scaleAdjustments.length}`,
       actionType: 'PARTIAL_EXIT',
       actionLabelAr: `انسحاب جزئي بنفس النسبة (-${cleanPct}% • سحب ${releasedMargin.toFixed(2)}$ • متبقي ${nextScale}%)`,
       timestamp: ts,
@@ -1133,7 +1156,12 @@ export class PaperEngine {
       price: safePrice,
       realizedPnlDelta: Number(netPartialPnl.toFixed(2)),
       marginDeltaUsdt: -Number(releasedMargin.toFixed(2)),
+      sourceEventId: options?.sourceEventId,
     });
+    this.recordAppliedSyncEventIds(
+      pos,
+      options?.appliedEventKeys || (options?.sourceEventId ? [options.sourceEventId] : undefined)
+    );
 
     this.saveState();
 
@@ -1144,6 +1172,7 @@ export class PaperEngine {
       volumePercent: -cleanPct,
       marginDeltaUsdt: -Number(releasedMargin.toFixed(2)),
       realizedPnlDeltaUsdt: Number(netPartialPnl.toFixed(2)),
+      eventKey: options?.eventKey || options?.sourceEventId,
     });
 
     mobileNotifications.checkAccountsDrawdown(
@@ -1157,7 +1186,8 @@ export class PaperEngine {
     positionId: string,
     exitPrice: number,
     exitTimestamp?: number,
-    accountId?: string
+    accountId?: string,
+    options?: { sourceEventId?: string; appliedEventKeys?: string[]; eventKey?: string }
   ): PaperPosition {
     const { acc, pos } = this.findAccountAndPosition(positionId, accountId);
 
@@ -1197,7 +1227,12 @@ export class PaperEngine {
       price: exitPrice,
       realizedPnlDelta: Number(netPnl.toFixed(2)),
       marginDeltaUsdt: -Number(remainingMargin.toFixed(2)),
+      sourceEventId: options?.sourceEventId,
     });
+    this.recordAppliedSyncEventIds(
+      pos,
+      options?.appliedEventKeys || (options?.sourceEventId ? [options.sourceEventId] : undefined)
+    );
 
     this.saveState();
 
@@ -1208,6 +1243,7 @@ export class PaperEngine {
       volumePercent: -100,
       marginDeltaUsdt: -Number(remainingMargin.toFixed(2)),
       realizedPnlDeltaUsdt: Number((pos.realizedPnl ?? netPnl).toFixed(2)),
+      eventKey: options?.eventKey || options?.sourceEventId,
     });
 
     mobileNotifications.checkAccountsDrawdown(
@@ -1352,65 +1388,133 @@ export class PaperEngine {
         : params.marginPerTradeUsdt || acc.settings.tradeValueUsdt;
     const userLeverage = acc.settings.leverage;
 
-    // 1. Process EXIT, PARTIAL_EXIT, and SCALE_IN records from `latestRecords` on already open copied positions
-    const recentRecords = params.latestRecords.slice(0, 15);
+    // Track which positions executed a PARTIAL_EXIT or SCALE_IN during this sync cycle
+    // so the exact same trader move is NEVER applied twice across `latestRecords`, `scaleAdjustments`, and `positionAmount` deltas
+    const partialExitAppliedThisTick = new Set<string>();
+    const scaleInAppliedThisTick = new Set<string>();
+
+    // 1. Process EXIT, PARTIAL_EXIT, and SCALE_IN records from `latestRecords` in chronological order (oldest -> newest)
+    const recentRecords = [...params.latestRecords.slice(0, 20)].sort(
+      (a, b) => (a.orderTime || 0) - (b.orderTime || 0)
+    );
     for (const rec of recentRecords) {
+      const recSide: 'LONG' | 'SHORT' | null =
+        rec.positionSide === 'LONG' || rec.positionSide === 'SHORT'
+          ? rec.positionSide
+          : null;
+
       const matchingOpen = acc.positions.find(
         (p) =>
           p.status === 'OPEN' &&
           p.symbol.toUpperCase() === rec.symbol.toUpperCase() &&
+          (!recSide || p.side === recSide) &&
           (p.sourceTraderId === params.traderId || p.sourceTraderName === params.traderName)
       );
 
       if (matchingOpen) {
+        const traderPos = params.positions.find(
+          (tp) =>
+            tp.symbol.toUpperCase() === matchingOpen.symbol.toUpperCase() &&
+            tp.side === matchingOpen.side
+        );
         const liveExecPrice = resolveLiveMarketExecutionPrice(
           rec.symbol,
           liveMap,
-          rec.avgPrice,
+          traderPos?.markPrice || rec.avgPrice,
           matchingOpen.entryPrice
         );
 
         if (rec.actionType === 'EXIT') {
-          try {
-            const closed = this.closePosition(matchingOpen.id, liveExecPrice, rec.orderTime, acc.id);
-            logs.push({
-              id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-              timestamp: rec.orderTime || Date.now(),
-              traderId: params.traderId,
-              traderName: params.traderName,
-              source: params.source,
-              action: 'EXIT',
-              volumePercent: -100,
-              symbol: closed.symbol,
-              side: closed.side,
-              price: liveExecPrice,
-              quantity: closed.quantity,
-              leverage: closed.leverage,
-              accountId: acc.id,
-              accountName: acc.name,
-              messageAr: `[${acc.name}] خروج آلي كامل (-100%) من ${closed.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT عند انسحاب المتداول (الصافي: ${(closed.realizedPnl || 0).toFixed(2)} USDT)`,
-            });
-          } catch (e) {
-            console.warn('Exit sync skipped:', e);
+          const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
+            recordTimestamp: rec.orderTime,
+            userPositionOpenTime: matchingOpen.openTime,
+          });
+          const eventKey = buildStableTraderEventKey({
+            kind: 'REC',
+            symbol: rec.symbol,
+            actionType: 'FULL_EXIT',
+            timestamp: rec.orderTime,
+            volumePercent: -100,
+            quantity: rec.executedQty,
+          });
+          const alreadyApplied = hasSyncEventBeenApplied({
+            appliedSyncEventIds: matchingOpen.appliedSyncEventIds,
+            scaleAdjustments: matchingOpen.scaleAdjustments,
+            candidateKeys: [eventKey, `rec_id:${rec.id}`],
+            actionType: 'FULL_EXIT',
+            eventTimestamp: rec.orderTime,
+          });
+          // Apply EXIT if it occurred after our entry OR trader no longer has the position open
+          if ((isAfterOurEntry || !traderPos) && !alreadyApplied) {
+            try {
+              const closed = this.closePosition(matchingOpen.id, liveExecPrice, rec.orderTime, acc.id, {
+                sourceEventId: eventKey,
+                appliedEventKeys: [eventKey, `rec_id:${rec.id}`],
+                eventKey: `${acc.id}_${matchingOpen.id}_${eventKey}`,
+              });
+              logs.push({
+                id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                timestamp: rec.orderTime || Date.now(),
+                traderId: params.traderId,
+                traderName: params.traderName,
+                source: params.source,
+                action: 'EXIT',
+                volumePercent: -100,
+                symbol: closed.symbol,
+                side: closed.side,
+                price: liveExecPrice,
+                quantity: closed.quantity,
+                leverage: closed.leverage,
+                accountId: acc.id,
+                accountName: acc.name,
+                messageAr: `[${acc.name}] خروج آلي كامل (-100%) من ${closed.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT عند انسحاب المتداول (الصافي: ${(closed.realizedPnl || 0).toFixed(2)} USDT)`,
+              });
+            } catch (e) {
+              console.warn('Exit sync skipped:', e);
+            }
           }
         } else if (rec.actionType === 'PARTIAL_EXIT') {
           const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
             recordTimestamp: rec.orderTime,
             userPositionOpenTime: matchingOpen.openTime,
           });
-          const alreadyApplied = matchingOpen.scaleAdjustments?.some(
-            (a) => Math.abs(a.timestamp - rec.orderTime) < 60000 && a.actionType === 'PARTIAL_EXIT'
-          );
+          const withdrawPct = Math.min(95, Math.max(5, Math.abs(rec.volumePercent || 30)));
+          const eventKey = buildStableTraderEventKey({
+            kind: 'REC',
+            symbol: rec.symbol,
+            actionType: 'PARTIAL_EXIT',
+            timestamp: rec.orderTime,
+            volumePercent: withdrawPct,
+            quantity: rec.executedQty,
+          });
+          const alreadyApplied = hasSyncEventBeenApplied({
+            appliedSyncEventIds: matchingOpen.appliedSyncEventIds,
+            scaleAdjustments: matchingOpen.scaleAdjustments,
+            candidateKeys: [eventKey, `rec_id:${rec.id}`],
+            actionType: 'PARTIAL_EXIT',
+            eventTimestamp: rec.orderTime,
+          });
+
           if (isAfterOurEntry && !alreadyApplied) {
             try {
-              const withdrawPct = Math.abs(rec.volumePercent || 30);
               const updated = this.partialExitPosition(
                 matchingOpen.id,
                 withdrawPct,
                 liveExecPrice,
                 rec.orderTime,
-                acc.id
+                acc.id,
+                {
+                  sourceEventId: eventKey,
+                  appliedEventKeys: [eventKey, `rec_id:${rec.id}`],
+                  eventKey: `${acc.id}_${matchingOpen.id}_${eventKey}`,
+                }
               );
+              partialExitAppliedThisTick.add(matchingOpen.id);
+              if (traderPos) {
+                updated.lastSyncedTraderQty = traderPos.positionAmount;
+                updated.lastSyncedTraderUpdateTime = traderPos.lastUpdateTime || rec.orderTime;
+                this.saveState();
+              }
               logs.push({
                 id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
                 timestamp: rec.orderTime || Date.now(),
@@ -1437,19 +1541,43 @@ export class PaperEngine {
             recordTimestamp: rec.orderTime,
             userPositionOpenTime: matchingOpen.openTime,
           });
-          const alreadyApplied = matchingOpen.scaleAdjustments?.some(
-            (a) => Math.abs(a.timestamp - rec.orderTime) < 60000 && a.actionType === 'SCALE_IN'
-          );
+          const addPct = Math.max(5, Math.abs(rec.volumePercent || 30));
+          const eventKey = buildStableTraderEventKey({
+            kind: 'REC',
+            symbol: rec.symbol,
+            actionType: 'SCALE_IN',
+            timestamp: rec.orderTime,
+            volumePercent: addPct,
+            quantity: rec.executedQty,
+          });
+          const alreadyApplied = hasSyncEventBeenApplied({
+            appliedSyncEventIds: matchingOpen.appliedSyncEventIds,
+            scaleAdjustments: matchingOpen.scaleAdjustments,
+            candidateKeys: [eventKey, `rec_id:${rec.id}`],
+            actionType: 'SCALE_IN',
+            eventTimestamp: rec.orderTime,
+          });
+
           if (isAfterOurEntry && !alreadyApplied) {
             try {
-              const addPct = Math.abs(rec.volumePercent || 30);
               const updated = this.scaleInFromTraderSignal(
                 matchingOpen.id,
                 addPct,
                 liveExecPrice,
                 rec.orderTime,
-                acc.id
+                acc.id,
+                {
+                  sourceEventId: eventKey,
+                  appliedEventKeys: [eventKey, `rec_id:${rec.id}`],
+                  eventKey: `${acc.id}_${matchingOpen.id}_${eventKey}`,
+                }
               );
+              scaleInAppliedThisTick.add(matchingOpen.id);
+              if (traderPos) {
+                updated.lastSyncedTraderQty = traderPos.positionAmount;
+                updated.lastSyncedTraderUpdateTime = traderPos.lastUpdateTime || rec.orderTime;
+                this.saveState();
+              }
               const lastAdj = updated.scaleAdjustments?.[updated.scaleAdjustments.length - 1];
               const modeLabel =
                 acc.settings.scaleInSamePercentAsTrader !== false
@@ -1502,13 +1630,23 @@ export class PaperEngine {
       );
 
       if (!stillOpenByTrader) {
-        // Trader no longer holds this position -> automatically execute Full Exit!
-        // (Only skip if positions array is empty AND the position was just opened from latestRecords within the last 5 seconds)
         const justOpenedFromRecord =
           params.positions.length === 0 && Date.now() - userOpenPos.openTime < 5000;
         if (!justOpenedFromRecord) {
           try {
-            const closed = this.closePosition(userOpenPos.id, liveExecPrice, Date.now(), acc.id);
+            const eventKey = buildStableTraderEventKey({
+              kind: 'QTY_DROP',
+              symbol: userOpenPos.symbol,
+              actionType: 'FULL_EXIT',
+              timestamp: Math.floor(Date.now() / 10000),
+              volumePercent: 100,
+              quantity: 0,
+            });
+            const closed = this.closePosition(userOpenPos.id, liveExecPrice, Date.now(), acc.id, {
+              sourceEventId: eventKey,
+              appliedEventKeys: [eventKey],
+              eventKey: `${acc.id}_${userOpenPos.id}_${eventKey}`,
+            });
             logs.push({
               id: `log_auto_exit_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               timestamp: Date.now(),
@@ -1531,29 +1669,63 @@ export class PaperEngine {
           }
         }
       } else {
-        // Position is still open by trader: only apply NEW PARTIAL_EXIT operations that happened AFTER our entry
-        if (stillOpenByTrader.scaleAdjustments && stillOpenByTrader.scaleAdjustments.length > 0) {
+        // Initialize baseline trader quantity on first observation so subsequent real reductions are accurately detected
+        if (userOpenPos.lastSyncedTraderQty === undefined && stillOpenByTrader.positionAmount > 0) {
+          userOpenPos.lastSyncedTraderQty = stillOpenByTrader.positionAmount;
+          userOpenPos.lastSyncedTraderUpdateTime =
+            stillOpenByTrader.lastUpdateTime || stillOpenByTrader.entryTime || Date.now();
+          this.saveState();
+        }
+
+        // Apply any NEW explicit PARTIAL_EXIT adjustments in `stillOpenByTrader.scaleAdjustments`
+        if (
+          !partialExitAppliedThisTick.has(userOpenPos.id) &&
+          stillOpenByTrader.scaleAdjustments &&
+          stillOpenByTrader.scaleAdjustments.length > 0
+        ) {
           for (const adj of stillOpenByTrader.scaleAdjustments) {
             if (adj.actionType === 'PARTIAL_EXIT') {
               const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
                 recordTimestamp: adj.timestamp,
                 userPositionOpenTime: userOpenPos.openTime,
               });
-              const alreadyApplied = userOpenPos.scaleAdjustments?.some(
-                (ua) =>
-                  ua.actionType === 'PARTIAL_EXIT' &&
-                  (ua.id === adj.id || Math.abs(ua.timestamp - adj.timestamp) < 60000)
-              );
+              const withdrawPct = Math.min(95, Math.max(5, Math.abs(adj.volumePercent || 30)));
+              const adjKey = buildStableTraderEventKey({
+                kind: 'ADJ',
+                symbol: stillOpenByTrader.symbol,
+                actionType: 'PARTIAL_EXIT',
+                timestamp: adj.timestamp,
+                volumePercent: withdrawPct,
+                quantity: adj.executedQty,
+                rawId: adj.id,
+              });
+              const alreadyApplied = hasSyncEventBeenApplied({
+                appliedSyncEventIds: userOpenPos.appliedSyncEventIds,
+                scaleAdjustments: userOpenPos.scaleAdjustments,
+                candidateKeys: [adjKey, adj.id, `adj:${adj.id}`],
+                actionType: 'PARTIAL_EXIT',
+                eventTimestamp: adj.timestamp,
+              });
+
               if (isAfterOurEntry && !alreadyApplied) {
                 try {
-                  const withdrawPct = Math.abs(adj.volumePercent || 30);
                   const updated = this.partialExitPosition(
                     userOpenPos.id,
                     withdrawPct,
                     liveExecPrice,
                     adj.timestamp,
-                    acc.id
+                    acc.id,
+                    {
+                      sourceEventId: adjKey,
+                      appliedEventKeys: [adjKey, adj.id, `adj:${adj.id}`],
+                      eventKey: `${acc.id}_${userOpenPos.id}_${adjKey}`,
+                    }
                   );
+                  partialExitAppliedThisTick.add(userOpenPos.id);
+                  updated.lastSyncedTraderQty = stillOpenByTrader.positionAmount;
+                  updated.lastSyncedTraderUpdateTime =
+                    stillOpenByTrader.lastUpdateTime || adj.timestamp;
+                  this.saveState();
                   logs.push({
                     id: `log_auto_partial_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
                     timestamp: adj.timestamp || Date.now(),
@@ -1579,45 +1751,87 @@ export class PaperEngine {
           }
         }
 
-        // Only apply scale diff if the trader updated their position AFTER the user opened the trade
-        const userScale = userOpenPos.currentScalePercent || 100;
-        const traderScale = stillOpenByTrader.currentScalePercent || 100;
-        const traderUpdatedAfterOurEntry =
-          Boolean(stillOpenByTrader.lastUpdateTime) &&
-          (stillOpenByTrader.lastUpdateTime || 0) > userOpenPos.openTime;
-        if (traderUpdatedAfterOurEntry && traderScale > 0 && userScale - traderScale >= 5) {
-          const withdrawPct = Math.min(
-            95,
-            Math.max(5, Math.round(((userScale - traderScale) / userScale) * 100))
-          );
-          try {
-            const updated = this.partialExitPosition(
-              userOpenPos.id,
-              withdrawPct,
-              liveExecPrice,
-              stillOpenByTrader.lastUpdateTime || Date.now(),
-              acc.id
-            );
-            logs.push({
-              id: `log_scale_diff_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-              timestamp: Date.now(),
-              traderId: params.traderId,
-              traderName: params.traderName,
-              source: params.source,
-              action: 'PARTIAL_EXIT',
-              volumePercent: -withdrawPct,
-              symbol: updated.symbol,
-              side: updated.side,
-              price: liveExecPrice,
-              quantity: updated.quantity,
-              leverage: updated.leverage,
-              accountId: acc.id,
-              accountName: acc.name,
-              messageAr: `[${acc.name}] سحب جزئي آلي (-${withdrawPct}%) من ${updated.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT لمطابقة تقليص المتداول لمركزه`,
+        // Live Delta Detection: If the trader genuinely reduced their live `positionAmount` (>= 5%)
+        // since the last poll (e.g. order-history didn't reflect it yet), execute partial exit ONCE and update baseline qty!
+        if (
+          !partialExitAppliedThisTick.has(userOpenPos.id) &&
+          userOpenPos.lastSyncedTraderQty &&
+          stillOpenByTrader.positionAmount > 0
+        ) {
+          const dropPct = calculatePositionQuantityDropPartialExitPct({
+            previousQty: userOpenPos.lastSyncedTraderQty,
+            currentQty: stillOpenByTrader.positionAmount,
+          });
+          if (dropPct >= 5) {
+            const qtyDropKey = buildStableTraderEventKey({
+              kind: 'QTY_DROP',
+              symbol: stillOpenByTrader.symbol,
+              actionType: 'PARTIAL_EXIT',
+              timestamp: stillOpenByTrader.lastUpdateTime || Date.now(),
+              volumePercent: dropPct,
+              quantity: stillOpenByTrader.positionAmount,
             });
-          } catch (e) {
-            console.warn('Scale diff partial exit skipped:', e);
+            const alreadyApplied = hasSyncEventBeenApplied({
+              appliedSyncEventIds: userOpenPos.appliedSyncEventIds,
+              scaleAdjustments: userOpenPos.scaleAdjustments,
+              candidateKeys: [qtyDropKey],
+              actionType: 'PARTIAL_EXIT',
+              eventTimestamp: stillOpenByTrader.lastUpdateTime,
+            });
+            if (!alreadyApplied) {
+              try {
+                const updated = this.partialExitPosition(
+                  userOpenPos.id,
+                  dropPct,
+                  liveExecPrice,
+                  stillOpenByTrader.lastUpdateTime || Date.now(),
+                  acc.id,
+                  {
+                    sourceEventId: qtyDropKey,
+                    appliedEventKeys: [qtyDropKey],
+                    eventKey: `${acc.id}_${userOpenPos.id}_${qtyDropKey}`,
+                  }
+                );
+                partialExitAppliedThisTick.add(userOpenPos.id);
+                updated.lastSyncedTraderQty = stillOpenByTrader.positionAmount;
+                updated.lastSyncedTraderUpdateTime =
+                  stillOpenByTrader.lastUpdateTime || Date.now();
+                this.saveState();
+                logs.push({
+                  id: `log_qty_drop_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                  timestamp: Date.now(),
+                  traderId: params.traderId,
+                  traderName: params.traderName,
+                  source: params.source,
+                  action: 'PARTIAL_EXIT',
+                  volumePercent: -dropPct,
+                  symbol: updated.symbol,
+                  side: updated.side,
+                  price: liveExecPrice,
+                  quantity: updated.quantity,
+                  leverage: updated.leverage,
+                  accountId: acc.id,
+                  accountName: acc.name,
+                  messageAr: `[${acc.name}] سحب جزئي فوري (-${dropPct}%) من ${updated.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT تزامناً مع تقليص المتداول لمركزه`,
+                });
+              } catch (e) {
+                console.warn('Live qty drop partial exit skipped:', e);
+              }
+            }
           }
+        }
+
+        // Keep baseline trader qty synchronized when trader increases/maintains position
+        if (
+          !scaleInAppliedThisTick.has(userOpenPos.id) &&
+          !partialExitAppliedThisTick.has(userOpenPos.id) &&
+          stillOpenByTrader.positionAmount > 0 &&
+          userOpenPos.lastSyncedTraderQty !== stillOpenByTrader.positionAmount
+        ) {
+          userOpenPos.lastSyncedTraderQty = stillOpenByTrader.positionAmount;
+          userOpenPos.lastSyncedTraderUpdateTime =
+            stillOpenByTrader.lastUpdateTime || userOpenPos.lastSyncedTraderUpdateTime;
+          this.saveState();
         }
       }
     }
@@ -1749,6 +1963,9 @@ export class PaperEngine {
             currentScalePercent: pos.currentScalePercent,
             accountId: acc.id,
           });
+          opened.lastSyncedTraderQty = pos.positionAmount;
+          opened.lastSyncedTraderUpdateTime = pos.lastUpdateTime || pos.entryTime;
+          this.saveState();
           const compDetails = formatLateEntryComparisonDetails({
             traderEntryPrice,
             traderEntryTime: pos.entryTime,
