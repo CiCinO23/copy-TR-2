@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Key,
   CheckCircle2,
@@ -18,6 +18,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   RotateCcw,
+  AlertCircle,
 } from 'lucide-react';
 import { KuCoinConfig, KuCoinConnectionState, KuCoinSecurityLockConfig } from '../types';
 import {
@@ -54,7 +55,6 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
   connectionState,
   onSaveAndTest,
   onClearKeys,
-  onRefresh,
   onClearOrderHistory,
   onOpenSimulationTab,
   securityConfig = DEFAULT_KUCOIN_SECURITY_CONFIG,
@@ -64,15 +64,35 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
   onUpdateSecurityConfig,
   onOpenSettingsTab,
 }) => {
-  const [apiKey, setApiKey] = useState<string>(config.apiKey);
-  const [passphrase, setPassphrase] = useState<string>(config.passphrase);
-  const [marketType, setMarketType] = useState<'FUTURES' | 'SPOT'>(config.marketType);
+  const [apiKey, setApiKey] = useState<string>(config.apiKey || '');
+  const [apiSecret, setApiSecret] = useState<string>(config.apiSecret || '');
+  const [passphrase, setPassphrase] = useState<string>(config.passphrase || '');
+  const [apiType, setApiType] = useState<'REAL' | 'SANDBOX'>(config.apiType || 'REAL');
+  const [marketType, setMarketType] = useState<'FUTURES' | 'SPOT'>(config.marketType || 'FUTURES');
   const [enableLiveExecution, setEnableLiveExecution] = useState<boolean>(
     config.enableLiveExecution
   );
 
+  const [showApiSecret, setShowApiSecret] = useState<boolean>(false);
   const [showPassphrase, setShowPassphrase] = useState<boolean>(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState<boolean>(false);
+
+  // Sync local form fields whenever parent config updates
+  useEffect(() => {
+    setApiKey(config.apiKey || '');
+    setApiSecret(config.apiSecret || '');
+    setPassphrase(config.passphrase || '');
+    setApiType(config.apiType || 'REAL');
+    setMarketType(config.marketType || 'FUTURES');
+    setEnableLiveExecution(Boolean(config.enableLiveExecution));
+  }, [
+    config.apiKey,
+    config.apiSecret,
+    config.passphrase,
+    config.apiType,
+    config.marketType,
+    config.enableLiveExecution,
+  ]);
 
   // Recent Orders Filtering State (Side: ALL | BUY | SELL, Symbol: ALL or specific, Search query)
   const [orderSideFilter, setOrderSideFilter] = useState<OrderSideFilter>('ALL');
@@ -110,18 +130,29 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
     setOrderSearchQuery('');
   };
 
+  const buildCurrentConfig = (overrideApiType?: 'REAL' | 'SANDBOX'): KuCoinConfig => ({
+    apiKey: apiKey.trim(),
+    apiSecret: apiSecret.trim(),
+    passphrase: passphrase.trim(),
+    apiType: overrideApiType || apiType,
+    marketType,
+    enableLiveExecution,
+    defaultLeverage: config.defaultLeverage || 5,
+    maxOrderUsdt: config.maxOrderUsdt || 50,
+  });
+
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    onSaveAndTest({
-      apiKey: apiKey.trim(),
-      apiSecret: '',
-      passphrase: passphrase.trim(),
-      apiType: config.apiType,
-      marketType,
-      enableLiveExecution,
-      defaultLeverage: config.defaultLeverage || 5,
-      maxOrderUsdt: config.maxOrderUsdt || 50,
-    });
+    onSaveAndTest(buildCurrentConfig());
+  };
+
+  const handleTestCurrentInputs = () => {
+    onSaveAndTest(buildCurrentConfig());
+  };
+
+  const handleQuickDemoConnect = () => {
+    setApiType('SANDBOX');
+    onSaveAndTest(buildCurrentConfig('SANDBOX'));
   };
 
   if (securityConfig.enabled && !isSecurityUnlocked) {
@@ -216,7 +247,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
             </p>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0 flex-wrap">
             <a
               href="https://www.kucoin.com/account/api"
               target="_blank"
@@ -227,8 +258,10 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
               <ExternalLink className="w-3.5 h-3.5" />
             </a>
             <button
-              onClick={onRefresh}
+              type="button"
+              onClick={handleTestCurrentInputs}
               disabled={connectionState.isTesting}
+              data-testid="kucoin_top_test_connection_btn"
               className="text-xs bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-2 rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${connectionState.isTesting ? 'animate-spin' : ''}`} />
@@ -240,34 +273,50 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
 
       {/* Connection Diagnostic Card */}
       <div
+        data-testid="kucoin_connection_diagnostic_card"
         className={`border rounded-2xl p-4 sm:p-5 transition-all ${
           connectionState.isAuthenticated
             ? 'bg-[#0D2B24] border-[#01BC8D]/50'
+            : connectionState.errorMessageAr
+            ? 'bg-[#2B1216] border-[#F6465D]/50'
             : connectionState.isConnected
             ? 'bg-[#1A222B] border-[#232E3A]'
             : 'bg-[#2B1216] border-[#F6465D]/40'
         }`}
       >
-        <div className="flex items-center justify-between gap-3 mb-2">
+        <div className="flex items-center justify-between gap-3 mb-2 flex-wrap">
           <div className="flex items-center gap-2">
             {connectionState.isAuthenticated ? (
               <CheckCircle2 className="w-5 h-5 text-[#01BC8D]" />
+            ) : connectionState.errorMessageAr ? (
+              <AlertCircle className="w-5 h-5 text-[#F6465D]" />
             ) : (
               <Zap className="w-5 h-5 text-[#01BC8D]" />
             )}
             <h3 className="font-bold text-sm sm:text-base text-white">
               حالة الربط مع حسابك في KuCoin
             </h3>
+            <span
+              data-testid="kucoin_auth_status_badge"
+              className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                connectionState.isAuthenticated
+                  ? 'bg-[#01BC8D] text-[#0B0E11]'
+                  : 'bg-[#232E3A] text-[#8A99AD]'
+              }`}
+            >
+              {connectionState.isAuthenticated ? 'متصل وموثّق ✓' : 'بانتظار توثيق الحساب'}
+            </span>
           </div>
           {connectionState.isTesting && (
             <div className="flex items-center gap-2 text-xs text-[#01BC8D] font-semibold">
               <span className="w-4 h-4 border-2 border-[#01BC8D] border-t-transparent rounded-full animate-spin" />
-              <span>جاري التحقق من المفاتيح...</span>
+              <span>جاري التحقق من المفاتيح ومزامنة KuCoin...</span>
             </div>
           )}
         </div>
 
         <p
+          data-testid="kucoin_status_message"
           className={`text-xs sm:text-sm font-semibold mb-2 ${
             connectionState.isAuthenticated ? 'text-[#01BC8D]' : 'text-white'
           }`}
@@ -286,14 +335,20 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 mt-3 pt-3 border-t border-[#232E3A]/70">
             <div className="bg-[#0B0E11] p-2.5 rounded-xl">
               <span className="text-[10px] text-[#8A99AD] block">رصيد KuCoin المتاح للتداول</span>
-              <span className="text-sm sm:text-base font-bold font-mono text-[#01BC8D]">
+              <span
+                data-testid="kucoin_available_balance_value"
+                className="text-sm sm:text-base font-bold font-mono text-[#01BC8D]"
+              >
                 {connectionState.availableUsdt.toFixed(2)} USDT
               </span>
             </div>
 
             <div className="bg-[#0B0E11] p-2.5 rounded-xl">
               <span className="text-[10px] text-[#8A99AD] block">إجمالي رصيد المحفظة</span>
-              <span className="text-sm sm:text-base font-bold font-mono text-white">
+              <span
+                data-testid="kucoin_total_balance_value"
+                className="text-sm sm:text-base font-bold font-mono text-white"
+              >
                 {connectionState.usdtBalance.toFixed(2)} USDT
               </span>
             </div>
@@ -308,11 +363,255 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
         )}
 
         {connectionState.errorMessageAr && (
-          <div className="mt-2 text-xs text-[#F6465D] bg-[#2B1216]/80 p-2.5 rounded-xl border border-[#F6465D]/30">
-            {connectionState.errorMessageAr}
+          <div
+            data-testid="kucoin_error_message_box"
+            className="mt-2.5 text-xs text-[#F6465D] bg-[#0B0E11]/90 p-3 rounded-xl border border-[#F6465D]/50 space-y-2"
+          >
+            <div className="font-bold flex items-center gap-1.5">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>تفاصيل تشخيص الاتصال من KuCoin:</span>
+            </div>
+            <p className="leading-relaxed text-white/90">{connectionState.errorMessageAr}</p>
           </div>
         )}
       </div>
+
+      {/* API Connection Form — Placed prominently at the top so user can immediately connect */}
+      <form
+        onSubmit={handleSave}
+        data-testid="kucoin_api_connection_form"
+        className="bg-[#12171D] border border-[#01BC8D]/40 rounded-2xl p-4 sm:p-5 space-y-4 shadow-lg"
+      >
+        <div className="flex items-center justify-between gap-2 flex-wrap border-b border-[#232E3A] pb-3">
+          <h3 className="font-bold text-sm sm:text-base text-[#01BC8D] flex items-center gap-2">
+            <Key className="w-4 h-4" />
+            <span>إعدادات الربط ومفاتيح KuCoin API</span>
+          </h3>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={handleQuickDemoConnect}
+              data-testid="kucoin_quick_demo_connect_btn"
+              className="text-xs bg-[#0D2B24] hover:bg-[#01BC8D] text-[#01BC8D] hover:text-[#0B0E11] border border-[#01BC8D]/50 px-3 py-1.5 rounded-xl font-bold transition-colors cursor-pointer"
+            >
+              ⚡ تفعيل الربط التجريبي ومزامنة الرصيد فوراً
+            </button>
+            {onOpenSimulationTab && (
+              <button
+                type="button"
+                onClick={onOpenSimulationTab}
+                className="text-[11px] text-[#01BC8D] hover:underline font-bold flex items-center gap-1 cursor-pointer"
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>إعدادات الصفقات (التداول) ←</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Connection Environment Type (REAL vs SANDBOX/DEMO) */}
+        <div>
+          <label className="block text-[11px] text-[#8A99AD] mb-1.5 font-semibold">
+            وضع الاتصال بمنصة KuCoin:
+          </label>
+          <div className="grid grid-cols-2 gap-2 bg-[#0B0E11] p-1 rounded-xl border border-[#232E3A]">
+            <button
+              type="button"
+              onClick={() => setApiType('REAL')}
+              data-testid="kucoin_mode_real_btn"
+              className={`py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                apiType === 'REAL'
+                  ? 'bg-[#01BC8D] text-[#0B0E11] shadow-sm'
+                  : 'text-[#8A99AD] hover:text-white'
+              }`}
+            >
+              حساب KuCoin الحقيقي (Real API)
+            </button>
+            <button
+              type="button"
+              onClick={() => setApiType('SANDBOX')}
+              data-testid="kucoin_mode_sandbox_btn"
+              className={`py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                apiType === 'SANDBOX'
+                  ? 'bg-[#01BC8D] text-[#0B0E11] shadow-sm'
+                  : 'text-[#8A99AD] hover:text-white'
+              }`}
+            >
+              الربط التجريبي المحاكي (Demo / Sandbox)
+            </button>
+          </div>
+        </div>
+
+        {/* 1. API Key */}
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="block text-xs font-semibold text-white">
+              1. مفتاح API Key (من KuCoin)
+            </label>
+            <span className="text-[10px] text-[#01BC8D] font-mono">KC-API-KEY</span>
+          </div>
+          <input
+            type="text"
+            data-testid="kucoin_api_key_input"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder="مثال: 64b8f9a2c1... (انسخ API Key من كوكوين)"
+            className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3.5 py-2.5 text-xs text-white font-mono focus:outline-none"
+          />
+        </div>
+
+        {/* 2. API Secret (Required by KuCoin for HMAC-SHA256 signature on real accounts) */}
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="block text-xs font-semibold text-white">
+              2. المفتاح السري API Secret (Secret Key)
+            </label>
+            <span className="text-[10px] text-[#8A99AD] font-mono">
+              لتوقيع طلبات الحساب الحقيقي (أو اتركه فارغاً للمحاكاة)
+            </span>
+          </div>
+          <div className="relative">
+            <input
+              type={showApiSecret ? 'text' : 'password'}
+              data-testid="kucoin_api_secret_input"
+              value={apiSecret}
+              onChange={(e) => setApiSecret(e.target.value)}
+              placeholder="مثال: 4a8c92e1-7b3d-... (المفتاح السري من كوكوين)"
+              className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl pr-3.5 pl-10 py-2.5 text-xs text-white font-mono focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => setShowApiSecret(!showApiSecret)}
+              className="absolute left-3 top-2.5 text-[#8A99AD] hover:text-white cursor-pointer"
+              title="إظهار / إخفاء المفتاح السري"
+            >
+              {showApiSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+
+        {/* 3. Passphrase (Mandatory for KuCoin) */}
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="block text-xs font-semibold text-white">
+              3. كلمة مرور المفتاح (API Passphrase)
+            </label>
+            <span className="text-[10px] text-[#01BC8D] font-mono">KC-API-PASSPHRASE</span>
+          </div>
+          <div className="relative">
+            <input
+              type={showPassphrase ? 'text' : 'password'}
+              data-testid="kucoin_passphrase_input"
+              value={passphrase}
+              onChange={(e) => setPassphrase(e.target.value)}
+              placeholder="الكلمة السرية التي قمت بتعيينها عند إنشاء المفتاح في كوكوين"
+              className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl pr-3.5 pl-10 py-2.5 text-xs text-white font-mono focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassphrase(!showPassphrase)}
+              className="absolute left-3 top-2.5 text-[#8A99AD] hover:text-white cursor-pointer"
+              title="إظهار / إخفاء كلمة مرور المفتاح"
+            >
+              {showPassphrase ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+
+        {/* Market Selection */}
+        <div>
+          <label className="block text-[11px] text-[#8A99AD] mb-1.5">
+            سوق التنفيذ المستهدف في KuCoin:
+          </label>
+          <div className="flex items-center border-b border-[#232E3A]">
+            <button
+              type="button"
+              onClick={() => setMarketType('FUTURES')}
+              className={`flex-1 py-2.5 px-3 text-xs font-bold border-b-2 transition-all cursor-pointer ${
+                marketType === 'FUTURES'
+                  ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
+                  : 'border-transparent text-[#8A99AD] hover:text-white'
+              }`}
+            >
+              العقود الآجلة (KuCoin Futures)
+            </button>
+            <button
+              type="button"
+              onClick={() => setMarketType('SPOT')}
+              className={`flex-1 py-2.5 px-3 text-xs font-bold border-b-2 transition-all cursor-pointer ${
+                marketType === 'SPOT'
+                  ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
+                  : 'border-transparent text-[#8A99AD] hover:text-white'
+              }`}
+            >
+              التداول الفوري (KuCoin Spot)
+            </button>
+          </div>
+        </div>
+
+        {/* Live Execution Switch */}
+        <div className="bg-[#1A222B] border border-[#232E3A] rounded-xl p-3.5 flex items-center justify-between">
+          <div>
+            <div className="text-xs font-bold text-white flex items-center gap-1.5">
+              <span>تفعيل تنفيذ الصفقات الحقيقية في KuCoin</span>
+              <span
+                className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                  enableLiveExecution ? 'bg-[#F6465D]/20 text-[#F6465D]' : 'bg-[#0D2B24] text-[#01BC8D]'
+                }`}
+              >
+                {enableLiveExecution ? 'LIVE ORDERS' : 'PAPER / DRY-RUN'}
+              </span>
+            </div>
+            <p className="text-[11px] text-[#8A99AD] mt-0.5">
+              عند التفعيل، سيتم إرسال أوامر حقيقية لحساب كوكوين بالحجم والرافعة المحددين في نافذة التداول
+            </p>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer shrink-0">
+            <input
+              type="checkbox"
+              checked={enableLiveExecution}
+              onChange={(e) => setEnableLiveExecution(e.target.checked)}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-[#232E3A] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-[#232E3A] after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#01BC8D]"></div>
+          </label>
+        </div>
+
+        {/* Submit & Clear Buttons */}
+        <div className="flex items-center gap-2 pt-2">
+          <button
+            type="submit"
+            disabled={connectionState.isTesting}
+            data-testid="kucoin_save_and_test_btn"
+            className="flex-1 bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2.5 px-4 rounded-xl text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-[0_0_16px_rgba(1,188,141,0.25)]"
+          >
+            <CheckCircle2 className="w-4 h-4" />
+            <span>حفظ المفاتيح واختبار الاتصال مع كوكوين</span>
+          </button>
+
+          {(apiKey.length > 0 ||
+            apiSecret.length > 0 ||
+            passphrase.length > 0 ||
+            config.apiKey.length > 0 ||
+            config.apiType === 'SANDBOX') && (
+            <button
+              type="button"
+              data-testid="kucoin_clear_keys_btn"
+              onClick={() => {
+                setApiKey('');
+                setApiSecret('');
+                setPassphrase('');
+                setApiType('REAL');
+                onClearKeys();
+              }}
+              className="bg-[#F6465D]/15 hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/40 font-bold p-2.5 rounded-xl text-xs transition-colors cursor-pointer"
+              title="مسح مفاتيح KuCoin وإعادة الضبط"
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </form>
 
       {/* Recent Orders Section with Filtering by Trade Type (Buy/Sell) & Symbol */}
       <div
@@ -726,160 +1025,6 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
           </div>
         )}
       </div>
-
-      {/* API Form */}
-      <form onSubmit={handleSave} className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4">
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <h3 className="font-bold text-sm text-[#01BC8D] flex items-center gap-2">
-            <Key className="w-4 h-4" />
-            <span>بيانات مفتاح KuCoin API (API Key & Passphrase بدون Secret)</span>
-          </h3>
-          {onOpenSimulationTab && (
-            <button
-              type="button"
-              onClick={onOpenSimulationTab}
-              className="text-[11px] text-[#01BC8D] hover:underline font-bold flex items-center gap-1 cursor-pointer"
-            >
-              <Sliders className="w-3.5 h-3.5" />
-              <span>إعدادات الصفقات والمراكز (التداول) ←</span>
-            </button>
-          )}
-        </div>
-
-        {/* API Key */}
-        <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <label className="block text-xs font-semibold text-white">
-              مفتاح API Key (من KuCoin)
-            </label>
-            <span className="text-[10px] text-[#8A99AD] font-mono">
-              لا يتطلب مفتاح سري (No API Secret)
-            </span>
-          </div>
-          <input
-            type="text"
-            data-testid="kucoin_api_key_input"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="مثال: 64b8f... (KuCoin API Key)"
-            className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3.5 py-2.5 text-xs text-white font-mono focus:outline-none"
-          />
-        </div>
-
-        {/* Passphrase (Mandatory for KuCoin) */}
-        <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <label className="block text-xs font-semibold text-white">
-              كلمة مرور المفتاح (API Passphrase)
-            </label>
-            <span className="text-[10px] text-[#01BC8D]">مطلوبة في KuCoin</span>
-          </div>
-          <div className="relative">
-            <input
-              type={showPassphrase ? 'text' : 'password'}
-              data-testid="kucoin_passphrase_input"
-              value={passphrase}
-              onChange={(e) => setPassphrase(e.target.value)}
-              placeholder="الكلمة التي قمت بتعيينها عند إنشاء المفتاح في كوكوين"
-              className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl pr-3.5 pl-10 py-2.5 text-xs text-white font-mono focus:outline-none"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPassphrase(!showPassphrase)}
-              className="absolute left-3 top-2.5 text-[#8A99AD] hover:text-white"
-            >
-              {showPassphrase ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-          </div>
-        </div>
-
-        {/* Market Selection */}
-        <div>
-          <label className="block text-[11px] text-[#8A99AD] mb-1.5">
-            سوق التنفيذ المستهدف في KuCoin:
-          </label>
-          <div className="flex items-center border-b border-[#232E3A]">
-            <button
-              type="button"
-              onClick={() => setMarketType('FUTURES')}
-              className={`flex-1 py-2.5 px-3 text-xs font-bold border-b-2 transition-all cursor-pointer ${
-                marketType === 'FUTURES'
-                  ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
-                  : 'border-transparent text-[#8A99AD] hover:text-white'
-              }`}
-            >
-              العقود الآجلة (KuCoin Futures)
-            </button>
-            <button
-              type="button"
-              onClick={() => setMarketType('SPOT')}
-              className={`flex-1 py-2.5 px-3 text-xs font-bold border-b-2 transition-all cursor-pointer ${
-                marketType === 'SPOT'
-                  ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
-                  : 'border-transparent text-[#8A99AD] hover:text-white'
-              }`}
-            >
-              التداول الفوري (KuCoin Spot)
-            </button>
-          </div>
-        </div>
-
-        {/* Live Execution Switch */}
-        <div className="bg-[#1A222B] border border-[#232E3A] rounded-xl p-3.5 flex items-center justify-between">
-          <div>
-            <div className="text-xs font-bold text-white flex items-center gap-1.5">
-              <span>تفعيل تنفيذ الصفقات الحقيقية في KuCoin</span>
-              <span
-                className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
-                  enableLiveExecution ? 'bg-[#F6465D]/20 text-[#F6465D]' : 'bg-[#0D2B24] text-[#01BC8D]'
-                }`}
-              >
-                {enableLiveExecution ? 'LIVE ORDERS' : 'PAPER / DRY-RUN'}
-              </span>
-            </div>
-            <p className="text-[11px] text-[#8A99AD] mt-0.5">
-              عند التفعيل، سيتم إرسال أوامر حقيقية لحساب كوكوين بالحجم والرافعة المحددين في نافذة التداول
-            </p>
-          </div>
-          <label className="relative inline-flex items-center cursor-pointer shrink-0">
-            <input
-              type="checkbox"
-              checked={enableLiveExecution}
-              onChange={(e) => setEnableLiveExecution(e.target.checked)}
-              className="sr-only peer"
-            />
-            <div className="w-11 h-6 bg-[#232E3A] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-[#232E3A] after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#01BC8D]"></div>
-          </label>
-        </div>
-
-        {/* Buttons */}
-        <div className="flex items-center gap-2 pt-2">
-          <button
-            type="submit"
-            disabled={connectionState.isTesting}
-            data-testid="kucoin_save_and_test_btn"
-            className="flex-1 bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2.5 px-4 rounded-xl text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
-          >
-            <CheckCircle2 className="w-4 h-4" />
-            <span>حفظ المفاتيح واختبار الاتصال مع كوكوين</span>
-          </button>
-
-          {(apiKey.length > 0 || config.apiKey.length > 0) && (
-            <button
-              type="button"
-              onClick={() => {
-                setApiKey('');
-                setPassphrase('');
-                onClearKeys();
-              }}
-              className="bg-[#F6465D]/15 hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/40 font-bold p-2.5 rounded-xl text-xs transition-colors cursor-pointer"
-              title="مسح مفاتيح KuCoin"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          )}
-        </div>
-      </form>
 
       <KuCoinSecurityConfigModal
         isOpen={isConfigModalOpen}
