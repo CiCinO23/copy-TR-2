@@ -34,8 +34,10 @@ export function evaluatePreviousTradePriceAdvantage(params: {
   side: 'LONG' | 'SHORT';
   traderEntryPrice: number;
   currentMarketPrice: number;
+  promptOnUnfavorableLateEntry?: boolean;
 }): PriceAdvantageEvaluation {
   const { side, traderEntryPrice, currentMarketPrice } = params;
+  const shouldPrompt = params.promptOnUnfavorableLateEntry !== false;
   const safeEntry = traderEntryPrice > 0 ? traderEntryPrice : currentMarketPrice;
   const safeCurrent = currentMarketPrice > 0 ? currentMarketPrice : safeEntry;
 
@@ -60,6 +62,13 @@ export function evaluatePreviousTradePriceAdvantage(params: {
         priceDiffPercent,
         reasonAr: `صفقة بيع (SHORT) والسعر الحالي (${safeCurrent}) أعلى/أفضل من سعر الدخول (${safeEntry}) — تم التنفيذ مباشرة بالسعر الحالي`,
       };
+    } else if (!shouldPrompt) {
+      return {
+        isFavorable: false,
+        decision: 'EXECUTE_IMMEDIATELY',
+        priceDiffPercent,
+        reasonAr: `صفقة بيع (SHORT) والسعر الحالي (${safeCurrent}) أقل من سعر الدخول (${safeEntry}) (${priceDiffPercent}%) — تم إلغاء خيار الانتظار ودخل النظام آلياً بسعر السوق`,
+      };
     } else {
       return {
         isFavorable: false,
@@ -76,6 +85,13 @@ export function evaluatePreviousTradePriceAdvantage(params: {
         decision: 'EXECUTE_IMMEDIATELY',
         priceDiffPercent,
         reasonAr: `صفقة شراء (LONG) والسعر الحالي (${safeCurrent}) أدنى/أفضل من سعر الدخول (${safeEntry}) — تم التنفيذ مباشرة بالسعر الحالي`,
+      };
+    } else if (!shouldPrompt) {
+      return {
+        isFavorable: false,
+        decision: 'EXECUTE_IMMEDIATELY',
+        priceDiffPercent,
+        reasonAr: `صفقة شراء (LONG) والسعر الحالي (${safeCurrent}) أعلى من سعر الدخول (${safeEntry}) (+${priceDiffPercent}%) — تم إلغاء خيار الانتظار ودخل النظام آلياً بسعر السوق`,
       };
     } else {
       return {
@@ -509,4 +525,87 @@ export function calculatePositionQuantityDropPartialExitPct(params: {
   }
   return Math.min(95, Math.max(5, Math.round(dropRatio * 100)));
 }
+
+/**
+ * Builds a deterministic, trader-scoped action ID for versioning and lastProcessedActionId checkpointing.
+ */
+export function buildTraderActionId(params: {
+  traderId: string;
+  symbol: string;
+  actionType: 'ENTRY' | 'SCALE_IN' | 'PARTIAL_EXIT' | 'FULL_EXIT';
+  rawId?: string;
+  timestamp?: number;
+  volumePercent?: number;
+  quantity?: number;
+}): string {
+  const tid = String(params.traderId || 'unknown').trim();
+  const sym = String(params.symbol || '').toUpperCase().trim();
+  const ts = Math.round(Number(params.timestamp || 0));
+  const pct = Math.round(Math.abs(Number(params.volumePercent || 0)));
+  const qty = Number(params.quantity || 0).toFixed(5);
+  if (params.rawId && String(params.rawId).trim()) {
+    return `ta:${tid}:${sym}:${params.actionType}:${String(params.rawId).trim()}`;
+  }
+  return `ta:${tid}:${sym}:${params.actionType}:${ts}:${pct}:${qty}`;
+}
+
+/**
+ * Checks a per-trader sync checkpoint (version + lastProcessedActionId + processedActionIds + per-symbol recency)
+ * so any already-processed sync action is skipped cleanly.
+ */
+export function isTraderActionAlreadyProcessed(params: {
+  checkpoint?: {
+    version: number;
+    lastProcessedActionId: string | null;
+    lastProcessedTimestamp: number;
+    processedActionIds: string[];
+    lastActionsBySymbol?: Record<
+      string,
+      { actionId: string; actionType: string; timestamp: number }
+    >;
+  } | null;
+  incomingSyncVersion?: number;
+  candidateActionIds: string[];
+  symbol?: string;
+  actionType?: 'SCALE_IN' | 'PARTIAL_EXIT' | 'FULL_EXIT';
+  eventTimestamp?: number;
+}): boolean {
+  const cp = params.checkpoint;
+  if (!cp) return false;
+
+  if (
+    params.incomingSyncVersion !== undefined &&
+    params.incomingSyncVersion <= cp.version
+  ) {
+    return true;
+  }
+
+  const candidates = params.candidateActionIds.filter(Boolean);
+  if (cp.lastProcessedActionId && candidates.includes(cp.lastProcessedActionId)) {
+    return true;
+  }
+
+  const processedSet = new Set(cp.processedActionIds || []);
+  for (const candidate of candidates) {
+    if (processedSet.has(candidate)) {
+      return true;
+    }
+  }
+
+  if (params.symbol && params.actionType && params.eventTimestamp && params.eventTimestamp > 0) {
+    const symKey = String(params.symbol).toUpperCase().trim();
+    const lastForSym = cp.lastActionsBySymbol?.[symKey];
+    if (
+      lastForSym &&
+      lastForSym.actionType === params.actionType &&
+      lastForSym.timestamp > 0 &&
+      Math.abs(lastForSym.timestamp - params.eventTimestamp) < 60000
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 

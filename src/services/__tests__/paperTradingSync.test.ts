@@ -197,3 +197,235 @@ test('PaperEngine syncTraderPositionsAndRecords executes PARTIAL_EXIT once and n
     2
   );
 });
+
+test('PaperEngine enforces per-trader versioning & lastProcessedActionId while keeping independent symbols unblocked', () => {
+  memoryStorage.clear();
+  mobileNotifications.clearAllNotifications();
+  const engine = new PaperEngine();
+  engine.clearAllDataAndReset({ scope: 'ALL_ACCOUNTS' });
+
+  const baseTime = Date.now() - 20_000;
+  const btcPos: TraderOpenPosition = {
+    id: 'pos_btc',
+    symbol: 'BTCUSDT',
+    collateral: 'USDT',
+    positionAmount: 1,
+    side: 'LONG',
+    entryPrice: 90000,
+    markPrice: 90000,
+    breakEvenPrice: 90000,
+    unrealizedProfit: 0,
+    cumRealized: 0,
+    notionalValue: 90000,
+    leverage: 5,
+    isolated: false,
+    roePercent: 0,
+    entryTime: baseTime,
+    lastUpdateTime: baseTime,
+    currentScalePercent: 100,
+    scaleAdjustments: [],
+  };
+  const ethPos: TraderOpenPosition = {
+    id: 'pos_eth',
+    symbol: 'ETHUSDT',
+    collateral: 'USDT',
+    positionAmount: 10,
+    side: 'SHORT',
+    entryPrice: 3000,
+    markPrice: 3000,
+    breakEvenPrice: 3000,
+    unrealizedProfit: 0,
+    cumRealized: 0,
+    notionalValue: 30000,
+    leverage: 5,
+    isolated: false,
+    roePercent: 0,
+    entryTime: baseTime,
+    lastUpdateTime: baseTime,
+    currentScalePercent: 100,
+    scaleAdjustments: [],
+  };
+
+  // Version 1: Initial entry on BTC & ETH
+  engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_ver',
+    traderName: 'VersionedTrader',
+    source: 'COPY_TRADING',
+    positions: [btcPos, ethPos],
+    latestRecords: [],
+    currentPrices: { BTCUSDT: 90000, ETHUSDT: 3000 },
+    syncVersion: 1,
+    actionId: 'batch_init_1',
+  });
+
+  const cp1 = engine.getTraderSyncCheckpoint('trader_ver', 'COPY_TRADING');
+  assert.ok(cp1);
+  assert.equal(cp1.version, 1);
+  assert.ok(cp1.lastProcessedActionId);
+  assert.equal(engine.hasProcessedTraderAction('trader_ver', 'batch_init_1', 'COPY_TRADING'), true);
+
+  // Stale/duplicate sync request with syncVersion <= 1 or same actionId must be completely ignored
+  const tPartial = Date.now() + 3000;
+  const partialBtcRec: TraderLatestRecord = {
+    id: 'rec_btc_withdraw_50',
+    symbol: 'BTCUSDT',
+    baseAsset: 'BTC',
+    quoteAsset: 'USDT',
+    side: 'SELL',
+    type: 'MARKET',
+    positionSide: 'LONG',
+    actionType: 'PARTIAL_EXIT',
+    actionLabelAr: 'انسحاب -50%',
+    volumePercent: -50,
+    remainingPercentAfter: 50,
+    executedQty: 0.5,
+    avgPrice: 91000,
+    totalPnl: 500,
+    orderTime: tPartial,
+  };
+
+  const staleLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_ver',
+    traderName: 'VersionedTrader',
+    source: 'COPY_TRADING',
+    positions: [{ ...btcPos, positionAmount: 0.5 }, ethPos],
+    latestRecords: [partialBtcRec],
+    currentPrices: { BTCUSDT: 91000, ETHUSDT: 3000 },
+    syncVersion: 1,
+  });
+  assert.equal(staleLogs.length, 0);
+
+  // Duplicate actionId must also be skipped even if syncVersion omitted
+  const dupActionLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_ver',
+    traderName: 'VersionedTrader',
+    source: 'COPY_TRADING',
+    positions: [{ ...btcPos, positionAmount: 0.5 }, ethPos],
+    latestRecords: [partialBtcRec],
+    currentPrices: { BTCUSDT: 91000, ETHUSDT: 3000 },
+    actionId: 'batch_init_1',
+  });
+  assert.equal(dupActionLogs.length, 0);
+
+  // Now advance syncVersion: 2 -> BTCUSDT partial exit executes once, and ETHUSDT partial exit 5s later executes independently
+  const ethRec: TraderLatestRecord = {
+    id: 'rec_eth_withdraw_30',
+    symbol: 'ETHUSDT',
+    baseAsset: 'ETH',
+    quoteAsset: 'USDT',
+    side: 'BUY',
+    type: 'MARKET',
+    positionSide: 'SHORT',
+    actionType: 'PARTIAL_EXIT',
+    actionLabelAr: 'انسحاب -30%',
+    volumePercent: -30,
+    remainingPercentAfter: 70,
+    executedQty: 3,
+    avgPrice: 2950,
+    totalPnl: 150,
+    orderTime: tPartial + 5000,
+  };
+
+  const v2Logs = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_ver',
+    traderName: 'VersionedTrader',
+    source: 'COPY_TRADING',
+    positions: [
+      { ...btcPos, positionAmount: 0.5 },
+      { ...ethPos, positionAmount: 7 },
+    ],
+    latestRecords: [partialBtcRec, ethRec],
+    currentPrices: { BTCUSDT: 91000, ETHUSDT: 2950 },
+    syncVersion: 2,
+    actionId: 'batch_partial_2',
+  });
+  assert.equal(v2Logs.filter((l) => l.action === 'PARTIAL_EXIT').length, 2);
+
+  const cp2 = engine.getTraderSyncCheckpoint('trader_ver', 'COPY_TRADING');
+  assert.ok(cp2);
+  assert.ok(cp2.version >= 2);
+  assert.equal(engine.hasProcessedTraderAction('trader_ver', 'batch_partial_2', 'COPY_TRADING'), true);
+
+  // Repeating the exact same batch with higher syncVersion still skips both already-processed records!
+  const v3RepeatLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_ver',
+    traderName: 'VersionedTrader',
+    source: 'COPY_TRADING',
+    positions: [
+      { ...btcPos, positionAmount: 0.5 },
+      { ...ethPos, positionAmount: 7 },
+    ],
+    latestRecords: [partialBtcRec, ethRec],
+    currentPrices: { BTCUSDT: 91000, ETHUSDT: 2950 },
+    syncVersion: 3,
+    actionId: 'batch_partial_3_replay',
+  });
+  assert.equal(v3RepeatLogs.filter((l) => l.action === 'PARTIAL_EXIT').length, 0);
+});
+
+test('PaperEngine executes late unfavorable trades automatically at market price when promptOnUnfavorableLateEntry is unchecked', () => {
+  memoryStorage.clear();
+  mobileNotifications.clearAllNotifications();
+  const engine = new PaperEngine();
+  engine.clearAllDataAndReset({ scope: 'ALL_ACCOUNTS' });
+
+  const oldEntryTime = Date.now() - 3600_000;
+  // Unfavorable for late LONG copy: trader entered at 85,000, current price is 92,000 (+8.2%)
+  const lateLongPos: TraderOpenPosition = {
+    id: 'pos_late_btc',
+    symbol: 'BTCUSDT',
+    collateral: 'USDT',
+    positionAmount: 1,
+    side: 'LONG',
+    entryPrice: 85000,
+    markPrice: 92000,
+    breakEvenPrice: 85000,
+    unrealizedProfit: 7000,
+    cumRealized: 0,
+    notionalValue: 92000,
+    leverage: 5,
+    isolated: false,
+    roePercent: 40,
+    entryTime: oldEntryTime,
+    lastUpdateTime: oldEntryTime,
+    currentScalePercent: 100,
+    scaleAdjustments: [],
+  };
+
+  // 1. Default behavior (promptOnUnfavorableLateEntry = true): creates pending choice, does NOT open
+  engine.updateSettings({ promptOnUnfavorableLateEntry: true });
+  const logsWithPrompt = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_late',
+    traderName: 'LateTrader',
+    source: 'COPY_TRADING',
+    positions: [lateLongPos],
+    latestRecords: [],
+    currentPrices: { BTCUSDT: 92000 },
+  });
+  assert.equal(logsWithPrompt.filter((l) => l.action === 'POSITION_SYNC').length, 0);
+  assert.equal(
+    engine.getAccount().positions.filter((p) => p.status === 'OPEN').length,
+    0
+  );
+
+  // 2. Unchecked behavior (promptOnUnfavorableLateEntry = false): immediately enters at live market price (92,000)
+  engine.updateSettings({ promptOnUnfavorableLateEntry: false });
+  const logsAutoEnter = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_late',
+    traderName: 'LateTrader',
+    source: 'COPY_TRADING',
+    positions: [lateLongPos],
+    latestRecords: [],
+    currentPrices: { BTCUSDT: 92000 },
+  });
+
+  assert.equal(logsAutoEnter.filter((l) => l.action === 'POSITION_SYNC').length, 1);
+  const openPos = engine.getAccount().positions.find((p) => p.status === 'OPEN');
+  assert.ok(openPos);
+  assert.equal(openPos.symbol, 'BTCUSDT');
+  assert.equal(openPos.entryPrice, 92000);
+  assert.equal(openPos.traderEntryPrice, 85000);
+  const snap = engine.getSnapshot({ BTCUSDT: 92000 });
+  assert.equal((snap.pendingReconnectChoices || []).length, 0);
+});
+

@@ -84,6 +84,7 @@ export interface TradeExecutionSettings {
   scaleInFixedValueUsdt?: number; // القيمة المحددة بالدولار (USDT) التي يختارها المستخدم لإضافتها عند تدعيم المتداول لصفقته
   scaleInSamePercentAsTrader?: boolean; // خيار قابل للتفعيل أو الإلغاء: التدعيم آلياً بنفس النسبة المئوية للمتداول من قيمة الصفقة الأصلية
   partialExitSamePercentAsTrader?: boolean; // سحب نفس النسبة المئوية تلقائياً عندما يسحب المتداول جزءاً من الصفقة
+  promptOnUnfavorableLateEntry?: boolean; // خيار اختياري: عند التفعيل يطلب قرار الدخول أو الرفض إذا كان السعر أسوأ؛ وعند شطبه يصبح الدخول آلياً بسعر السوق حتى مع التأخر
 }
 
 export type ScaleActionType = 'INITIAL_ENTRY' | 'SCALE_IN' | 'PARTIAL_EXIT' | 'FULL_EXIT';
@@ -185,6 +186,26 @@ export interface PaperAccountSnapshot {
   positions: PaperPosition[];
   settings: TradeExecutionSettings;
   pendingReconnectChoices?: PendingReconnectTradeChoice[];
+}
+
+export interface TraderSymbolSyncAction {
+  actionId: string;
+  actionType: 'ENTRY' | 'SCALE_IN' | 'PARTIAL_EXIT' | 'FULL_EXIT';
+  timestamp: number;
+}
+
+export interface TraderSyncCheckpoint {
+  key: string; // `${accountId}::${source}::${traderId}`
+  accountId: string;
+  source: 'COPY_TRADING' | 'SMART_MONEY';
+  traderId: string;
+  traderName: string;
+  version: number;
+  lastProcessedActionId: string | null;
+  lastProcessedTimestamp: number;
+  processedActionIds: string[];
+  lastActionsBySymbol?: Record<string, TraderSymbolSyncAction>;
+  updatedAt: number;
 }
 
 // ==========================================

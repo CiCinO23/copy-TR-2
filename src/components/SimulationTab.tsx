@@ -226,6 +226,9 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   const [partialExitSamePercentInput, setPartialExitSamePercentInput] = useState<boolean>(
     settings.partialExitSamePercentAsTrader ?? true
   );
+  const [promptOnUnfavorableLateEntryInput, setPromptOnUnfavorableLateEntryInput] = useState<boolean>(
+    settings.promptOnUnfavorableLateEntry ?? true
+  );
   const [settingsSavedMsg, setSettingsSavedMsg] = useState<string | null>(null);
 
   // Statistics Section Filter State
@@ -249,6 +252,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
     setScaleInFixedValueInput(String(settings.scaleInFixedValueUsdt ?? 10));
     setScaleInSamePercentInput(settings.scaleInSamePercentAsTrader ?? true);
     setPartialExitSamePercentInput(settings.partialExitSamePercentAsTrader ?? true);
+    setPromptOnUnfavorableLateEntryInput(settings.promptOnUnfavorableLateEntry ?? true);
     setBalanceInput(String(settings.virtualInitialBalance || paperSnapshot.initialBalance || 1000));
     setRenameAccountInput(activeAccountName);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -708,6 +712,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       scaleInFixedValueUsdt: cleanScaleInFixed,
       scaleInSamePercentAsTrader: scaleInSamePercentInput,
       partialExitSamePercentAsTrader: partialExitSamePercentInput,
+      promptOnUnfavorableLateEntry: promptOnUnfavorableLateEntryInput,
       ...overrides,
     };
   };
@@ -747,8 +752,13 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       ? 'التدعيم آلياً بنفس النسبة المئوية من قيمة الصفقة الأصلية'
       : `التدعيم بالقيمة المحددة (+${payload.scaleInFixedValueUsdt} USDT)`;
 
+    const lateEntryModeText =
+      payload.promptOnUnfavorableLateEntry === false
+        ? 'الدخول آلي بسعر السوق حتى مع التأخر'
+        : 'تفعيل اختيار الدخول أو الرفض عند السعر الأسوأ';
+
     setSettingsSavedMsg(
-      `تم حفظ وتثبيت الإعدادات الخاصة بحساب «${activeAccountName}» فقط بنجاح: قيمة الصفقة (${payload.tradeValueUsdt} USDT) • الرافعة (${payload.leverage}x) • العمولة (${payload.commissionPercent}%) • أقصى صفقات (${payload.maxConcurrentTrades}) • ${scaleModeText}`
+      `تم حفظ وتثبيت الإعدادات الخاصة بحساب «${activeAccountName}» فقط بنجاح: قيمة الصفقة (${payload.tradeValueUsdt} USDT) • الرافعة (${payload.leverage}x) • العمولة (${payload.commissionPercent}%) • أقصى صفقات (${payload.maxConcurrentTrades}) • ${scaleModeText} • ${lateEntryModeText}`
     );
     setTimeout(() => setSettingsSavedMsg(null), 7000);
   };
@@ -3152,6 +3162,56 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 </label>
               </div>
             </div>
+
+            {/* 4. Optional Late-Entry Prompt (اختيار الدخول في الصفقات أو الرفض) */}
+            <div
+              className={`rounded-xl p-3 border transition-all ${
+                promptOnUnfavorableLateEntryInput
+                  ? 'bg-[#12171D] border-[#F59E0B]/50'
+                  : 'bg-[#12171D] border-[#01BC8D]'
+              }`}
+            >
+              <label className="flex items-start gap-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={promptOnUnfavorableLateEntryInput}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    setPromptOnUnfavorableLateEntryInput(next);
+                    onUpdateTradeSettings(
+                      buildCurrentSettingsPayload({ promptOnUnfavorableLateEntry: next }),
+                      activeAccountId,
+                      false
+                    );
+                  }}
+                  data-testid="setting_prompt_unfavorable_late_entry_checkbox"
+                  className="accent-[#01BC8D] w-4 h-4 mt-0.5 shrink-0 cursor-pointer"
+                />
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-xs font-bold text-white">
+                      تفعيل خاصية اختيار الدخول في الصفقات أو الرفض (عند التأخر والسعر الأقل أفضلية)
+                    </span>
+                    <span
+                      className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${
+                        promptOnUnfavorableLateEntryInput
+                          ? 'bg-[#3B2606] text-[#FBBF24] border border-[#F59E0B]/40'
+                          : 'bg-[#01BC8D] text-[#0B0E11]'
+                      }`}
+                    >
+                      {promptOnUnfavorableLateEntryInput
+                        ? 'مفعّل: طلب القرار قبل الدخول'
+                        : 'مشطوب: دخول آلي بسعر السوق فوراً'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-[#8A99AD] leading-relaxed">
+                    {promptOnUnfavorableLateEntryInput
+                      ? 'عند التفعيل: إذا دخلت متأخراً وكان سعر السوق الحالي أسوأ من سعر دخول المتداول، يعرض لك التطبيق خيار الموافقة على الدخول أو الرفض. اشطب هذا الخيار للدخول آلياً في كل الأحوال.'
+                      : 'تم شطب الخيار: سيتم الدخول آلياً وبشكل فوري بالسعر الحالي للسوق في صفقات المتداول حتى وإن كنت متأخراً وكان سعر السوق أقل أفضلية من سعر دخول المتداول.'}
+                  </p>
+                </div>
+              </label>
+            </div>
           </div>
 
           <button
@@ -3359,39 +3419,88 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           activeAccountId
         );
 
+        const isPromptEnabled = settings.promptOnUnfavorableLateEntry !== false;
+
         return (
           <div
             data-testid="reconnect_trades_advantage_section"
-            className="bg-[#12171D] border border-[#F59E0B]/40 rounded-2xl p-4 sm:p-5 space-y-3"
+            className={`bg-[#12171D] border rounded-2xl p-4 sm:p-5 space-y-3 ${
+              isPromptEnabled ? 'border-[#F59E0B]/40' : 'border-[#01BC8D]/40'
+            }`}
           >
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-start gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-[#3B2606] border border-[#F59E0B]/40 flex items-center justify-center text-[#FBBF24] shrink-0 mt-0.5">
+                <div
+                  className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 mt-0.5 ${
+                    isPromptEnabled
+                      ? 'bg-[#3B2606] border-[#F59E0B]/40 text-[#FBBF24]'
+                      : 'bg-[#0D2B24] border-[#01BC8D]/40 text-[#01BC8D]'
+                  }`}
+                >
                   <Zap className="w-4 h-4" />
                 </div>
                 <div>
                   <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="font-bold text-sm sm:text-base text-white">
-                      صفقات سابقة بانتظار قرارك لأن السعر الحالي أقل أفضلية من سعر دخول المتداول
+                      {isPromptEnabled
+                        ? 'صفقات سابقة بانتظار قرارك لأن السعر الحالي أقل أفضلية من سعر دخول المتداول'
+                        : 'الدخول الآلي بسعر السوق مفعّل (تم شطب خيار الانتظار والرفض)'}
                     </h3>
                     <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 font-bold">
                       خاص بالمتداول المنسوخ في هذه الصفحة فقط
                     </span>
                   </div>
                   <p className="text-[11px] text-[#8A99AD] mt-0.5 leading-relaxed">
-                    عند فتح التطبيق بعد انقطاع الاتصال ووجود صفقات سابقة للمتداول المنسوخ في هذه الصفحة: إذا كانت{' '}
-                    <strong className="text-[#F6465D]">بيع (SHORT)</strong> والسعر الحالي{' '}
-                    <strong className="text-[#01BC8D]">أعلى من سعر الدخول</strong> (أو{' '}
-                    <strong className="text-[#01BC8D]">شراء LONG</strong> والسعر الحالي{' '}
-                    <strong className="text-[#01BC8D]">أدنى من سعر الدخول</strong>) أي في مصلحتك ←{' '}
-                    <strong className="text-white">تُنفذ مباشرة بالسعر الحالي</strong>. أما إذا كان السعر أسوأ ←{' '}
-                    <strong className="text-[#FBBF24]">تظهر هنا كخيار تنفيذ خاص بالمتداول المنسوخ في هذه الصفحة</strong>.
+                    {isPromptEnabled ? (
+                      <>
+                        عند فتح التطبيق بعد انقطاع الاتصال ووجود صفقات سابقة للمتداول المنسوخ في هذه الصفحة: إذا كانت{' '}
+                        <strong className="text-[#F6465D]">بيع (SHORT)</strong> والسعر الحالي{' '}
+                        <strong className="text-[#01BC8D]">أعلى من سعر الدخول</strong> (أو{' '}
+                        <strong className="text-[#01BC8D]">شراء LONG</strong> والسعر الحالي{' '}
+                        <strong className="text-[#01BC8D]">أدنى من سعر الدخول</strong>) أي في مصلحتك ←{' '}
+                        <strong className="text-white">تُنفذ مباشرة بالسعر الحالي</strong>. أما إذا كان السعر أسوأ ←{' '}
+                        <strong className="text-[#FBBF24]">تظهر هنا كخيار تنفيذ خاص بالمتداول المنسوخ في هذه الصفحة</strong>.
+                      </>
+                    ) : (
+                      <>
+                        تم شطب خاصية اختيار الدخول أو الرفض لحساب «{activeAccountName}»: سيدخل النظام الآن{' '}
+                        <strong className="text-[#01BC8D]">آلياً وفوراً بالسعر الحالي للسوق</strong> في جميع صفقات المتداول حتى وإن كنت متأخراً أو كان السعر أقل أفضلية.
+                      </>
+                    )}
                   </p>
                 </div>
               </div>
+
+              <label className="flex items-center gap-2 bg-[#0B0E11] border border-[#232E3A] hover:border-[#01BC8D]/50 rounded-xl px-3 py-2 cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  checked={isPromptEnabled}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    setPromptOnUnfavorableLateEntryInput(next);
+                    onUpdateTradeSettings(
+                      buildCurrentSettingsPayload({ promptOnUnfavorableLateEntry: next }),
+                      activeAccountId,
+                      false
+                    );
+                  }}
+                  data-testid="active_toggle_prompt_late_entry_checkbox"
+                  className="accent-[#01BC8D] w-4 h-4 shrink-0 cursor-pointer"
+                />
+                <span className="text-[11px] font-bold text-white whitespace-nowrap">
+                  اختيار الدخول أو الرفض
+                </span>
+              </label>
             </div>
 
-            {copiedTradersOnThisPage.length === 0 ? (
+            {!isPromptEnabled ? (
+              <div
+                data-testid="auto_enter_late_trades_active_msg"
+                className="bg-[#0D2B24]/50 border border-[#01BC8D]/40 rounded-xl p-3.5 text-center text-xs text-[#01BC8D] font-semibold"
+              >
+                الوضع الآلي نشط: يتم تنفيذ صفقات المتداول المنسوخ مباشرة بسعر السوق الحالي دون طلب تأكيد أو انتظار.
+              </div>
+            ) : copiedTradersOnThisPage.length === 0 ? (
               <div
                 data-testid="no_copied_trader_pending_choices_msg"
                 className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3.5 text-center text-xs text-[#8A99AD]"

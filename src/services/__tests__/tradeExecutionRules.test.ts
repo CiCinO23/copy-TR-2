@@ -12,6 +12,8 @@ import {
   buildStableTraderEventKey,
   hasSyncEventBeenApplied,
   calculatePositionQuantityDropPartialExitPct,
+  buildTraderActionId,
+  isTraderActionAlreadyProcessed,
 } from '../tradeExecutionRules';
 import type {
   ActiveCopiedTrader,
@@ -340,4 +342,85 @@ test('buildStableTraderEventKey, hasSyncEventBeenApplied, and calculatePositionQ
   assert.equal(calculatePositionQuantityDropPartialExitPct({ previousQty: 10, currentQty: 12 }), 0);
   assert.equal(calculatePositionQuantityDropPartialExitPct({ previousQty: 10, currentQty: 6 }), 40);
 });
+
+test('evaluatePreviousTradePriceAdvantage executes immediately at market when promptOnUnfavorableLateEntry is false', () => {
+  const shortUnfavAuto = evaluatePreviousTradePriceAdvantage({
+    side: 'SHORT',
+    traderEntryPrice: 100,
+    currentMarketPrice: 95,
+    promptOnUnfavorableLateEntry: false,
+  });
+  assert.equal(shortUnfavAuto.isFavorable, false);
+  assert.equal(shortUnfavAuto.decision, 'EXECUTE_IMMEDIATELY');
+  assert.equal(shortUnfavAuto.priceDiffPercent, -5);
+
+  const longUnfavAuto = evaluatePreviousTradePriceAdvantage({
+    side: 'LONG',
+    traderEntryPrice: 100,
+    currentMarketPrice: 108,
+    promptOnUnfavorableLateEntry: false,
+  });
+  assert.equal(longUnfavAuto.isFavorable, false);
+  assert.equal(longUnfavAuto.decision, 'EXECUTE_IMMEDIATELY');
+  assert.equal(longUnfavAuto.priceDiffPercent, 8);
+});
+
+test('buildTraderActionId and isTraderActionAlreadyProcessed validate version, lastProcessedActionId, and per-symbol recency', () => {
+  const actionId1 = buildTraderActionId({
+    traderId: 'trader_abc',
+    symbol: 'BTCUSDT',
+    actionType: 'PARTIAL_EXIT',
+    rawId: 'ord_99',
+    timestamp: 1700000100000,
+  });
+  const checkpoint = {
+    version: 3,
+    lastProcessedActionId: actionId1,
+    lastProcessedTimestamp: 1700000100000,
+    processedActionIds: [actionId1],
+    lastActionsBySymbol: {
+      BTCUSDT: {
+        actionId: actionId1,
+        actionType: 'PARTIAL_EXIT',
+        timestamp: 1700000100000,
+      },
+    },
+  };
+
+  assert.equal(
+    isTraderActionAlreadyProcessed({ checkpoint, incomingSyncVersion: 3, candidateActionIds: [] }),
+    true
+  );
+  assert.equal(
+    isTraderActionAlreadyProcessed({
+      checkpoint,
+      incomingSyncVersion: 4,
+      candidateActionIds: [actionId1],
+    }),
+    true
+  );
+  assert.equal(
+    isTraderActionAlreadyProcessed({
+      checkpoint,
+      incomingSyncVersion: 4,
+      candidateActionIds: ['new_action_eth'],
+      symbol: 'ETHUSDT',
+      actionType: 'PARTIAL_EXIT',
+      eventTimestamp: 1700000105000,
+    }),
+    false
+  );
+  assert.equal(
+    isTraderActionAlreadyProcessed({
+      checkpoint,
+      incomingSyncVersion: 4,
+      candidateActionIds: ['btc_live_qty_drop'],
+      symbol: 'BTCUSDT',
+      actionType: 'PARTIAL_EXIT',
+      eventTimestamp: 1700000120000,
+    }),
+    true
+  );
+});
+
 

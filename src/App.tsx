@@ -333,6 +333,12 @@ export const App: React.FC = () => {
 
       updatePaperSnapshot();
 
+      if (partial.promptOnUnfavorableLateEntry === false) {
+        setTimeout(() => {
+          handleSyncAllCopiedTradersRef.current?.();
+        }, 50);
+      }
+
       // Keep KuCoin config synchronized with mode & leverage
       if (
         partial.mode !== undefined ||
@@ -393,6 +399,7 @@ export const App: React.FC = () => {
   binanceConfigRef.current = binanceConfig;
   const handleSelectVirtualAccountRef = useRef(handleSelectVirtualAccount);
   handleSelectVirtualAccountRef.current = handleSelectVirtualAccount;
+  const handleSyncAllCopiedTradersRef = useRef<(() => Promise<void>) | null>(null);
 
   // Sync a copied trader's Positions and Latest records using the target Account's trade settings
   const handleSyncTraderToEngine = useCallback(
@@ -427,7 +434,7 @@ export const App: React.FC = () => {
         marginPerTradeUsdt: userTradeValue,
         accountId: targetAcc.id,
         currentPrices: livePrices,
-        checkReconnectAdvantage: true,
+        checkReconnectAdvantage: currentSettings.promptOnUnfavorableLateEntry !== false,
       });
       setPaperSnapshot(paperEngine.getSnapshot(livePrices));
       setTimeout(refreshCopiedTradersList, 50);
@@ -638,6 +645,8 @@ export const App: React.FC = () => {
       }
     }
   }, []);
+
+  handleSyncAllCopiedTradersRef.current = handleSyncAllCopiedTraders;
 
   // Immediate initial sync once market tickers connect
   const hasInitialTraderSyncRunRef = useRef(false);

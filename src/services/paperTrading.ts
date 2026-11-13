@@ -1,4 +1,4 @@
-import {
+import type {
   PaperPosition,
   PaperAccountSnapshot,
   PaperVirtualAccountSummary,
@@ -8,6 +8,7 @@ import {
   CopiedSyncLog,
   PendingReconnectTradeChoice,
   ActiveCopiedTrader,
+  TraderSyncCheckpoint,
 } from '../types';
 import { mobileNotifications } from './mobileNotifications';
 import {
@@ -22,6 +23,8 @@ import {
   buildStableTraderEventKey,
   hasSyncEventBeenApplied,
   calculatePositionQuantityDropPartialExitPct,
+  buildTraderActionId,
+  isTraderActionAlreadyProcessed,
 } from './tradeExecutionRules';
 
 const PAPER_STORAGE_KEY = 'whale_copy_paper_state_v3';
@@ -30,6 +33,15 @@ const MULTI_ACCOUNTS_STORAGE_KEY = 'whale_copy_multi_accounts_v1';
 const ACTIVE_ACCOUNT_ID_STORAGE_KEY = 'whale_copy_active_account_id_v1';
 const PENDING_CHOICES_STORAGE_KEY = 'whale_copy_pending_reconnect_choices_v1';
 const DISMISSED_CHOICES_STORAGE_KEY = 'whale_copy_dismissed_reconnect_choices_v1';
+const TRADER_SYNC_CHECKPOINTS_STORAGE_KEY = 'whale_copy_trader_sync_checkpoints_v1';
+
+function getSafeStorage(): Storage | null {
+  try {
+    return typeof localStorage !== 'undefined' ? localStorage : null;
+  } catch {
+    return null;
+  }
+}
 
 export const DEFAULT_TRADE_SETTINGS: TradeExecutionSettings = {
   mode: 'VIRTUAL',
@@ -44,6 +56,7 @@ export const DEFAULT_TRADE_SETTINGS: TradeExecutionSettings = {
   scaleInFixedValueUsdt: 10.0,
   scaleInSamePercentAsTrader: true,
   partialExitSamePercentAsTrader: true,
+  promptOnUnfavorableLateEntry: true,
 };
 
 interface StoredPaperState {
@@ -69,16 +82,20 @@ export class PaperEngine {
   private activeAccountId: string = 'acc_default';
   private pendingReconnectChoices: PendingReconnectTradeChoice[] = [];
   private dismissedReconnectChoiceIds: Set<string> = new Set();
+  private traderSyncCheckpoints: Record<string, TraderSyncCheckpoint> = {};
 
   constructor() {
     this.loadMultiAccounts();
     this.loadPendingChoices();
+    this.loadTraderSyncCheckpoints();
   }
 
   private loadStoredCopiedTraders(): ActiveCopiedTrader[] {
     const result: ActiveCopiedTrader[] = [];
+    const storage = getSafeStorage();
+    if (!storage) return result;
     try {
-      const ctRaw = localStorage.getItem('whale_copied_traders_ct');
+      const ctRaw = storage.getItem('whale_copied_traders_ct');
       if (ctRaw) {
         const parsed = JSON.parse(ctRaw);
         if (Array.isArray(parsed)) result.push(...parsed);
@@ -87,7 +104,7 @@ export class PaperEngine {
       // ignore
     }
     try {
-      const smRaw = localStorage.getItem('whale_copied_traders_sm');
+      const smRaw = storage.getItem('whale_copied_traders_sm');
       if (smRaw) {
         const parsed = JSON.parse(smRaw);
         if (Array.isArray(parsed)) result.push(...parsed);
@@ -99,8 +116,10 @@ export class PaperEngine {
   }
 
   private loadPendingChoices(): void {
+    const storage = getSafeStorage();
+    if (!storage) return;
     try {
-      const rawPending = localStorage.getItem(PENDING_CHOICES_STORAGE_KEY);
+      const rawPending = storage.getItem(PENDING_CHOICES_STORAGE_KEY);
       if (rawPending) {
         const parsed = JSON.parse(rawPending);
         if (Array.isArray(parsed)) {
@@ -109,7 +128,7 @@ export class PaperEngine {
           );
         }
       }
-      const rawDismissed = localStorage.getItem(DISMISSED_CHOICES_STORAGE_KEY);
+      const rawDismissed = storage.getItem(DISMISSED_CHOICES_STORAGE_KEY);
       if (rawDismissed) {
         const parsed = JSON.parse(rawDismissed);
         if (Array.isArray(parsed)) {
@@ -147,12 +166,14 @@ export class PaperEngine {
   }
 
   private savePendingChoices(): void {
+    const storage = getSafeStorage();
+    if (!storage) return;
     try {
-      localStorage.setItem(
+      storage.setItem(
         PENDING_CHOICES_STORAGE_KEY,
         JSON.stringify(this.pendingReconnectChoices)
       );
-      localStorage.setItem(
+      storage.setItem(
         DISMISSED_CHOICES_STORAGE_KEY,
         JSON.stringify(Array.from(this.dismissedReconnectChoiceIds))
       );
@@ -161,9 +182,141 @@ export class PaperEngine {
     }
   }
 
-  private loadLegacySettings(): TradeExecutionSettings {
+  private loadTraderSyncCheckpoints(): void {
+    const storage = getSafeStorage();
+    if (!storage) return;
     try {
-      const raw = localStorage.getItem(TRADE_SETTINGS_STORAGE_KEY);
+      const raw = storage.getItem(TRADER_SYNC_CHECKPOINTS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          this.traderSyncCheckpoints = parsed;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private saveTraderSyncCheckpoints(): void {
+    const storage = getSafeStorage();
+    if (!storage) return;
+    try {
+      storage.setItem(
+        TRADER_SYNC_CHECKPOINTS_STORAGE_KEY,
+        JSON.stringify(this.traderSyncCheckpoints)
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  public getTraderSyncCheckpointKey(
+    traderId: string,
+    source: 'COPY_TRADING' | 'SMART_MONEY' = 'COPY_TRADING',
+    accountId?: string
+  ): string {
+    const accId = accountId || this.getActiveAccountId();
+    return `${accId}::${source}::${traderId}`;
+  }
+
+  public getTraderSyncCheckpoint(
+    traderId: string,
+    source: 'COPY_TRADING' | 'SMART_MONEY' = 'COPY_TRADING',
+    accountId?: string
+  ): TraderSyncCheckpoint | null {
+    const key = this.getTraderSyncCheckpointKey(traderId, source, accountId);
+    const cp = this.traderSyncCheckpoints[key];
+    return cp ? { ...cp, processedActionIds: [...cp.processedActionIds] } : null;
+  }
+
+  public hasProcessedTraderAction(
+    traderId: string,
+    actionId: string,
+    source: 'COPY_TRADING' | 'SMART_MONEY' = 'COPY_TRADING',
+    accountId?: string
+  ): boolean {
+    const cp = this.getTraderSyncCheckpoint(traderId, source, accountId);
+    if (!cp || !actionId) return false;
+    return cp.lastProcessedActionId === actionId || cp.processedActionIds.includes(actionId);
+  }
+
+  private getOrCreateTraderSyncCheckpoint(params: {
+    traderId: string;
+    traderName: string;
+    source: 'COPY_TRADING' | 'SMART_MONEY';
+    accountId: string;
+  }): TraderSyncCheckpoint {
+    const key = this.getTraderSyncCheckpointKey(params.traderId, params.source, params.accountId);
+    if (!this.traderSyncCheckpoints[key]) {
+      this.traderSyncCheckpoints[key] = {
+        key,
+        accountId: params.accountId,
+        source: params.source,
+        traderId: params.traderId,
+        traderName: params.traderName,
+        version: 0,
+        lastProcessedActionId: null,
+        lastProcessedTimestamp: 0,
+        processedActionIds: [],
+        lastActionsBySymbol: {},
+        updatedAt: Date.now(),
+      };
+    } else if (params.traderName && !this.traderSyncCheckpoints[key].traderName) {
+      this.traderSyncCheckpoints[key].traderName = params.traderName;
+    }
+    return this.traderSyncCheckpoints[key];
+  }
+
+  private recordTraderSyncAction(
+    checkpoint: TraderSyncCheckpoint,
+    params: {
+      actionId: string;
+      candidateKeys?: string[];
+      symbol: string;
+      actionType: 'ENTRY' | 'SCALE_IN' | 'PARTIAL_EXIT' | 'FULL_EXIT';
+      timestamp?: number;
+      explicitVersion?: number;
+    }
+  ): void {
+    const now = Date.now();
+    const ts = params.timestamp && params.timestamp > 0 ? params.timestamp : now;
+    checkpoint.version =
+      params.explicitVersion !== undefined
+        ? Math.max(checkpoint.version, params.explicitVersion)
+        : checkpoint.version + 1;
+    checkpoint.lastProcessedActionId = params.actionId;
+    checkpoint.lastProcessedTimestamp = Math.max(checkpoint.lastProcessedTimestamp || 0, ts);
+    checkpoint.updatedAt = now;
+
+    const allKeys = [params.actionId, ...(params.candidateKeys || [])].filter(Boolean);
+    const nextList = [...checkpoint.processedActionIds];
+    for (const k of allKeys) {
+      if (!nextList.includes(k)) {
+        nextList.push(k);
+      }
+    }
+    checkpoint.processedActionIds = nextList.slice(-200);
+
+    const symKey = String(params.symbol || '').toUpperCase().trim();
+    if (symKey) {
+      if (!checkpoint.lastActionsBySymbol) {
+        checkpoint.lastActionsBySymbol = {};
+      }
+      checkpoint.lastActionsBySymbol[symKey] = {
+        actionId: params.actionId,
+        actionType: params.actionType,
+        timestamp: ts,
+      };
+    }
+    this.saveTraderSyncCheckpoints();
+  }
+
+  private loadLegacySettings(): TradeExecutionSettings {
+    const storage = getSafeStorage();
+    if (!storage) return { ...DEFAULT_TRADE_SETTINGS };
+    try {
+      const raw = storage.getItem(TRADE_SETTINGS_STORAGE_KEY);
       if (raw) {
         return { ...DEFAULT_TRADE_SETTINGS, ...JSON.parse(raw) };
       }
@@ -174,19 +327,22 @@ export class PaperEngine {
   }
 
   private loadLegacyState(settings: TradeExecutionSettings): StoredPaperState {
-    try {
-      const raw = localStorage.getItem(PAPER_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        return {
-          initialBalance: Number(parsed.initialBalance ?? settings.virtualInitialBalance),
-          availableBalance: Number(parsed.availableBalance ?? settings.virtualInitialBalance),
-          totalCommissionsPaid: Number(parsed.totalCommissionsPaid ?? 0),
-          positions: Array.isArray(parsed.positions) ? parsed.positions : [],
-        };
+    const storage = getSafeStorage();
+    if (storage) {
+      try {
+        const raw = storage.getItem(PAPER_STORAGE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          return {
+            initialBalance: Number(parsed.initialBalance ?? settings.virtualInitialBalance),
+            availableBalance: Number(parsed.availableBalance ?? settings.virtualInitialBalance),
+            totalCommissionsPaid: Number(parsed.totalCommissionsPaid ?? 0),
+            positions: Array.isArray(parsed.positions) ? parsed.positions : [],
+          };
+        }
+      } catch (e) {
+        console.warn('Failed to load paper state', e);
       }
-    } catch (e) {
-      console.warn('Failed to load paper state', e);
     }
     return {
       initialBalance: settings.virtualInitialBalance,
@@ -197,48 +353,51 @@ export class PaperEngine {
   }
 
   private loadMultiAccounts(): void {
-    try {
-      const rawAccounts = localStorage.getItem(MULTI_ACCOUNTS_STORAGE_KEY);
-      const rawActiveId = localStorage.getItem(ACTIVE_ACCOUNT_ID_STORAGE_KEY);
+    const storage = getSafeStorage();
+    if (storage) {
+      try {
+        const rawAccounts = storage.getItem(MULTI_ACCOUNTS_STORAGE_KEY);
+        const rawActiveId = storage.getItem(ACTIVE_ACCOUNT_ID_STORAGE_KEY);
 
-      if (rawAccounts) {
-        const parsed = JSON.parse(rawAccounts);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          this.accounts = parsed.map((acc: any, index: number) => {
-            const mergedSettings: TradeExecutionSettings = {
-              ...DEFAULT_TRADE_SETTINGS,
-              ...(acc.settings || {}),
-            };
-            const accId = acc.id || `acc_${index + 1}`;
-            const accName = acc.name || `الحساب الافتراضي ${index + 1}`;
-            return {
-              id: accId,
-              name: accName,
-              createdAt: Number(acc.createdAt || Date.now()),
-              initialBalance: Number(acc.initialBalance ?? mergedSettings.virtualInitialBalance),
-              availableBalance: Number(acc.availableBalance ?? mergedSettings.virtualInitialBalance),
-              totalCommissionsPaid: Number(acc.totalCommissionsPaid ?? 0),
-              positions: Array.isArray(acc.positions)
-                ? acc.positions.map((p: PaperPosition) => ({
-                    ...p,
-                    accountId: p.accountId || accId,
-                    accountName: p.accountName || accName,
-                  }))
-                : [],
-              settings: mergedSettings,
-            };
-          });
+        if (rawAccounts) {
+          const parsed = JSON.parse(rawAccounts);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            this.accounts = parsed.map((acc: any, index: number) => {
+              const mergedSettings: TradeExecutionSettings = {
+                ...DEFAULT_TRADE_SETTINGS,
+                ...(acc.settings || {}),
+              };
+              const accId = acc.id || `acc_${index + 1}`;
+              const accName = acc.name || `الحساب الافتراضي ${index + 1}`;
+              return {
+                id: accId,
+                name: accName,
+                createdAt: Number(acc.createdAt || Date.now()),
+                initialBalance: Number(acc.initialBalance ?? mergedSettings.virtualInitialBalance),
+                availableBalance: Number(acc.availableBalance ?? mergedSettings.virtualInitialBalance),
+                totalCommissionsPaid: Number(acc.totalCommissionsPaid ?? 0),
+                positions: Array.isArray(acc.positions)
+                  ? acc.positions.map((p: PaperPosition) => ({
+                      ...p,
+                      accountId: p.accountId || accId,
+                      accountName: p.accountName || accName,
+                    }))
+                  : [],
+                settings: mergedSettings,
+              };
+            });
 
-          if (rawActiveId && this.accounts.some((a) => a.id === rawActiveId)) {
-            this.activeAccountId = rawActiveId;
-          } else {
-            this.activeAccountId = this.accounts[0].id;
+            if (rawActiveId && this.accounts.some((a) => a.id === rawActiveId)) {
+              this.activeAccountId = rawActiveId;
+            } else {
+              this.activeAccountId = this.accounts[0].id;
+            }
+            return;
           }
-          return;
         }
+      } catch (e) {
+        console.warn('Failed to load multi-accounts state:', e);
       }
-    } catch (e) {
-      console.warn('Failed to load multi-accounts state:', e);
     }
 
     // Migrate legacy single-account data into the first virtual account
@@ -268,21 +427,24 @@ export class PaperEngine {
   }
 
   private saveState(): void {
+    const storage = getSafeStorage();
+    if (!storage) return;
     try {
-      localStorage.setItem(MULTI_ACCOUNTS_STORAGE_KEY, JSON.stringify(this.accounts));
-      localStorage.setItem(ACTIVE_ACCOUNT_ID_STORAGE_KEY, this.activeAccountId);
+      storage.setItem(MULTI_ACCOUNTS_STORAGE_KEY, JSON.stringify(this.accounts));
+      storage.setItem(ACTIVE_ACCOUNT_ID_STORAGE_KEY, this.activeAccountId);
       this.savePendingChoices();
+      this.saveTraderSyncCheckpoints();
 
       // Keep legacy keys in sync with the active account for backward compatibility
       const activeAcc = this.getAccount();
-      localStorage.setItem(TRADE_SETTINGS_STORAGE_KEY, JSON.stringify(activeAcc.settings));
+      storage.setItem(TRADE_SETTINGS_STORAGE_KEY, JSON.stringify(activeAcc.settings));
       const legacyState: StoredPaperState = {
         initialBalance: activeAcc.initialBalance,
         availableBalance: activeAcc.availableBalance,
         totalCommissionsPaid: activeAcc.totalCommissionsPaid,
         positions: activeAcc.positions,
       };
-      localStorage.setItem(PAPER_STORAGE_KEY, JSON.stringify(legacyState));
+      storage.setItem(PAPER_STORAGE_KEY, JSON.stringify(legacyState));
     } catch (e) {
       console.warn('Failed to save multi-account paper state', e);
     }
@@ -455,6 +617,14 @@ export class PaperEngine {
         partial.leverage !== undefined
       ) {
         this.recalculateOpenCopiedPositions(acc);
+      }
+
+      // If promptOnUnfavorableLateEntry was turned off, clear pending manual choices for this account
+      // so the next sync cycle enters automatically at live market price
+      if (partial.promptOnUnfavorableLateEntry === false) {
+        this.pendingReconnectChoices = this.pendingReconnectChoices.filter(
+          (c) => (c.accountId || 'acc_default') !== acc.id
+        );
       }
     }
 
@@ -662,11 +832,17 @@ export class PaperEngine {
     if (scope === 'ALL_ACCOUNTS') {
       this.pendingReconnectChoices = [];
       this.dismissedReconnectChoiceIds.clear();
+      this.traderSyncCheckpoints = {};
     } else {
       const activeId = this.getActiveAccountId();
       this.pendingReconnectChoices = this.pendingReconnectChoices.filter(
         (c) => c.accountId !== activeId
       );
+      for (const key of Object.keys(this.traderSyncCheckpoints)) {
+        if (this.traderSyncCheckpoints[key]?.accountId === activeId) {
+          delete this.traderSyncCheckpoints[key];
+        }
+      }
     }
 
     if (removeExtra && this.accounts.length > 1) {
@@ -1376,11 +1552,34 @@ export class PaperEngine {
     accountId?: string;
     currentPrices?: Record<string, number>;
     checkReconnectAdvantage?: boolean;
+    syncVersion?: number;
+    actionId?: string;
   }): CopiedSyncLog[] {
     const acc = this.getAccount(params.accountId);
+    const checkpoint = this.getOrCreateTraderSyncCheckpoint({
+      traderId: params.traderId,
+      traderName: params.traderName,
+      source: params.source,
+      accountId: acc.id,
+    });
+
+    // Skip duplicate/stale sync request if this exact version or actionId was already processed for this trader
+    if (
+      (params.syncVersion !== undefined && params.syncVersion <= checkpoint.version) ||
+      (params.actionId &&
+        isTraderActionAlreadyProcessed({
+          checkpoint,
+          candidateActionIds: [params.actionId],
+        }))
+    ) {
+      return [];
+    }
+
     const logs: CopiedSyncLog[] = [];
     const liveMap = params.currentPrices || {};
-    const shouldCheckAdvantage = params.checkReconnectAdvantage !== false;
+    const shouldCheckAdvantage =
+      params.checkReconnectAdvantage !== false &&
+      acc.settings.promptOnUnfavorableLateEntry !== false;
 
     const userMarginUsdt =
       acc.settings.enforceUserSizeOnCopy
@@ -1437,20 +1636,46 @@ export class PaperEngine {
             volumePercent: -100,
             quantity: rec.executedQty,
           });
-          const alreadyApplied = hasSyncEventBeenApplied({
-            appliedSyncEventIds: matchingOpen.appliedSyncEventIds,
-            scaleAdjustments: matchingOpen.scaleAdjustments,
-            candidateKeys: [eventKey, `rec_id:${rec.id}`],
+          const traderActionId = buildTraderActionId({
+            traderId: params.traderId,
+            symbol: rec.symbol,
             actionType: 'FULL_EXIT',
-            eventTimestamp: rec.orderTime,
+            rawId: rec.id,
+            timestamp: rec.orderTime,
+            volumePercent: 100,
+            quantity: rec.executedQty,
           });
+          const candidateKeys = [traderActionId, eventKey, `rec_id:${rec.id}`];
+          const alreadyApplied =
+            hasSyncEventBeenApplied({
+              appliedSyncEventIds: matchingOpen.appliedSyncEventIds,
+              scaleAdjustments: matchingOpen.scaleAdjustments,
+              candidateKeys,
+              actionType: 'FULL_EXIT',
+              eventTimestamp: rec.orderTime,
+            }) ||
+            isTraderActionAlreadyProcessed({
+              checkpoint,
+              candidateActionIds: candidateKeys,
+              symbol: rec.symbol,
+              actionType: 'FULL_EXIT',
+              eventTimestamp: rec.orderTime,
+            });
           // Apply EXIT if it occurred after our entry OR trader no longer has the position open
           if ((isAfterOurEntry || !traderPos) && !alreadyApplied) {
             try {
               const closed = this.closePosition(matchingOpen.id, liveExecPrice, rec.orderTime, acc.id, {
                 sourceEventId: eventKey,
-                appliedEventKeys: [eventKey, `rec_id:${rec.id}`],
+                appliedEventKeys: candidateKeys,
                 eventKey: `${acc.id}_${matchingOpen.id}_${eventKey}`,
+              });
+              this.recordTraderSyncAction(checkpoint, {
+                actionId: traderActionId,
+                candidateKeys,
+                symbol: rec.symbol,
+                actionType: 'FULL_EXIT',
+                timestamp: rec.orderTime,
+                explicitVersion: params.syncVersion,
               });
               logs.push({
                 id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -1487,13 +1712,31 @@ export class PaperEngine {
             volumePercent: withdrawPct,
             quantity: rec.executedQty,
           });
-          const alreadyApplied = hasSyncEventBeenApplied({
-            appliedSyncEventIds: matchingOpen.appliedSyncEventIds,
-            scaleAdjustments: matchingOpen.scaleAdjustments,
-            candidateKeys: [eventKey, `rec_id:${rec.id}`],
+          const traderActionId = buildTraderActionId({
+            traderId: params.traderId,
+            symbol: rec.symbol,
             actionType: 'PARTIAL_EXIT',
-            eventTimestamp: rec.orderTime,
+            rawId: rec.id,
+            timestamp: rec.orderTime,
+            volumePercent: withdrawPct,
+            quantity: rec.executedQty,
           });
+          const candidateKeys = [traderActionId, eventKey, `rec_id:${rec.id}`];
+          const alreadyApplied =
+            hasSyncEventBeenApplied({
+              appliedSyncEventIds: matchingOpen.appliedSyncEventIds,
+              scaleAdjustments: matchingOpen.scaleAdjustments,
+              candidateKeys,
+              actionType: 'PARTIAL_EXIT',
+              eventTimestamp: rec.orderTime,
+            }) ||
+            isTraderActionAlreadyProcessed({
+              checkpoint,
+              candidateActionIds: candidateKeys,
+              symbol: rec.symbol,
+              actionType: 'PARTIAL_EXIT',
+              eventTimestamp: rec.orderTime,
+            });
 
           if (isAfterOurEntry && !alreadyApplied) {
             try {
@@ -1505,11 +1748,19 @@ export class PaperEngine {
                 acc.id,
                 {
                   sourceEventId: eventKey,
-                  appliedEventKeys: [eventKey, `rec_id:${rec.id}`],
+                  appliedEventKeys: candidateKeys,
                   eventKey: `${acc.id}_${matchingOpen.id}_${eventKey}`,
                 }
               );
               partialExitAppliedThisTick.add(matchingOpen.id);
+              this.recordTraderSyncAction(checkpoint, {
+                actionId: traderActionId,
+                candidateKeys,
+                symbol: rec.symbol,
+                actionType: 'PARTIAL_EXIT',
+                timestamp: rec.orderTime,
+                explicitVersion: params.syncVersion,
+              });
               if (traderPos) {
                 updated.lastSyncedTraderQty = traderPos.positionAmount;
                 updated.lastSyncedTraderUpdateTime = traderPos.lastUpdateTime || rec.orderTime;
@@ -1550,13 +1801,31 @@ export class PaperEngine {
             volumePercent: addPct,
             quantity: rec.executedQty,
           });
-          const alreadyApplied = hasSyncEventBeenApplied({
-            appliedSyncEventIds: matchingOpen.appliedSyncEventIds,
-            scaleAdjustments: matchingOpen.scaleAdjustments,
-            candidateKeys: [eventKey, `rec_id:${rec.id}`],
+          const traderActionId = buildTraderActionId({
+            traderId: params.traderId,
+            symbol: rec.symbol,
             actionType: 'SCALE_IN',
-            eventTimestamp: rec.orderTime,
+            rawId: rec.id,
+            timestamp: rec.orderTime,
+            volumePercent: addPct,
+            quantity: rec.executedQty,
           });
+          const candidateKeys = [traderActionId, eventKey, `rec_id:${rec.id}`];
+          const alreadyApplied =
+            hasSyncEventBeenApplied({
+              appliedSyncEventIds: matchingOpen.appliedSyncEventIds,
+              scaleAdjustments: matchingOpen.scaleAdjustments,
+              candidateKeys,
+              actionType: 'SCALE_IN',
+              eventTimestamp: rec.orderTime,
+            }) ||
+            isTraderActionAlreadyProcessed({
+              checkpoint,
+              candidateActionIds: candidateKeys,
+              symbol: rec.symbol,
+              actionType: 'SCALE_IN',
+              eventTimestamp: rec.orderTime,
+            });
 
           if (isAfterOurEntry && !alreadyApplied) {
             try {
@@ -1568,11 +1837,19 @@ export class PaperEngine {
                 acc.id,
                 {
                   sourceEventId: eventKey,
-                  appliedEventKeys: [eventKey, `rec_id:${rec.id}`],
+                  appliedEventKeys: candidateKeys,
                   eventKey: `${acc.id}_${matchingOpen.id}_${eventKey}`,
                 }
               );
               scaleInAppliedThisTick.add(matchingOpen.id);
+              this.recordTraderSyncAction(checkpoint, {
+                actionId: traderActionId,
+                candidateKeys,
+                symbol: rec.symbol,
+                actionType: 'SCALE_IN',
+                timestamp: rec.orderTime,
+                explicitVersion: params.syncVersion,
+              });
               if (traderPos) {
                 updated.lastSyncedTraderQty = traderPos.positionAmount;
                 updated.lastSyncedTraderUpdateTime = traderPos.lastUpdateTime || rec.orderTime;
@@ -1642,28 +1919,54 @@ export class PaperEngine {
               volumePercent: 100,
               quantity: 0,
             });
-            const closed = this.closePosition(userOpenPos.id, liveExecPrice, Date.now(), acc.id, {
-              sourceEventId: eventKey,
-              appliedEventKeys: [eventKey],
-              eventKey: `${acc.id}_${userOpenPos.id}_${eventKey}`,
-            });
-            logs.push({
-              id: `log_auto_exit_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-              timestamp: Date.now(),
+            const traderActionId = buildTraderActionId({
               traderId: params.traderId,
-              traderName: params.traderName,
-              source: params.source,
-              action: 'EXIT',
-              volumePercent: -100,
-              symbol: closed.symbol,
-              side: closed.side,
-              price: liveExecPrice,
-              quantity: closed.quantity,
-              leverage: closed.leverage,
-              accountId: acc.id,
-              accountName: acc.name,
-              messageAr: `[${acc.name}] إغلاق آلي كامل (-100%) لصفقة ${closed.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT بعد خروج المتداول ${params.traderName}`,
+              symbol: userOpenPos.symbol,
+              actionType: 'FULL_EXIT',
+              timestamp: userOpenPos.openTime,
+              volumePercent: 100,
+              quantity: 0,
             });
+            const candidateKeys = [traderActionId, eventKey];
+            const alreadyClosedByCheckpoint = isTraderActionAlreadyProcessed({
+              checkpoint,
+              candidateActionIds: candidateKeys,
+              symbol: userOpenPos.symbol,
+              actionType: 'FULL_EXIT',
+              eventTimestamp: Date.now(),
+            });
+            if (!alreadyClosedByCheckpoint) {
+              const closed = this.closePosition(userOpenPos.id, liveExecPrice, Date.now(), acc.id, {
+                sourceEventId: eventKey,
+                appliedEventKeys: candidateKeys,
+                eventKey: `${acc.id}_${userOpenPos.id}_${eventKey}`,
+              });
+              this.recordTraderSyncAction(checkpoint, {
+                actionId: traderActionId,
+                candidateKeys,
+                symbol: userOpenPos.symbol,
+                actionType: 'FULL_EXIT',
+                timestamp: Date.now(),
+                explicitVersion: params.syncVersion,
+              });
+              logs.push({
+                id: `log_auto_exit_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                timestamp: Date.now(),
+                traderId: params.traderId,
+                traderName: params.traderName,
+                source: params.source,
+                action: 'EXIT',
+                volumePercent: -100,
+                symbol: closed.symbol,
+                side: closed.side,
+                price: liveExecPrice,
+                quantity: closed.quantity,
+                leverage: closed.leverage,
+                accountId: acc.id,
+                accountName: acc.name,
+                messageAr: `[${acc.name}] إغلاق آلي كامل (-100%) لصفقة ${closed.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT بعد خروج المتداول ${params.traderName}`,
+              });
+            }
           } catch (e) {
             console.warn('Auto close on missing trader position failed:', e);
           }
@@ -1699,13 +2002,31 @@ export class PaperEngine {
                 quantity: adj.executedQty,
                 rawId: adj.id,
               });
-              const alreadyApplied = hasSyncEventBeenApplied({
-                appliedSyncEventIds: userOpenPos.appliedSyncEventIds,
-                scaleAdjustments: userOpenPos.scaleAdjustments,
-                candidateKeys: [adjKey, adj.id, `adj:${adj.id}`],
+              const traderActionId = buildTraderActionId({
+                traderId: params.traderId,
+                symbol: stillOpenByTrader.symbol,
                 actionType: 'PARTIAL_EXIT',
-                eventTimestamp: adj.timestamp,
+                rawId: adj.id,
+                timestamp: adj.timestamp,
+                volumePercent: withdrawPct,
+                quantity: adj.executedQty,
               });
+              const candidateKeys = [traderActionId, adjKey, adj.id, `adj:${adj.id}`];
+              const alreadyApplied =
+                hasSyncEventBeenApplied({
+                  appliedSyncEventIds: userOpenPos.appliedSyncEventIds,
+                  scaleAdjustments: userOpenPos.scaleAdjustments,
+                  candidateKeys,
+                  actionType: 'PARTIAL_EXIT',
+                  eventTimestamp: adj.timestamp,
+                }) ||
+                isTraderActionAlreadyProcessed({
+                  checkpoint,
+                  candidateActionIds: candidateKeys,
+                  symbol: stillOpenByTrader.symbol,
+                  actionType: 'PARTIAL_EXIT',
+                  eventTimestamp: adj.timestamp,
+                });
 
               if (isAfterOurEntry && !alreadyApplied) {
                 try {
@@ -1717,11 +2038,19 @@ export class PaperEngine {
                     acc.id,
                     {
                       sourceEventId: adjKey,
-                      appliedEventKeys: [adjKey, adj.id, `adj:${adj.id}`],
+                      appliedEventKeys: candidateKeys,
                       eventKey: `${acc.id}_${userOpenPos.id}_${adjKey}`,
                     }
                   );
                   partialExitAppliedThisTick.add(userOpenPos.id);
+                  this.recordTraderSyncAction(checkpoint, {
+                    actionId: traderActionId,
+                    candidateKeys,
+                    symbol: stillOpenByTrader.symbol,
+                    actionType: 'PARTIAL_EXIT',
+                    timestamp: adj.timestamp,
+                    explicitVersion: params.syncVersion,
+                  });
                   updated.lastSyncedTraderQty = stillOpenByTrader.positionAmount;
                   updated.lastSyncedTraderUpdateTime =
                     stillOpenByTrader.lastUpdateTime || adj.timestamp;
@@ -1763,39 +2092,64 @@ export class PaperEngine {
             currentQty: stillOpenByTrader.positionAmount,
           });
           if (dropPct >= 5) {
+            const eventTs = stillOpenByTrader.lastUpdateTime || Date.now();
             const qtyDropKey = buildStableTraderEventKey({
               kind: 'QTY_DROP',
               symbol: stillOpenByTrader.symbol,
               actionType: 'PARTIAL_EXIT',
-              timestamp: stillOpenByTrader.lastUpdateTime || Date.now(),
+              timestamp: eventTs,
               volumePercent: dropPct,
               quantity: stillOpenByTrader.positionAmount,
             });
-            const alreadyApplied = hasSyncEventBeenApplied({
-              appliedSyncEventIds: userOpenPos.appliedSyncEventIds,
-              scaleAdjustments: userOpenPos.scaleAdjustments,
-              candidateKeys: [qtyDropKey],
+            const traderActionId = buildTraderActionId({
+              traderId: params.traderId,
+              symbol: stillOpenByTrader.symbol,
               actionType: 'PARTIAL_EXIT',
-              eventTimestamp: stillOpenByTrader.lastUpdateTime,
+              timestamp: eventTs,
+              volumePercent: dropPct,
+              quantity: stillOpenByTrader.positionAmount,
             });
+            const candidateKeys = [traderActionId, qtyDropKey];
+            const alreadyApplied =
+              hasSyncEventBeenApplied({
+                appliedSyncEventIds: userOpenPos.appliedSyncEventIds,
+                scaleAdjustments: userOpenPos.scaleAdjustments,
+                candidateKeys,
+                actionType: 'PARTIAL_EXIT',
+                eventTimestamp: stillOpenByTrader.lastUpdateTime,
+              }) ||
+              isTraderActionAlreadyProcessed({
+                checkpoint,
+                candidateActionIds: candidateKeys,
+                symbol: stillOpenByTrader.symbol,
+                actionType: 'PARTIAL_EXIT',
+                eventTimestamp: stillOpenByTrader.lastUpdateTime,
+              });
             if (!alreadyApplied) {
               try {
                 const updated = this.partialExitPosition(
                   userOpenPos.id,
                   dropPct,
                   liveExecPrice,
-                  stillOpenByTrader.lastUpdateTime || Date.now(),
+                  eventTs,
                   acc.id,
                   {
                     sourceEventId: qtyDropKey,
-                    appliedEventKeys: [qtyDropKey],
+                    appliedEventKeys: candidateKeys,
                     eventKey: `${acc.id}_${userOpenPos.id}_${qtyDropKey}`,
                   }
                 );
                 partialExitAppliedThisTick.add(userOpenPos.id);
+                this.recordTraderSyncAction(checkpoint, {
+                  actionId: traderActionId,
+                  candidateKeys,
+                  symbol: stillOpenByTrader.symbol,
+                  actionType: 'PARTIAL_EXIT',
+                  timestamp: eventTs,
+                  explicitVersion: params.syncVersion,
+                });
                 updated.lastSyncedTraderQty = stillOpenByTrader.positionAmount;
-                updated.lastSyncedTraderUpdateTime =
-                  stillOpenByTrader.lastUpdateTime || Date.now();
+                updated.lastSyncedTraderUpdateTime = eventTs;
                 this.saveState();
                 logs.push({
                   id: `log_qty_drop_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -1836,10 +2190,12 @@ export class PaperEngine {
       }
     }
 
-    // Remove any pending choices for this trader in this account that are no longer open in `params.positions` or are already open in `acc.positions`
+    // Remove any pending choices for this trader in this account that are no longer open in `params.positions`,
+    // are already open in `acc.positions`, or when the user disabled the prompt option
     this.pendingReconnectChoices = this.pendingReconnectChoices.filter((c) => {
       if ((c.accountId || 'acc_default') !== acc.id) return true;
       if (c.traderId !== params.traderId && c.traderName !== params.traderName) return true;
+      if (!shouldCheckAdvantage) return false;
       const stillOpenInTrader = params.positions.some(
         (tp) => tp.symbol.toUpperCase() === c.symbol.toUpperCase() && tp.side === c.side
       );
@@ -1899,6 +2255,7 @@ export class PaperEngine {
           side: pos.side,
           traderEntryPrice,
           currentMarketPrice: liveMarketPrice,
+          promptOnUnfavorableLateEntry: shouldCheckAdvantage,
         });
 
         const choiceId = `choice_${acc.id}_${params.traderId}_${pos.symbol.toUpperCase()}_${pos.side}`;
@@ -1942,7 +2299,7 @@ export class PaperEngine {
           continue;
         }
 
-        // Price is in the user's favor (or equal) -> Execute immediately at the CURRENT LIVE MARKET PRICE!
+        // Price is in the user's favor OR user disabled late-entry confirmation -> Execute immediately at the CURRENT LIVE MARKET PRICE!
         this.pendingReconnectChoices = this.pendingReconnectChoices.filter((c) => c.id !== choiceId);
         this.savePendingChoices();
 
@@ -1966,6 +2323,25 @@ export class PaperEngine {
           opened.lastSyncedTraderQty = pos.positionAmount;
           opened.lastSyncedTraderUpdateTime = pos.lastUpdateTime || pos.entryTime;
           this.saveState();
+
+          const entryActionId = buildTraderActionId({
+            traderId: params.traderId,
+            symbol: pos.symbol,
+            actionType: 'ENTRY',
+            rawId: pos.id,
+            timestamp: pos.entryTime,
+            volumePercent: opened.currentScalePercent || 100,
+            quantity: pos.positionAmount,
+          });
+          this.recordTraderSyncAction(checkpoint, {
+            actionId: entryActionId,
+            candidateKeys: [entryActionId],
+            symbol: pos.symbol,
+            actionType: 'ENTRY',
+            timestamp: pos.entryTime || opened.openTime,
+            explicitVersion: params.syncVersion,
+          });
+
           const compDetails = formatLateEntryComparisonDetails({
             traderEntryPrice,
             traderEntryTime: pos.entryTime,
@@ -1998,8 +2374,7 @@ export class PaperEngine {
       }
     }
 
-    // 3. Only if trader had no open `Positions` AND it's a favorable immediate execution, check `Latest records` ENTRY signals
-    // (Never add closed/historical latestRecords into pendingReconnectChoices — only show open positions of the copied trader!)
+    // 3. Only if trader had no open `Positions` AND it's a favorable (or auto-enter) execution, check `Latest records` ENTRY signals
     if (params.positions.length === 0) {
       for (const rec of recentRecords) {
         if (rec.actionType === 'ENTRY' || rec.actionType === 'SCALE_IN') {
@@ -2018,6 +2393,24 @@ export class PaperEngine {
               (p.sourceTraderId === params.traderId || p.sourceTraderName === params.traderName)
           );
           if (!existingOpen && rec.avgPrice > 0) {
+            const entryActionId = buildTraderActionId({
+              traderId: params.traderId,
+              symbol: rec.symbol,
+              actionType: 'ENTRY',
+              rawId: rec.id,
+              timestamp: rec.orderTime,
+              volumePercent: rec.volumePercent || 100,
+              quantity: rec.executedQty,
+            });
+            if (
+              isTraderActionAlreadyProcessed({
+                checkpoint,
+                candidateActionIds: [entryActionId, `rec_id:${rec.id}`],
+              })
+            ) {
+              continue;
+            }
+
             const liveMarketPrice = resolveLiveMarketExecutionPrice(
               rec.symbol,
               liveMap,
@@ -2029,6 +2422,7 @@ export class PaperEngine {
               side: targetSide,
               traderEntryPrice,
               currentMarketPrice: liveMarketPrice,
+              promptOnUnfavorableLateEntry: shouldCheckAdvantage,
             });
 
             if (shouldCheckAdvantage && evalResult.decision === 'PROMPT_USER_CHOICE') {
@@ -2048,6 +2442,14 @@ export class PaperEngine {
                 sourceType: params.source,
                 traderEntryTime: rec.entryTime || rec.orderTime,
                 accountId: acc.id,
+              });
+              this.recordTraderSyncAction(checkpoint, {
+                actionId: entryActionId,
+                candidateKeys: [entryActionId, `rec_id:${rec.id}`],
+                symbol: rec.symbol,
+                actionType: 'ENTRY',
+                timestamp: rec.orderTime || opened.openTime,
+                explicitVersion: params.syncVersion,
               });
               const compDetails = formatLateEntryComparisonDetails({
                 traderEntryPrice,
@@ -2083,6 +2485,22 @@ export class PaperEngine {
       }
     }
 
+    // Record explicit caller batch actionId / syncVersion if supplied
+    if (
+      params.actionId ||
+      (params.syncVersion !== undefined && params.syncVersion > checkpoint.version)
+    ) {
+      if (params.actionId && !checkpoint.processedActionIds.includes(params.actionId)) {
+        checkpoint.processedActionIds = [...checkpoint.processedActionIds, params.actionId].slice(-200);
+        checkpoint.lastProcessedActionId = params.actionId;
+      }
+      if (params.syncVersion !== undefined && params.syncVersion > checkpoint.version) {
+        checkpoint.version = params.syncVersion;
+      }
+      checkpoint.updatedAt = Date.now();
+      this.saveTraderSyncCheckpoints();
+    }
+
     return logs;
   }
 
@@ -2113,22 +2531,26 @@ export class PaperEngine {
     mobileNotifications.checkAccountsDrawdown(summaries);
 
     // Strictly filter pendingReconnectChoices to only trades belonging to the copied trader(s) in this active account
+    // (or empty when the user unchecked promptOnUnfavorableLateEntry to auto-enter at market price)
     const storedCopiedTraders = this.loadStoredCopiedTraders();
     this.prunePendingChoicesForCopiedTraders(storedCopiedTraders);
-    const activeAccountPendingChoices = filterPendingChoicesForCopiedTradersOnPage(
-      this.pendingReconnectChoices,
-      storedCopiedTraders,
-      acc.id
-    ).filter(
-      (c) =>
-        !acc.positions.some(
-          (p) =>
-            p.status === 'OPEN' &&
-            p.symbol.toUpperCase() === c.symbol.toUpperCase() &&
-            p.side === c.side &&
-            (p.sourceTraderId === c.traderId || p.sourceTraderName === c.traderName)
-        )
-    );
+    const activeAccountPendingChoices =
+      acc.settings.promptOnUnfavorableLateEntry === false
+        ? []
+        : filterPendingChoicesForCopiedTradersOnPage(
+            this.pendingReconnectChoices,
+            storedCopiedTraders,
+            acc.id
+          ).filter(
+            (c) =>
+              !acc.positions.some(
+                (p) =>
+                  p.status === 'OPEN' &&
+                  p.symbol.toUpperCase() === c.symbol.toUpperCase() &&
+                  p.side === c.side &&
+                  (p.sourceTraderId === c.traderId || p.sourceTraderName === c.traderName)
+              )
+          );
 
     return {
       activeAccountId: acc.id,
