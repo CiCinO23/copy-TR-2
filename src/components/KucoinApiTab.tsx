@@ -11,7 +11,6 @@ import {
   Sliders,
   Lock,
   ShieldCheck,
-  Fingerprint,
   History,
   Search,
   Filter,
@@ -67,13 +66,16 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
   const [apiKey, setApiKey] = useState<string>(config.apiKey || '');
   const [apiSecret, setApiSecret] = useState<string>(config.apiSecret || '');
   const [passphrase, setPassphrase] = useState<string>(config.passphrase || '');
+  const [manualBalanceStr, setManualBalanceStr] = useState<string>(
+    config.manualRealBalanceUsdt != null ? String(config.manualRealBalanceUsdt) : ''
+  );
   const [apiType, setApiType] = useState<'REAL' | 'SANDBOX'>(config.apiType || 'REAL');
   const [marketType, setMarketType] = useState<'FUTURES' | 'SPOT'>(config.marketType || 'FUTURES');
   const [enableLiveExecution, setEnableLiveExecution] = useState<boolean>(
     config.enableLiveExecution
   );
 
-  const [showApiSecret, setShowApiSecret] = useState<boolean>(false);
+  const [showSecret, setShowSecret] = useState<boolean>(false);
   const [showPassphrase, setShowPassphrase] = useState<boolean>(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState<boolean>(false);
 
@@ -82,6 +84,9 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
     setApiKey(config.apiKey || '');
     setApiSecret(config.apiSecret || '');
     setPassphrase(config.passphrase || '');
+    setManualBalanceStr(
+      config.manualRealBalanceUsdt != null ? String(config.manualRealBalanceUsdt) : ''
+    );
     setApiType(config.apiType || 'REAL');
     setMarketType(config.marketType || 'FUTURES');
     setEnableLiveExecution(Boolean(config.enableLiveExecution));
@@ -89,6 +94,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
     config.apiKey,
     config.apiSecret,
     config.passphrase,
+    config.manualRealBalanceUsdt,
     config.apiType,
     config.marketType,
     config.enableLiveExecution,
@@ -130,16 +136,25 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
     setOrderSearchQuery('');
   };
 
-  const buildCurrentConfig = (overrideApiType?: 'REAL' | 'SANDBOX'): KuCoinConfig => ({
-    apiKey: apiKey.trim(),
-    apiSecret: apiSecret.trim(),
-    passphrase: passphrase.trim(),
-    apiType: overrideApiType || apiType,
-    marketType,
-    enableLiveExecution,
-    defaultLeverage: config.defaultLeverage || 5,
-    maxOrderUsdt: config.maxOrderUsdt || 50,
-  });
+  const buildCurrentConfig = (overrideApiType?: 'REAL' | 'SANDBOX'): KuCoinConfig => {
+    const parsedManual =
+      manualBalanceStr.trim() !== '' && !isNaN(parseFloat(manualBalanceStr))
+        ? Math.max(0, parseFloat(manualBalanceStr))
+        : null;
+    return {
+      apiKey: apiKey.trim(),
+      apiSecret: apiSecret.trim(),
+      passphrase: passphrase.trim(),
+      apiType: overrideApiType || apiType,
+      marketType,
+      enableLiveExecution,
+      defaultLeverage: config.defaultLeverage || 5,
+      maxOrderUsdt: config.maxOrderUsdt || 50,
+      manualRealBalanceUsdt: parsedManual,
+      manualFuturesBalanceUsdt: parsedManual,
+      manualSpotBalanceUsdt: parsedManual != null ? 0 : null,
+    };
+  };
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
@@ -161,7 +176,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
         <KuCoinSecurityLockScreen
           config={securityConfig}
           titleAr="قفل أمان تبويب التنفيذ المباشر (KuCoin)"
-          subtitleAr="تم تفعيل الحماية المتقدمة للمحفظة الحقيقية. يرجى إدخال رمز القفل الرقمي (PIN Code) أو التأكيد ببصمة الإصبع لفتح تبويب التنفيذ المباشر (KuCoin)."
+          subtitleAr="تم تفعيل الحماية المتقدمة للمحفظة الحقيقية. يرجى إدخال رمز القفل الرقمي (PIN Code) لفتح تبويب التنفيذ المباشر (KuCoin)."
           onUnlockSuccess={(method, credId) => {
             if (onUnlockSecurity) {
               onUnlockSecurity(method, credId);
@@ -175,7 +190,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
 
   return (
     <div className="space-y-4 animate-in fade-in duration-200">
-      {/* Real Wallet Security Vault Bar (شريط حماية المحفظة الحقيقية بـ PIN وبصمة الإصبع) */}
+      {/* Real Wallet Security Vault Bar (شريط حماية المحفظة الحقيقية برمز PIN) */}
       <div
         data-testid="kucoin_security_vault_bar"
         className="bg-[#0D2B24]/90 border border-[#01BC8D]/40 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
@@ -194,13 +209,11 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
                     : 'bg-[#232E3A] text-[#8A99AD]'
                 }`}
               >
-                {securityConfig.enabled
-                  ? `مفعّل (PIN ${securityConfig.biometricEnabled ? '+ بصمة الإصبع' : 'فقط'})`
-                  : 'غير مفعّل'}
+                {securityConfig.enabled ? 'مفعّل (رمز PIN)' : 'غير مفعّل'}
               </span>
             </div>
             <p className="text-[11px] text-[#8A99AD] mt-0.5">
-              حماية تبويب التنفيذ المباشر ومفاتيح محفظة KuCoin الحقيقية برمز قفل رقمي (PIN) أو بصمة الإصبع.
+              حماية تبويب التنفيذ المباشر ومفاتيح محفظة KuCoin الحقيقية برمز قفل رقمي (PIN Code).
             </p>
           </div>
         </div>
@@ -212,8 +225,8 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
             data-testid="kucoin_open_security_settings_btn"
             className="text-xs bg-[#12171D] hover:bg-[#1A222B] text-white border border-[#01BC8D]/40 px-3 py-1.5 rounded-xl flex items-center gap-1.5 font-semibold cursor-pointer transition-colors"
           >
-            <Fingerprint className="w-3.5 h-3.5 text-[#01BC8D]" />
-            <span>إعدادات رمز PIN والبصمة</span>
+            <Lock className="w-3.5 h-3.5 text-[#01BC8D]" />
+            <span>إعدادات رمز القفل (PIN)</span>
           </button>
 
           {securityConfig.enabled && onLockSecurityNow && (
@@ -452,42 +465,45 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
           </div>
           <input
             type="text"
+            dir="ltr"
             data-testid="kucoin_api_key_input"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
-            placeholder="مثال: 64b8f9a2c1... (انسخ API Key من كوكوين)"
-            className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3.5 py-2.5 text-xs text-white font-mono focus:outline-none"
+            placeholder="6aef1acbb2e9670001baeaa8"
+            className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3.5 py-2.5 text-xs text-white font-mono text-left focus:outline-none"
           />
         </div>
 
-        {/* 2. API Secret (Required by KuCoin for HMAC-SHA256 signature on real accounts) */}
+        {/* 2. API Secret Key */}
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label className="block text-xs font-semibold text-white">
-              2. المفتاح السري API Secret (Secret Key)
+              2. المفتاح السري (API Secret Key)
             </label>
-            <span className="text-[10px] text-[#8A99AD] font-mono">
-              لتوقيع طلبات الحساب الحقيقي (أو اتركه فارغاً للمحاكاة)
-            </span>
+            <span className="text-[10px] text-[#01BC8D] font-mono">KC-API-SECRET</span>
           </div>
           <div className="relative">
             <input
-              type={showApiSecret ? 'text' : 'password'}
+              type={showSecret ? 'text' : 'password'}
+              dir="ltr"
               data-testid="kucoin_api_secret_input"
               value={apiSecret}
               onChange={(e) => setApiSecret(e.target.value)}
-              placeholder="مثال: 4a8c92e1-7b3d-... (المفتاح السري من كوكوين)"
-              className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl pr-3.5 pl-10 py-2.5 text-xs text-white font-mono focus:outline-none"
+              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl pr-3.5 pl-10 py-2.5 text-xs text-white font-mono text-left focus:outline-none"
             />
             <button
               type="button"
-              onClick={() => setShowApiSecret(!showApiSecret)}
+              onClick={() => setShowSecret(!showSecret)}
               className="absolute left-3 top-2.5 text-[#8A99AD] hover:text-white cursor-pointer"
               title="إظهار / إخفاء المفتاح السري"
             >
-              {showApiSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
           </div>
+          <p className="text-[10px] text-[#8A99AD] mt-1">
+            المفتاح السري المكوّن من 36 حرفاً الذي يظهر عند إنشاء مفتاح الـ API في تطبيق KuCoin لتوقيع طلبات الرصيد والصفقات.
+          </p>
         </div>
 
         {/* 3. Passphrase (Mandatory for KuCoin) */}
@@ -501,11 +517,12 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
           <div className="relative">
             <input
               type={showPassphrase ? 'text' : 'password'}
+              dir="ltr"
               data-testid="kucoin_passphrase_input"
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
-              placeholder="الكلمة السرية التي قمت بتعيينها عند إنشاء المفتاح في كوكوين"
-              className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl pr-3.5 pl-10 py-2.5 text-xs text-white font-mono focus:outline-none"
+              placeholder="23101982@Yacine"
+              className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl pr-3.5 pl-10 py-2.5 text-xs text-white font-mono text-left focus:outline-none"
             />
             <button
               type="button"
@@ -601,6 +618,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
                 setApiKey('');
                 setApiSecret('');
                 setPassphrase('');
+                setManualBalanceStr('');
                 setApiType('REAL');
                 onClearKeys();
               }}

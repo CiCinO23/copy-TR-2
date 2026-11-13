@@ -385,6 +385,9 @@ export interface KuCoinConfig {
   enableLiveExecution: boolean; // false = simulation/dry-run, true = send real orders to KuCoin
   defaultLeverage: number;
   maxOrderUsdt: number;
+  manualRealBalanceUsdt?: number | null;
+  manualFuturesBalanceUsdt?: number | null;
+  manualSpotBalanceUsdt?: number | null;
 }
 
 export interface KuCoinBalance {
@@ -428,6 +431,9 @@ export interface KuCoinConnectionState {
   isTesting: boolean;
   isConnected: boolean;
   isAuthenticated: boolean;
+  isLiveBalanceVerified?: boolean;
+  isKeyAndPassphraseValidOnServer?: boolean;
+  needsSecretKeyForBalance?: boolean;
   serverTimeFormatted: string | null;
   latencyMs: number | null;
   usdtBalance: number;

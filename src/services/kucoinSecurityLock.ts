@@ -122,11 +122,8 @@ export function loadKuCoinSecurityConfig(): KuCoinSecurityLockConfig {
           ? parsed.enabled
           : DEFAULT_KUCOIN_SECURITY_CONFIG.enabled,
       pinCode: isValidPinFormat(cleanPin) ? cleanPin : DEFAULT_KUCOIN_SECURITY_CONFIG.pinCode,
-      biometricEnabled:
-        typeof parsed.biometricEnabled === 'boolean'
-          ? parsed.biometricEnabled
-          : DEFAULT_KUCOIN_SECURITY_CONFIG.biometricEnabled,
-      biometricCredentialId: parsed.biometricCredentialId || null,
+      biometricEnabled: false,
+      biometricCredentialId: null,
       lockScope:
         parsed.lockScope === 'SESSION_TIMEOUT' ? 'SESSION_TIMEOUT' : 'ALWAYS_ON_TAB_OPEN',
       sessionTimeoutMinutes:

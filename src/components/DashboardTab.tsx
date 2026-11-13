@@ -91,7 +91,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     } else {
       onRefreshKucoin();
     }
-    setRealBalanceFeedback('تم جلب وتحديث الرصيد الحقيقي من محفظة KuCoin بنجاح');
+    setRealBalanceFeedback('جاري جلب وتحديث الرصيد الحقيقي من محفظة KuCoin...');
     setTimeout(() => {
       setRealBalanceFeedback(null);
     }, 4500);
@@ -318,7 +318,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl px-3.5 py-2.5 text-xs text-[#01BC8D] font-bold flex items-center justify-between gap-2 animate-in fade-in duration-150"
           >
             <span>{realBalanceFeedback}</span>
-            <span className="font-mono text-white">
+            <span className="font-mono text-white shrink-0">
               {totalKucoinUsdt.toLocaleString('en-US', {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2,

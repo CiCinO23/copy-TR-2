@@ -41,6 +41,7 @@ import {
   saveKuCoinConfig,
   clearKuCoinConfig,
   testKuCoinConnectionAndFetchData,
+  getInitialKuCoinConnectionState,
   executeKuCoinOrder,
   loadKuCoinOrderHistory,
   clearKuCoinOrderHistory,
@@ -110,19 +111,9 @@ export const App: React.FC = () => {
 
   // KuCoin State (Used for Execution & Real/Simulated Orders)
   const [kucoinConfig, setKucoinConfig] = useState<KuCoinConfig>(loadKuCoinConfig);
-  const [kucoinConnectionState, setKucoinConnectionState] = useState<KuCoinConnectionState>({
-    isTesting: true,
-    isConnected: false,
-    isAuthenticated: false,
-    serverTimeFormatted: null,
-    latencyMs: null,
-    usdtBalance: 1000,
-    availableUsdt: 1000,
-    positions: [],
-    recentOrders: loadKuCoinOrderHistory(),
-    statusMessageAr: 'جاري الاتصال بـ KuCoin API للتحقق من منصة التنفيذ...',
-    errorMessageAr: null,
-  });
+  const [kucoinConnectionState, setKucoinConnectionState] = useState<KuCoinConnectionState>(() =>
+    getInitialKuCoinConnectionState(loadKuCoinConfig())
+  );
 
   // Unified copied traders list across Copy Trading and Whales
   const [allCopiedTraders, setAllCopiedTraders] = useState<ActiveCopiedTrader[]>(
@@ -885,8 +876,8 @@ export const App: React.FC = () => {
     isUnlocked: boolean;
     lastUnlockedAt: number | null;
   }>({
-    isUnlocked: false,
-    lastUnlockedAt: null,
+    isUnlocked: true,
+    lastUnlockedAt: Date.now(),
   });
 
   const isKucoinSecurityUnlocked = useMemo(() => {
@@ -984,20 +975,14 @@ export const App: React.FC = () => {
   );
 
   const handleOpenKucoinApi = useCallback(() => {
-    if (kucoinSecurityConfig.enabled && kucoinSecurityConfig.lockScope === 'ALWAYS_ON_TAB_OPEN') {
-      setKucoinUnlockState({ isUnlocked: false, lastUnlockedAt: null });
-    }
     setApiSubTab('KUCOIN');
     setSelectedTab('API');
-  }, [kucoinSecurityConfig.enabled, kucoinSecurityConfig.lockScope]);
+  }, []);
 
   const handleOpenBinanceApi = useCallback(() => {
-    if (kucoinSecurityConfig.enabled && kucoinSecurityConfig.lockScope === 'ALWAYS_ON_TAB_OPEN') {
-      setKucoinUnlockState({ isUnlocked: false, lastUnlockedAt: null });
-    }
     setApiSubTab('BINANCE');
     setSelectedTab('API');
-  }, [kucoinSecurityConfig.enabled, kucoinSecurityConfig.lockScope]);
+  }, []);
 
   const handleOpenNotificationsCenter = useCallback(() => {
     setShowNotificationsCenter(true);
@@ -1072,13 +1057,6 @@ export const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
-                    if (
-                      apiSubTab !== 'KUCOIN' &&
-                      kucoinSecurityConfig.enabled &&
-                      kucoinSecurityConfig.lockScope === 'ALWAYS_ON_TAB_OPEN'
-                    ) {
-                      setKucoinUnlockState({ isUnlocked: false, lastUnlockedAt: null });
-                    }
                     setApiSubTab('KUCOIN');
                   }}
                   data-testid="api_subtab_kucoin"
@@ -1105,12 +1083,6 @@ export const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
-                    if (
-                      kucoinSecurityConfig.enabled &&
-                      kucoinSecurityConfig.lockScope === 'ALWAYS_ON_TAB_OPEN'
-                    ) {
-                      setKucoinUnlockState({ isUnlocked: false, lastUnlockedAt: null });
-                    }
                     setApiSubTab('BINANCE');
                   }}
                   data-testid="api_subtab_binance"
@@ -1260,9 +1232,6 @@ export const App: React.FC = () => {
       <Navigation
         currentTab={selectedTab}
         onSelectTab={(tab) => {
-          if (kucoinSecurityConfig.enabled && kucoinSecurityConfig.lockScope === 'ALWAYS_ON_TAB_OPEN') {
-            setKucoinUnlockState({ isUnlocked: false, lastUnlockedAt: null });
-          }
           if (tab === 'API') {
             setSelectedTab('API');
           } else {

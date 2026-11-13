@@ -206,12 +206,12 @@ describe('KuCoin API Signing, Balance Aggregation & Error Translation', () => {
     assert.equal(combined.usdtBalance, 850.0);
   });
 
-  it('translates KuCoin API error codes into clear Arabic diagnostic messages', () => {
+  it('translates KuCoin API error codes into clear Arabic diagnostic messages without requiring API Secret', () => {
     const err400005 = translateKuCoinErrorAr('400005', 'Invalid KC-API-SIGN', false);
-    assert.ok(err400005.includes('API Secret'));
+    assert.ok(err400005.includes('API Passphrase'));
 
-    const errMissingSecret = translateKuCoinErrorAr('400005', 'Invalid KC-API-SIGN', true);
-    assert.ok(errMissingSecret.includes('يرجى إدخال المفتاح السري'));
+    const errMissingPassphrase = translateKuCoinErrorAr('400001', '', true);
+    assert.ok(errMissingPassphrase.includes('يرجى إدخال كلمة مرور المفتاح'));
 
     const err400003 = translateKuCoinErrorAr('400003', 'KC-API-KEY not exists', false);
     assert.ok(err400003.includes('API Key غير موجود'));

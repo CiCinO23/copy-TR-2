@@ -11,7 +11,6 @@ import {
   CheckCircle2,
   Play,
   Sparkles,
-  Fingerprint,
   KeyRound,
 } from 'lucide-react';
 import {
@@ -27,7 +26,6 @@ import {
   DEFAULT_KUCOIN_SECURITY_CONFIG,
   normalizePinDigits,
   validatePinChange,
-  performBiometricAuthentication,
 } from '../services/kucoinSecurityLock';
 
 interface SettingsTabProps {
@@ -130,12 +128,11 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     );
   };
 
-  // KuCoin PIN & Biometric Security State in Settings
+  // KuCoin PIN Security State in Settings
   const [currentPinInput, setCurrentPinInput] = useState<string>('');
   const [newPinInput, setNewPinInput] = useState<string>('');
   const [confirmPinInput, setConfirmPinInput] = useState<string>('');
   const [pinChangeError, setPinChangeError] = useState<string | null>(null);
-  const [isTestingFingerprint, setIsTestingFingerprint] = useState<boolean>(false);
 
   const handleUpdateSec = (partial: Partial<KuCoinSecurityLockConfig>, msgAr?: string) => {
     if (onUpdateSecurityConfig) {
@@ -167,25 +164,6 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     setCurrentPinInput('');
     setNewPinInput('');
     setConfirmPinInput('');
-  };
-
-  const handleTestOrEnrollFingerprint = async () => {
-    if (isTestingFingerprint) return;
-    setIsTestingFingerprint(true);
-    try {
-      const res = await performBiometricAuthentication(securityConfig.biometricCredentialId);
-      if (res.success) {
-        handleUpdateSec(
-          {
-            biometricEnabled: true,
-            biometricCredentialId: res.credentialId || securityConfig.biometricCredentialId,
-          },
-          `✅ ${res.messageAr}`
-        );
-      }
-    } finally {
-      setIsTestingFingerprint(false);
-    }
   };
 
   return (
@@ -511,7 +489,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         </div>
       </div>
 
-      {/* 3. KuCoin Real Wallet PIN Code & Fingerprint Security Card (قفل أمان تبويب التنفيذ المباشر KuCoin) */}
+      {/* 3. KuCoin Real Wallet PIN Code Security Card (قفل أمان تبويب التنفيذ المباشر KuCoin) */}
       <div
         data-testid="settings_kucoin_security_lock_card"
         className="bg-[#12171D] border border-[#01BC8D]/40 rounded-2xl p-4 sm:p-5 space-y-4"
@@ -525,11 +503,11 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                   : 'bg-[#1A222B] border-[#232E3A] text-[#8A99AD]'
               }`}
             >
-              <Fingerprint className="w-5 h-5" />
+              <Lock className="w-5 h-5" />
             </div>
             <div>
               <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2 flex-wrap">
-                <span>قفل أمان تبويب التنفيذ المباشر والمحفظة الحقيقية (KuCoin PIN & بصمة الإصبع)</span>
+                <span>قفل أمان تبويب التنفيذ المباشر والمحفظة الحقيقية (رمز PIN الرقمي)</span>
                 <span
                   className={`text-[10px] px-2 py-0.5 rounded-md font-bold ${
                     securityConfig.enabled
@@ -541,7 +519,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 </span>
               </h3>
               <p className="text-[11px] text-[#8A99AD] mt-0.5">
-                طلب رمز قفل رقمي (PIN Code) أو تأكيد ببصمة الإصبع عند فتح تبويب التنفيذ المباشر (KuCoin) أو التبديل للتداول الحقيقي
+                طلب رمز قفل رقمي (PIN Code) عند فتح تبويب التنفيذ المباشر (KuCoin) أو التبديل للتداول الحقيقي
               </p>
             </div>
           </div>
@@ -554,7 +532,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               handleUpdateSec(
                 { enabled: e.target.checked },
                 e.target.checked
-                  ? '✅ تم تفعيل قفل الأمان (PIN + بصمة الإصبع) لتبويب التنفيذ المباشر (KuCoin)'
+                  ? '✅ تم تفعيل رمز القفل الرقمي (PIN) لتبويب التنفيذ المباشر (KuCoin)'
                   : 'تم إيقاف قفل الأمان لتبويب التنفيذ المباشر (KuCoin)'
               )
             }
@@ -562,119 +540,70 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           />
         </div>
 
-        {/* Biometric Fingerprint & Lock Scope Options */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {/* Fingerprint Confirmation Toggle & Test */}
-          <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3.5 flex flex-col justify-between gap-3">
-            <label className="flex items-start justify-between gap-2.5 cursor-pointer">
-              <div className="flex items-start gap-2">
-                <Fingerprint className="w-4 h-4 text-[#01BC8D] shrink-0 mt-0.5" />
-                <div>
-                  <div className="text-xs font-bold text-white">
-                    تأكيد ببصمة الإصبع (Fingerprint / Biometric)
-                  </div>
-                  <div className="text-[10px] text-[#8A99AD] mt-0.5 leading-relaxed">
-                    السماح بفتح تبويب التنفيذ المباشر (KuCoin) والمحفظة الحقيقية عبر بصمة الإصبع بالإضافة إلى رمز PIN
-                  </div>
-                </div>
-              </div>
-              <input
-                type="checkbox"
-                data-testid="toggle_kucoin_biometric"
-                checked={securityConfig.biometricEnabled}
-                onChange={(e) =>
-                  handleUpdateSec(
-                    { biometricEnabled: e.target.checked },
-                    e.target.checked
-                      ? '✅ تم تفعيل خيار التأكيد ببصمة الإصبع لتبويب KuCoin'
-                      : 'تم إيقاف بصمة الإصبع والاكتفاء برمز PIN الرقمي'
-                  )
-                }
-                className="w-4 h-4 accent-[#01BC8D] cursor-pointer shrink-0 mt-0.5"
-              />
+        {/* Lock Scope & Protect Real Mode Switch */}
+        <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3.5 flex flex-col justify-between gap-2.5">
+          <div>
+            <label className="block text-[11px] font-bold text-white mb-1">
+              متى يُطلب رمز القفل الرقمي (PIN)؟
             </label>
+            <select
+              value={securityConfig.lockScope}
+              onChange={(e) =>
+                handleUpdateSec(
+                  {
+                    lockScope:
+                      e.target.value === 'SESSION_TIMEOUT'
+                        ? 'SESSION_TIMEOUT'
+                        : 'ALWAYS_ON_TAB_OPEN',
+                  },
+                  '✅ تم تحديث سياسة إعادة قفل تبويب التنفيذ المباشر (KuCoin)'
+                )
+              }
+              data-testid="select_kucoin_lock_scope"
+              className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none"
+            >
+              <option value="ALWAYS_ON_TAB_OPEN">
+                عند كل فتح لتبويب التنفيذ المباشر (KuCoin) — أمان أقصى
+              </option>
+              <option value="SESSION_TIMEOUT">
+                بعد انتهاء مهلة الجلسة ({securityConfig.sessionTimeoutMinutes} دقائق)
+              </option>
+            </select>
+          </div>
 
+          <label className="flex items-center justify-between gap-2 pt-1 cursor-pointer">
+            <span className="text-[11px] text-[#8A99AD]">
+              حماية زر التبديل إلى التداول الحقيقي (REAL) في نافذة التداول
+            </span>
+            <input
+              type="checkbox"
+              checked={securityConfig.protectRealTradingSwitch}
+              onChange={(e) =>
+                handleUpdateSec(
+                  { protectRealTradingSwitch: e.target.checked },
+                  e.target.checked
+                    ? '✅ تمت حماية زر التبديل إلى التداول الحقيقي برمز PIN الرقمي'
+                    : 'تم إلغاء قفل زر التبديل للتداول الحقيقي'
+                )
+              }
+              className="w-4 h-4 accent-[#01BC8D] cursor-pointer shrink-0"
+            />
+          </label>
+
+          {onLockSecurityNow && (
             <button
               type="button"
-              onClick={handleTestOrEnrollFingerprint}
-              disabled={isTestingFingerprint}
-              data-testid="settings_test_fingerprint_btn"
-              className="w-full bg-[#0D2B24] hover:bg-[#01BC8D]/25 text-[#01BC8D] border border-[#01BC8D]/50 font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+              onClick={() => {
+                onLockSecurityNow();
+                setStatusFeedback('🔒 تم قفل تبويب التنفيذ المباشر (KuCoin) والمحفظة الحقيقية فوراً.');
+              }}
+              data-testid="settings_lock_kucoin_now_btn"
+              className="w-full bg-[#1A222B] hover:bg-[#232E3A] text-white border border-[#232E3A] font-bold py-1.5 px-3 rounded-lg text-[11px] flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
             >
-              <Fingerprint className="w-3.5 h-3.5" />
-              <span>
-                {isTestingFingerprint
-                  ? 'جاري فحص مستشعر بصمة الإصبع...'
-                  : 'تسجيل / تجربة بصمة الإصبع الآن'}
-              </span>
+              <Lock className="w-3.5 h-3.5 text-[#01BC8D]" />
+              <span>قفل تبويب التنفيذ المباشر (KuCoin) الآن</span>
             </button>
-          </div>
-
-          {/* Lock Scope & Protect Real Mode Switch */}
-          <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3.5 flex flex-col justify-between gap-2.5">
-            <div>
-              <label className="block text-[11px] font-bold text-white mb-1">
-                متى يُطلب رمز PIN أو بصمة الإصبع؟
-              </label>
-              <select
-                value={securityConfig.lockScope}
-                onChange={(e) =>
-                  handleUpdateSec(
-                    {
-                      lockScope:
-                        e.target.value === 'SESSION_TIMEOUT'
-                          ? 'SESSION_TIMEOUT'
-                          : 'ALWAYS_ON_TAB_OPEN',
-                    },
-                    '✅ تم تحديث سياسة إعادة قفل تبويب التنفيذ المباشر (KuCoin)'
-                  )
-                }
-                data-testid="select_kucoin_lock_scope"
-                className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none"
-              >
-                <option value="ALWAYS_ON_TAB_OPEN">
-                  عند كل فتح لتبويب التنفيذ المباشر (KuCoin) — أمان أقصى
-                </option>
-                <option value="SESSION_TIMEOUT">
-                  بعد انتهاء مهلة الجلسة ({securityConfig.sessionTimeoutMinutes} دقائق)
-                </option>
-              </select>
-            </div>
-
-            <label className="flex items-center justify-between gap-2 pt-1 cursor-pointer">
-              <span className="text-[11px] text-[#8A99AD]">
-                حماية زر التبديل إلى التداول الحقيقي (REAL) في نافذة التداول
-              </span>
-              <input
-                type="checkbox"
-                checked={securityConfig.protectRealTradingSwitch}
-                onChange={(e) =>
-                  handleUpdateSec(
-                    { protectRealTradingSwitch: e.target.checked },
-                    e.target.checked
-                      ? '✅ تمت حماية زر التبديل إلى التداول الحقيقي برمز PIN والبصمة'
-                      : 'تم إلغاء قفل زر التبديل للتداول الحقيقي'
-                  )
-                }
-                className="w-4 h-4 accent-[#01BC8D] cursor-pointer shrink-0"
-              />
-            </label>
-
-            {onLockSecurityNow && (
-              <button
-                type="button"
-                onClick={() => {
-                  onLockSecurityNow();
-                  setStatusFeedback('🔒 تم قفل تبويب التنفيذ المباشر (KuCoin) والمحفظة الحقيقية فوراً.');
-                }}
-                data-testid="settings_lock_kucoin_now_btn"
-                className="w-full bg-[#1A222B] hover:bg-[#232E3A] text-white border border-[#232E3A] font-bold py-1.5 px-3 rounded-lg text-[11px] flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
-              >
-                <Lock className="w-3.5 h-3.5 text-[#01BC8D]" />
-                <span>قفل تبويب التنفيذ المباشر (KuCoin) الآن</span>
-              </button>
-            )}
-          </div>
+          )}
         </div>
 
         {/* Change PIN Code Form */}

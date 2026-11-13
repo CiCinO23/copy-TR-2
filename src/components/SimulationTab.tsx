@@ -1657,7 +1657,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             <KuCoinSecurityLockScreen
               config={securityConfig}
               titleAr="تأكيد الأمان للتبديل إلى التداول الحقيقي (KuCoin)"
-              subtitleAr="لحماية محفظتك الحقيقية في كوكوين، يرجى إدخال رمز القفل الرقمي (PIN Code) أو التأكيد ببصمة الإصبع لتفعيل وضع التنفيذ الحقيقي."
+              subtitleAr="لحماية محفظتك الحقيقية في كوكوين، يرجى إدخال رمز القفل الرقمي (PIN Code) لتفعيل وضع التنفيذ الحقيقي."
               onUnlockSuccess={(method, credId) => {
                 if (onUnlockSecurity) {
                   onUnlockSecurity(method, credId);
@@ -1681,7 +1681,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           <div className="bg-[#0D2B24]/80 border border-[#01BC8D]/40 rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-xs text-white font-semibold">
               <ShieldCheck className="w-4 h-4 text-[#01BC8D] shrink-0" />
-              <span>وضع التداول الحقيقي (KuCoin) مفتوح ومؤمّن بـ PIN / بصمة الإصبع</span>
+              <span>وضع التداول الحقيقي (KuCoin) مفتوح ومؤمّن برمز PIN</span>
             </div>
             <button
               type="button"
