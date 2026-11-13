@@ -235,15 +235,23 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
         ) : isReconnectChoice ? (
           <div className="grid grid-cols-3 gap-2 my-2.5 text-[11px]">
             <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
-              <span className="text-[#8A99AD] block text-[10px]">سعر دخول المتداول</span>
+              <span className="text-[#8A99AD] block text-[10px]">سعر دخول المتداول (مع الوقت)</span>
               <span className="font-mono font-bold text-white text-xs block mt-0.5">
                 ${formatPriceClean(notification.traderOriginalEntryPrice || notification.entryPrice)}
               </span>
+              {notification.traderOriginalEntryTime && (
+                <span className="font-mono text-[10px] text-[#8A99AD] block mt-0.5">
+                  {formatDateTimeAr(notification.traderOriginalEntryTime)}
+                </span>
+              )}
             </div>
             <div className="bg-[#0B0E11] border border-[#F59E0B]/50 rounded-xl p-2">
-              <span className="text-[#8A99AD] block text-[10px]">السعر الحالي للسوق</span>
+              <span className="text-[#8A99AD] block text-[10px]">سعر دخولي الحالي (مع الوقت)</span>
               <span className="font-mono font-extrabold text-[#FBBF24] text-xs block mt-0.5">
                 ${formatPriceClean(notification.price)}
+              </span>
+              <span className="font-mono text-[10px] text-[#8A99AD] block mt-0.5">
+                {formatDateTimeAr(notification.timestamp)}
               </span>
             </div>
             <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
@@ -279,15 +287,22 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
             <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-2">
               <span className="text-[#8A99AD] block text-[10px]">
                 {notification.actionType === 'OPEN_TRADE'
-                  ? 'سعر الدخول (الحالي)'
+                  ? 'سعر دخولي / المتداول (مع الوقت)'
                   : notification.actionType === 'SCALE_IN'
                   ? 'سعر التدعيم / المتوسط'
                   : 'سعر الدخول ⬅️ الخروج'}
               </span>
               <span className="font-mono font-bold text-white text-xs block mt-0.5">
-                {notification.actionType === 'OPEN_TRADE'
-                  ? `$${formatPriceClean(notification.entryPrice)}`
-                  : notification.actionType === 'SCALE_IN'
+                {notification.actionType === 'OPEN_TRADE' ? (
+                  <>
+                    <span>دخولي: ${formatPriceClean(notification.entryPrice)} ({formatDateTimeAr(notification.userEntryTime || notification.timestamp)})</span>
+                    {notification.traderOriginalEntryPrice && (
+                      <span className="block text-[10px] text-[#01BC8D] mt-0.5">
+                        المتداول: ${formatPriceClean(notification.traderOriginalEntryPrice)} ({formatDateTimeAr(notification.traderOriginalEntryTime || notification.timestamp)})
+                      </span>
+                    )}
+                  </>
+                ) : notification.actionType === 'SCALE_IN'
                   ? `$${formatPriceClean(notification.price)} / $${formatPriceClean(notification.entryPrice)}`
                   : `$${formatPriceClean(notification.entryPrice)} ⬅️ $${formatPriceClean(
                       notification.exitPrice || notification.price

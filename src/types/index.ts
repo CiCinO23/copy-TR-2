@@ -97,6 +97,8 @@ export interface PositionScaleAdjustment {
   remainingPercentAfter: number; // النسبة المتبقية من الصفقة بعد الحركة
   executedQty: number;
   price: number;
+  traderEntryPrice?: number; // سعر دخول المتداول الأصلي عند الدخول المتأخر
+  traderEntryTime?: number; // وقت دخول المتداول الأصلي عند الدخول المتأخر
   realizedPnlDelta?: number;
   marginDeltaUsdt?: number; // قيمة الهامش المضاف أو المسحوب بالدولار (USDT)
 }
@@ -344,6 +346,9 @@ export interface CopiedSyncLog {
   symbol: string;
   side: 'LONG' | 'SHORT';
   price: number;
+  traderEntryPrice?: number;
+  traderEntryTime?: number;
+  userEntryTime?: number;
   quantity: number;
   leverage: number;
   messageAr: string;
@@ -493,6 +498,8 @@ export interface MobileTradeNotification {
   drawdownLossUsdt?: number; // مقدار التراجع بالدولار من رأس المال الأولي
   pendingTradeChoiceId?: string; // معرف خيار تنفيذ الصفقة السابقة بعد الانقطاع
   traderOriginalEntryPrice?: number; // سعر دخول المتداول الأصلي للمقارنة مع السعر الحالي
+  traderOriginalEntryTime?: number; // وقت دخول المتداول الأصلي
+  userEntryTime?: number; // وقت دخول المستخدم الفعلي في الصفقة
   stopLossPrice?: number; // سعر وقف الخسارة عند تأمين الصفقة
   summaryTextAr: string;
 }

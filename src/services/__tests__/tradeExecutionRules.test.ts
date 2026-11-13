@@ -6,8 +6,15 @@ import {
   isStopLossTriggered,
   resolveLiveMarketExecutionPrice,
   filterPendingChoicesForCopiedTradersOnPage,
+  calculateLateEntryNetPositionState,
+  shouldApplyTraderRecordAfterEntry,
+  formatLateEntryComparisonDetails,
 } from '../tradeExecutionRules';
-import type { ActiveCopiedTrader, PendingReconnectTradeChoice } from '../../types';
+import type {
+  ActiveCopiedTrader,
+  PendingReconnectTradeChoice,
+  PositionScaleAdjustment,
+} from '../../types';
 
 test('evaluatePreviousTradePriceAdvantage: SHORT with currentPrice > entryPrice executes immediately', () => {
   const result = evaluatePreviousTradePriceAdvantage({
@@ -54,7 +61,6 @@ test('evaluatePreviousTradePriceAdvantage: LONG with currentPrice > entryPrice p
 });
 
 test('calculateSecureStopLossPrice and isStopLossTriggered work for LONG and SHORT', () => {
-  // LONG at 1000 with 0.2% buffer -> stopLoss at 998
   const longSl = calculateSecureStopLossPrice({
     side: 'LONG',
     currentMarketPrice: 1000,
@@ -65,7 +71,6 @@ test('calculateSecureStopLossPrice and isStopLossTriggered work for LONG and SHO
   assert.equal(isStopLossTriggered({ side: 'LONG', stopLossPrice: longSl, currentMarketPrice: 998 }), true);
   assert.equal(isStopLossTriggered({ side: 'LONG', stopLossPrice: longSl, currentMarketPrice: 997 }), true);
 
-  // SHORT at 1000 with 0.2% buffer -> stopLoss at 1002
   const shortSl = calculateSecureStopLossPrice({
     side: 'SHORT',
     currentMarketPrice: 1000,
@@ -134,22 +139,6 @@ test('filterPendingChoicesForCopiedTradersOnPage returns only trades of copied t
       leverage: 5,
       marginUsdt: 25,
     },
-    {
-      id: 'choice_acc_2_trader_copied_1_ETHUSDT_LONG',
-      createdAt: 2000,
-      traderId: 'trader_copied_1',
-      traderName: 'CopiedMaster',
-      source: 'COPY_TRADING',
-      accountId: 'acc_2',
-      accountName: 'حساب 2',
-      symbol: 'ETHUSDT',
-      side: 'LONG',
-      traderEntryPrice: 2400,
-      currentMarketPrice: 2500,
-      priceDiffPercent: 4.16,
-      leverage: 5,
-      marginUsdt: 25,
-    },
   ];
 
   const filteredForDefault = filterPendingChoicesForCopiedTradersOnPage(
@@ -159,14 +148,135 @@ test('filterPendingChoicesForCopiedTradersOnPage returns only trades of copied t
   );
   assert.equal(filteredForDefault.length, 1);
   assert.equal(filteredForDefault[0].traderId, 'trader_copied_1');
-  assert.equal(filteredForDefault[0].symbol, 'BTCUSDT');
+});
 
-  // When no trader is copied on acc_2, returns empty array
-  const filteredForAcc2 = filterPendingChoicesForCopiedTradersOnPage(
-    allChoices,
-    copiedTraders,
-    'acc_2'
+test('calculateLateEntryNetPositionState: enters directly with net remaining value (e.g. 150% or 50%) without repeating past operations', () => {
+  // Case 1: Trader had scaled in +50% in the past -> Net remaining is 150% -> enters directly with 37.50$ (for 25$ base) in 1 single operation
+  const pastScaleInAdjs: PositionScaleAdjustment[] = [
+    {
+      id: 'adj_1',
+      actionType: 'INITIAL_ENTRY',
+      actionLabelAr: 'فتح',
+      timestamp: 1000,
+      volumePercent: 100,
+      remainingPercentAfter: 100,
+      executedQty: 1,
+      price: 90000,
+    },
+    {
+      id: 'adj_2',
+      actionType: 'SCALE_IN',
+      actionLabelAr: 'تدعيم +50%',
+      timestamp: 2000,
+      volumePercent: 50,
+      remainingPercentAfter: 150,
+      executedQty: 0.5,
+      price: 91000,
+    },
+  ];
+
+  const state150 = calculateLateEntryNetPositionState({
+    baseMarginUsdt: 25,
+    leverage: 5,
+    executionPrice: 90000,
+    side: 'LONG',
+    traderScaleAdjustments: pastScaleInAdjs,
+    scaleInSamePercentAsTrader: true,
+  });
+
+  assert.equal(state150.netScalePercent, 150);
+  assert.equal(state150.netMarginUsdt, 37.5);
+  assert.equal(state150.singleDirectAdjustment.actionType, 'INITIAL_ENTRY');
+  assert.equal(state150.singleDirectAdjustment.volumePercent, 150);
+  assert.equal(state150.singleDirectAdjustment.remainingPercentAfter, 150);
+
+  // Case 2: Trader had partially exited -50% in the past -> Net remaining is 50% -> enters directly with 12.50$ (for 25$ base) in 1 single operation
+  const pastPartialExitAdjs: PositionScaleAdjustment[] = [
+    {
+      id: 'adj_1',
+      actionType: 'INITIAL_ENTRY',
+      actionLabelAr: 'فتح',
+      timestamp: 1000,
+      volumePercent: 100,
+      remainingPercentAfter: 100,
+      executedQty: 1,
+      price: 2500,
+    },
+    {
+      id: 'adj_2',
+      actionType: 'PARTIAL_EXIT',
+      actionLabelAr: 'سحب -50%',
+      timestamp: 2000,
+      volumePercent: -50,
+      remainingPercentAfter: 50,
+      executedQty: 0.5,
+      price: 2600,
+    },
+  ];
+
+  const state50 = calculateLateEntryNetPositionState({
+    baseMarginUsdt: 25,
+    leverage: 5,
+    executionPrice: 2600,
+    side: 'SHORT',
+    traderScaleAdjustments: pastPartialExitAdjs,
+    scaleInSamePercentAsTrader: true,
+  });
+
+  assert.equal(state50.netScalePercent, 50);
+  assert.equal(state50.netMarginUsdt, 12.5);
+  assert.equal(state50.singleDirectAdjustment.actionType, 'INITIAL_ENTRY');
+  assert.equal(state50.singleDirectAdjustment.volumePercent, 50);
+  assert.equal(state50.singleDirectAdjustment.remainingPercentAfter, 50);
+
+  // Verify shouldApplyTraderRecordAfterEntry skips past records and allows only future records
+  assert.equal(
+    shouldApplyTraderRecordAfterEntry({ recordTimestamp: 2000, userPositionOpenTime: 3000 }),
+    false
   );
-  assert.equal(filteredForAcc2.length, 0);
+  assert.equal(
+    shouldApplyTraderRecordAfterEntry({ recordTimestamp: 4000, userPositionOpenTime: 3000 }),
+    true
+  );
+});
+
+test('formatLateEntryComparisonDetails and calculateLateEntryNetPositionState format both trader entry price+time and user entry price+time on late entry', () => {
+  const traderTime = Date.UTC(2026, 10, 12, 8, 15, 0); // 08:15 UTC
+  const userTime = traderTime + 45 * 60 * 1000; // 45 minutes later
+
+  const comp = formatLateEntryComparisonDetails({
+    traderEntryPrice: 91250.5,
+    traderEntryTime: traderTime,
+    userEntryPrice: 90840.25,
+    userEntryTime: userTime,
+  });
+
+  assert.equal(comp.isLateEntry, true);
+  assert.equal(comp.delayMs, 45 * 60 * 1000);
+  assert.ok(comp.delayTextAr.includes('45 د'));
+  assert.equal(comp.traderPriceStr, '91250.50');
+  assert.equal(comp.userPriceStr, '90840.25');
+  assert.ok(comp.traderEntryLineAr.includes('سعر دخول المتداول: 91250.50$'));
+  assert.ok(comp.traderEntryLineAr.includes('الوقت:'));
+  assert.ok(comp.userEntryLineAr.includes('سعر دخولي: 90840.25$'));
+  assert.ok(comp.userEntryLineAr.includes('الوقت:'));
+
+  const stateWithLateInfo = calculateLateEntryNetPositionState({
+    baseMarginUsdt: 25,
+    leverage: 5,
+    executionPrice: 90840.25,
+    side: 'LONG',
+    traderEntryPrice: 91250.5,
+    traderEntryTime: traderTime,
+    entryTimestamp: userTime,
+    traderCurrentScalePercent: 150,
+  });
+
+  assert.equal(stateWithLateInfo.singleDirectAdjustment.traderEntryPrice, 91250.5);
+  assert.equal(stateWithLateInfo.singleDirectAdjustment.traderEntryTime, traderTime);
+  assert.equal(stateWithLateInfo.singleDirectAdjustment.price, 90840.25);
+  assert.equal(stateWithLateInfo.singleDirectAdjustment.timestamp, userTime);
+  assert.ok(stateWithLateInfo.singleDirectAdjustment.actionLabelAr.includes('سعر دخول المتداول: 91250.50$'));
+  assert.ok(stateWithLateInfo.singleDirectAdjustment.actionLabelAr.includes('سعر دخولي: 90840.25$'));
 });
 

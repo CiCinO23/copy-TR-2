@@ -775,9 +775,39 @@ class MobileNotificationService {
 
     if (actionType === 'OPEN_TRADE') {
       actionTitleAr = '🟢 فتح صفقة جديدة';
-      volPct = 100;
+      volPct = position.currentScalePercent || 100;
       remainingPct = position.currentScalePercent || 100;
-      summaryTextAr = `تم فتح صفقة ${position.side === 'LONG' ? 'شراء Long' : 'بيع Short'} على ${position.symbol} بقيمة ${position.marginUsdt.toFixed(2)}$ (${position.leverage}x) بسعر دخول ${this.formatPrice(position.entryPrice)}$`;
+      const userTimeStr = new Date(position.openTime || Date.now())
+        .toLocaleString('ar-EG-u-nu-latn', {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+        })
+        .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+      const traderTimeStr = position.traderEntryTime
+        ? new Date(position.traderEntryTime)
+            .toLocaleString('ar-EG-u-nu-latn', {
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+              hour12: false,
+            })
+            .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+        : userTimeStr;
+      const isCopiedOrLate =
+        (position.sourceType && position.sourceType !== 'MANUAL') ||
+        (position.traderEntryTime && Math.abs((position.openTime || 0) - position.traderEntryTime) > 1000) ||
+        (position.traderEntryPrice && Math.abs(position.traderEntryPrice - position.entryPrice) > 0.0001);
+
+      if (isCopiedOrLate) {
+        const tPrice = position.traderEntryPrice || position.entryPrice;
+        summaryTextAr = `تم فتح صفقة ${position.side === 'LONG' ? 'شراء Long' : 'بيع Short'} على ${position.symbol} بقيمة ${position.marginUsdt.toFixed(2)}$ (${position.leverage}x) • سعر دخول المتداول: ${this.formatPrice(tPrice)}$ (الوقت: ${traderTimeStr}) • سعر دخولي: ${this.formatPrice(position.entryPrice)}$ (الوقت: ${userTimeStr})`;
+      } else {
+        summaryTextAr = `تم فتح صفقة ${position.side === 'LONG' ? 'شراء Long' : 'بيع Short'} على ${position.symbol} بقيمة ${position.marginUsdt.toFixed(2)}$ (${position.leverage}x) • سعر دخولي: ${this.formatPrice(position.entryPrice)}$ (الوقت: ${userTimeStr})`;
+      }
     } else if (actionType === 'SCALE_IN') {
       const addedUsdt = Math.abs(marginDeltaUsdt || 0);
       volPct = Math.abs(volumePercent || 25);
@@ -819,6 +849,9 @@ class MobileNotificationService {
       sourceType: position.sourceType || 'MANUAL',
       price: executionPrice,
       entryPrice: position.entryPrice,
+      traderOriginalEntryPrice: position.traderEntryPrice || position.entryPrice,
+      traderOriginalEntryTime: position.traderEntryTime || position.openTime,
+      userEntryTime: position.openTime,
       exitPrice:
         actionType === 'PARTIAL_EXIT' || actionType === 'FULL_EXIT'
           ? executionPrice

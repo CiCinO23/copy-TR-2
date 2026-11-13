@@ -54,7 +54,10 @@ import {
 } from '../types';
 import { getCachedPrice, fetchSymbolPrice } from '../services/binanceApi';
 import { mobileNotifications } from '../services/mobileNotifications';
-import { filterPendingChoicesForCopiedTradersOnPage } from '../services/tradeExecutionRules';
+import {
+  filterPendingChoicesForCopiedTradersOnPage,
+  formatLateEntryComparisonDetails,
+} from '../services/tradeExecutionRules';
 import { KuCoinSecurityLockScreen } from './KuCoinSecurityLockGuard';
 import { DEFAULT_KUCOIN_SECURITY_CONFIG } from '../services/kucoinSecurityLock';
 import { Lock } from 'lucide-react';
@@ -3319,19 +3322,49 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                               <strong className="text-[#01BC8D]">{choice.accountName}</strong>
                             </span>
                           </div>
-                          <div className="text-[11px] text-[#8A99AD]">
-                            سعر دخول المتداول:{' '}
-                            <strong className="font-mono text-white">
-                              ${choice.traderEntryPrice.toFixed(4)}
-                            </strong>{' '}
-                            • السعر الحالي للسوق:{' '}
-                            <strong className="font-mono text-[#FBBF24]">
-                              ${liveNow.toFixed(4)}
-                            </strong>{' '}
-                            • الحجم المخصص:{' '}
-                            <strong className="font-mono text-[#01BC8D]">
-                              ${choice.marginUsdt.toFixed(2)} USDT
-                            </strong>
+                          <div className="text-[11px] text-[#8A99AD] space-y-1">
+                            <div className="flex flex-wrap items-center gap-2 bg-[#12171D] border border-[#232E3A] rounded-lg px-2.5 py-1.5">
+                              <span>
+                                سعر دخول المتداول:{' '}
+                                <strong className="font-mono text-white">
+                                  ${choice.traderEntryPrice.toFixed(4)}
+                                </strong>{' '}
+                                <span className="text-[10px] text-[#01BC8D] font-mono">
+                                  (الوقت:{' '}
+                                  {formatLateEntryComparisonDetails({
+                                    traderEntryPrice: choice.traderEntryPrice,
+                                    traderEntryTime: choice.traderEntryTime || choice.createdAt,
+                                    userEntryPrice: liveNow,
+                                    userEntryTime: Date.now(),
+                                  }).traderTimeStr}
+                                  )
+                                </span>
+                              </span>
+                              <span>•</span>
+                              <span>
+                                سعر دخولي (الحالي):{' '}
+                                <strong className="font-mono text-[#FBBF24]">
+                                  ${liveNow.toFixed(4)}
+                                </strong>{' '}
+                                <span className="text-[10px] text-[#FBBF24] font-mono">
+                                  (الوقت الآن:{' '}
+                                  {formatLateEntryComparisonDetails({
+                                    traderEntryPrice: choice.traderEntryPrice,
+                                    traderEntryTime: choice.traderEntryTime || choice.createdAt,
+                                    userEntryPrice: liveNow,
+                                    userEntryTime: Date.now(),
+                                  }).userTimeStr}
+                                  )
+                                </span>
+                              </span>
+                              <span>•</span>
+                              <span>
+                                الحجم المخصص:{' '}
+                                <strong className="font-mono text-[#01BC8D]">
+                                  ${choice.marginUsdt.toFixed(2)} USDT
+                                </strong>
+                              </span>
+                            </div>
                           </div>
                           <div className="text-[10px] text-[#FBBF24]">
                             {isShort
@@ -3428,26 +3461,12 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
               const isProfit = netPnl >= 0;
               const marginUsed = p.marginUsdt || (p.quantity * p.entryPrice) / p.leverage;
               const currentScale = p.currentScalePercent ?? 100;
-              const entryTimeStr = new Date(p.openTime)
-                .toLocaleString('ar-EG-u-nu-latn', {
-                  month: 'short',
-                  day: 'numeric',
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  hour12: false,
-                })
-                .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
-              const traderEntryStr = p.traderEntryTime
-                ? new Date(p.traderEntryTime)
-                    .toLocaleString('ar-EG-u-nu-latn', {
-                      month: 'short',
-                      day: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      hour12: false,
-                    })
-                    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
-                : null;
+              const lateEntryComp = formatLateEntryComparisonDetails({
+                traderEntryPrice: p.traderEntryPrice || p.entryPrice,
+                traderEntryTime: p.traderEntryTime || p.openTime,
+                userEntryPrice: p.entryPrice,
+                userEntryTime: p.openTime,
+              });
 
               return (
                 <div
@@ -3465,7 +3484,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                       >
                         {p.side} {p.leverage}x
                       </span>
-                      <div className="space-y-1">
+                      <div className="space-y-1.5">
                         <div className="flex items-center gap-2 flex-wrap">
                           <CoinIcon symbol={p.symbol} size="sm" />
                           <span className="font-bold text-white font-mono text-sm">{p.symbol}</span>
@@ -3489,6 +3508,14 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                           >
                             الحجم الحالي: {currentScale}%
                           </span>
+                          {lateEntryComp.isLateEntry && (
+                            <span
+                              data-testid={`late_entry_delay_badge_${p.id}`}
+                              className="text-[10px] px-2 py-0.5 rounded font-bold bg-[#3B2606] text-[#FBBF24] border border-[#F59E0B]/50"
+                            >
+                              ⏱️ {lateEntryComp.delayTextAr}
+                            </span>
+                          )}
                           {p.stopLossPrice && p.stopLossPrice > 0 && (
                             <span
                               data-testid={`secured_sl_badge_${p.id}`}
@@ -3526,26 +3553,45 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                               (الأصلية: {p.initialMarginUsdt.toFixed(2)}$)
                             </span>
                           )}{' '}
-                          • دخولك (بالسعر الحالي):{' '}
-                          <span className="font-mono text-white">{p.entryPrice.toFixed(4)}</span>
-                          {p.traderEntryPrice && Math.abs(p.traderEntryPrice - p.entryPrice) > 0.0001 && (
-                            <span className="text-[10px] text-[#8A99AD] font-mono mr-1">
-                              (دخول المتداول: {p.traderEntryPrice.toFixed(4)})
-                            </span>
-                          )}{' '}
-                          • حالي:{' '}
-                          <span className="font-mono text-[#01BC8D]">{livePrice.toFixed(4)}</span> • العمولة:{' '}
+                          • السعر الحالي للسوق:{' '}
+                          <span className="font-mono text-[#01BC8D] font-bold">{livePrice.toFixed(4)}$</span> • العمولة:{' '}
                           <span className="font-mono text-[#F6465D]">{(p.commissionUsdt || 0).toFixed(3)}$</span>
                         </div>
-                        <div className="flex flex-wrap items-center gap-2 text-[10px] pt-0.5">
-                          <span className="bg-[#0B0E11] border border-[#232E3A] px-2 py-0.5 rounded text-[#8A99AD]">
-                            وقت فتح الصفقة: <strong className="text-[#01BC8D] font-mono">{entryTimeStr}</strong>
-                          </span>
-                          {traderEntryStr && (
-                            <span className="bg-[#0B0E11] border border-[#232E3A] px-2 py-0.5 rounded text-[#8A99AD]">
-                              وقت دخول المتداول الأصلي: <strong className="text-[#01BC8D] font-mono">{traderEntryStr}</strong>
+
+                        {/* مقارنة واضحة بين سعر دخول المتداول مع الوقت وسعر دخولي مع الوقت */}
+                        <div
+                          data-testid={`late_entry_comparison_box_${p.id}`}
+                          className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5"
+                        >
+                          <div
+                            data-testid={`trader_entry_price_time_${p.id}`}
+                            className="bg-[#0B0E11] border border-[#232E3A] rounded-lg px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                          >
+                            <span className="text-[#8A99AD]">
+                              سعر دخول المتداول:{' '}
+                              <strong className="text-[#01BC8D] font-mono">
+                                ${lateEntryComp.traderPriceStr}
+                              </strong>
                             </span>
-                          )}
+                            <span className="text-[10px] text-[#8A99AD] bg-[#12171D] px-1.5 py-0.5 rounded border border-[#232E3A]">
+                              الوقت: <strong className="text-white font-mono">{lateEntryComp.traderTimeStr}</strong>
+                            </span>
+                          </div>
+
+                          <div
+                            data-testid={`user_entry_price_time_${p.id}`}
+                            className="bg-[#0B0E11] border border-[#01BC8D]/40 rounded-lg px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                          >
+                            <span className="text-[#8A99AD]">
+                              سعر دخولي:{' '}
+                              <strong className="text-white font-mono">
+                                ${lateEntryComp.userPriceStr}
+                              </strong>
+                            </span>
+                            <span className="text-[10px] text-[#8A99AD] bg-[#12171D] px-1.5 py-0.5 rounded border border-[#01BC8D]/30">
+                              الوقت: <strong className="text-[#01BC8D] font-mono">{lateEntryComp.userTimeStr}</strong>
+                            </span>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -4422,7 +4468,20 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                         {margin.toFixed(2)} $
                       </td>
                       <td className="py-3 px-2.5 font-mono text-[11px] text-[#8A99AD] whitespace-nowrap">
-                        {openTimeStr}
+                        <div>دخولي: <span className="text-white">{openTimeStr}</span></div>
+                        {cp.traderEntryTime && (
+                          <div className="text-[10px] text-[#01BC8D]">
+                            المتداول:{' '}
+                            {
+                              formatLateEntryComparisonDetails({
+                                traderEntryPrice: cp.traderEntryPrice || cp.entryPrice,
+                                traderEntryTime: cp.traderEntryTime,
+                                userEntryPrice: cp.entryPrice,
+                                userEntryTime: cp.openTime,
+                              }).traderTimeStr
+                            }
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-2.5 font-mono text-[11px] text-[#8A99AD] whitespace-nowrap">
                         {closeTimeStr}
@@ -4441,7 +4500,12 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                         </div>
                       </td>
                       <td className="py-3 px-2.5 font-mono text-white tabular-nums whitespace-nowrap">
-                        {cp.entryPrice.toFixed(cp.entryPrice > 50 ? 2 : 4)}
+                        <div>دخولي: ${cp.entryPrice.toFixed(cp.entryPrice > 50 ? 2 : 4)}</div>
+                        {cp.traderEntryPrice && (
+                          <div className="text-[10px] text-[#01BC8D]">
+                            المتداول: ${cp.traderEntryPrice.toFixed(cp.traderEntryPrice > 50 ? 2 : 4)}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-2.5 font-mono text-white tabular-nums whitespace-nowrap">
                         {(cp.exitPrice || 0).toFixed((cp.exitPrice || 0) > 50 ? 2 : 4)}

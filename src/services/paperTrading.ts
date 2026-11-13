@@ -16,6 +16,9 @@ import {
   isStopLossTriggered,
   resolveLiveMarketExecutionPrice,
   filterPendingChoicesForCopiedTradersOnPage,
+  calculateLateEntryNetPositionState,
+  shouldApplyTraderRecordAfterEntry,
+  formatLateEntryComparisonDetails,
 } from './tradeExecutionRules';
 
 const PAPER_STORAGE_KEY = 'whale_copy_paper_state_v3';
@@ -486,15 +489,30 @@ export class PaperEngine {
           pos.scaleAdjustments = pos.scaleAdjustments.map((adj) => {
             const p = adj.price > 0 ? adj.price : pos.entryPrice;
             if (adj.actionType === 'INITIAL_ENTRY') {
-              runningMargin = initialMargin;
-              runningScalePct = 100;
+              const initScalePct =
+                adj.volumePercent && adj.volumePercent > 0 ? adj.volumePercent : 100;
+              runningMargin = Number((initialMargin * (initScalePct / 100)).toFixed(2));
+              runningScalePct = initScalePct;
+              const sideLabel = pos.side === 'LONG' ? 'شراء Long' : 'بيع Short';
+              const comp = formatLateEntryComparisonDetails({
+                traderEntryPrice: adj.traderEntryPrice || pos.traderEntryPrice || p,
+                traderEntryTime: adj.traderEntryTime || pos.traderEntryTime || pos.openTime,
+                userEntryPrice: p,
+                userEntryTime: pos.openTime || adj.timestamp,
+              });
+              const baseLabel =
+                initScalePct !== 100
+                  ? `دخول مباشر بقيمة الصفقة المتبقية (${sideLabel} ${initScalePct}% • ${runningMargin.toFixed(2)}$ بدون تكرار العمليات السابقة)`
+                  : `فتح الصفقة الأولي (${sideLabel} 100% • ${runningMargin.toFixed(2)}$)`;
               return {
                 ...adj,
-                volumePercent: 100,
-                remainingPercentAfter: 100,
-                executedQty: Number(((initialMargin * lev) / p).toFixed(5)),
-                marginDeltaUsdt: initialMargin,
-                actionLabelAr: `فتح الصفقة الأولي (${pos.side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${initialMargin.toFixed(2)}$)`,
+                volumePercent: initScalePct,
+                remainingPercentAfter: initScalePct,
+                executedQty: Number(((runningMargin * lev) / p).toFixed(5)),
+                marginDeltaUsdt: runningMargin,
+                traderEntryPrice: adj.traderEntryPrice || pos.traderEntryPrice || p,
+                traderEntryTime: adj.traderEntryTime || pos.traderEntryTime || pos.openTime,
+                actionLabelAr: `${baseLabel} — ${comp.combinedSummaryAr}`,
               };
             }
 
@@ -745,6 +763,13 @@ export class PaperEngine {
         ? Number(initialMarginOverride.toFixed(2))
         : cleanMargin;
 
+    const defaultComp = formatLateEntryComparisonDetails({
+      traderEntryPrice: traderEntryPrice && traderEntryPrice > 0 ? traderEntryPrice : entryPrice,
+      traderEntryTime: traderEntryTime || now,
+      userEntryPrice: entryPrice,
+      userEntryTime: now,
+    });
+
     const defaultAdjustments: PaperPosition['scaleAdjustments'] =
       initialScaleAdjustments && initialScaleAdjustments.length > 0
         ? initialScaleAdjustments
@@ -752,12 +777,17 @@ export class PaperEngine {
             {
               id: `${posId}_init`,
               actionType: 'INITIAL_ENTRY',
-              actionLabelAr: `فتح الصفقة بالسعر الحالي للسوق (${side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${baseInitialMargin.toFixed(2)}$)`,
-              timestamp: traderEntryTime || now,
+              actionLabelAr:
+                sourceType && sourceType !== 'MANUAL'
+                  ? `فتح الصفقة بالسعر الحالي للسوق (${side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${baseInitialMargin.toFixed(2)}$) — ${defaultComp.combinedSummaryAr}`
+                  : `فتح الصفقة بالسعر الحالي للسوق (${side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${baseInitialMargin.toFixed(2)}$)`,
+              timestamp: now,
               volumePercent: 100,
               remainingPercentAfter: 100,
               executedQty: cleanQty,
               price: entryPrice,
+              traderEntryPrice: traderEntryPrice && traderEntryPrice > 0 ? traderEntryPrice : entryPrice,
+              traderEntryTime: traderEntryTime || now,
               marginDeltaUsdt: baseInitialMargin,
             },
           ];
@@ -838,104 +868,34 @@ export class PaperEngine {
     const samePctMode = accSettings.scaleInSamePercentAsTrader !== false;
     const fixedScaleVal = Math.max(1, accSettings.scaleInFixedValueUsdt || 10);
 
-    let finalMarginUsdt = baseMarginUsdt;
-    let finalScalePercent = params.currentScalePercent || 100;
-    let mappedAdjustments: PaperPosition['scaleAdjustments'] | undefined = undefined;
-
-    if (params.traderScaleAdjustments && params.traderScaleAdjustments.length > 0) {
-      let runningMargin = baseMarginUsdt;
-      let runningScalePct = 100;
-
-      mappedAdjustments = params.traderScaleAdjustments.map((adj) => {
-        const p = safePrice; // Always execute at the current market price
-
-        if (adj.actionType === 'INITIAL_ENTRY') {
-          runningMargin = baseMarginUsdt;
-          runningScalePct = 100;
-          return {
-            ...adj,
-            price: safePrice,
-            volumePercent: 100,
-            remainingPercentAfter: 100,
-            executedQty: Number(((baseMarginUsdt * leverage) / p).toFixed(5)),
-            marginDeltaUsdt: baseMarginUsdt,
-            actionLabelAr: `فتح الصفقة بالسعر الحالي (${params.side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${baseMarginUsdt.toFixed(2)}$)`,
-          };
-        }
-
-        if (adj.actionType === 'SCALE_IN') {
-          const traderPct = Math.max(5, Math.abs(adj.volumePercent || 25));
-          if (samePctMode) {
-            const addedMargin = Number((baseMarginUsdt * (traderPct / 100)).toFixed(2));
-            runningMargin = Number((runningMargin + addedMargin).toFixed(2));
-            runningScalePct += traderPct;
-            return {
-              ...adj,
-              price: adj.price > 0 ? adj.price : safePrice,
-              volumePercent: traderPct,
-              remainingPercentAfter: runningScalePct,
-              executedQty: Number(((addedMargin * leverage) / p).toFixed(5)),
-              marginDeltaUsdt: addedMargin,
-              actionLabelAr: `تدعيم آلي بنفس النسبة (+${traderPct}% من الأصل • +${addedMargin.toFixed(2)}$)`,
-            };
-          } else {
-            const addedMargin = Number(fixedScaleVal.toFixed(2));
-            const equivPct = Math.max(1, Math.round((addedMargin / baseMarginUsdt) * 100));
-            runningMargin = Number((runningMargin + addedMargin).toFixed(2));
-            runningScalePct += equivPct;
-            return {
-              ...adj,
-              price: adj.price > 0 ? adj.price : safePrice,
-              volumePercent: equivPct,
-              remainingPercentAfter: runningScalePct,
-              executedQty: Number(((addedMargin * leverage) / p).toFixed(5)),
-              marginDeltaUsdt: addedMargin,
-              actionLabelAr: `تدعيم بالقيمة المحددة (+${addedMargin.toFixed(2)}$ • يعادل +${equivPct}%)`,
-            };
-          }
-        }
-
-        if (adj.actionType === 'PARTIAL_EXIT') {
-          const withdrawPct = Math.min(95, Math.max(5, Math.abs(adj.volumePercent || 25)));
-          const withdrawnMargin = Number((runningMargin * (withdrawPct / 100)).toFixed(2));
-          runningMargin = Number(Math.max(0.5, runningMargin - withdrawnMargin).toFixed(2));
-          runningScalePct = Math.max(5, Math.round(runningScalePct * (1 - withdrawPct / 100)));
-          return {
-            ...adj,
-            price: adj.price > 0 ? adj.price : safePrice,
-            volumePercent: -withdrawPct,
-            remainingPercentAfter: runningScalePct,
-            executedQty: Number(((withdrawnMargin * leverage) / p).toFixed(5)),
-            marginDeltaUsdt: -withdrawnMargin,
-            actionLabelAr: `انسحاب جزئي بنفس النسبة (-${withdrawPct}% • سحب ${withdrawnMargin.toFixed(2)}$ • متبقي ${runningScalePct}%)`,
-          };
-        }
-
-        return {
-          ...adj,
-          executedQty: Number((((baseMarginUsdt * leverage) / p) * (Math.abs(adj.volumePercent) / 100)).toFixed(5)),
-        };
-      });
-
-      finalMarginUsdt = runningMargin;
-      finalScalePercent = runningScalePct;
-    }
-
-    const notional = finalMarginUsdt * leverage;
-    const quantity = notional / safePrice;
+    // Enter directly with the net remaining position value (e.g. 150% or 50%) in ONE single operation
+    // without repeating or replaying all past scale-in and partial-exit operations!
+    const lateEntryState = calculateLateEntryNetPositionState({
+      baseMarginUsdt,
+      leverage,
+      executionPrice: safePrice,
+      side: params.side,
+      traderEntryPrice: params.traderEntryPrice,
+      traderEntryTime: params.traderEntryTime,
+      traderCurrentScalePercent: params.currentScalePercent,
+      traderScaleAdjustments: params.traderScaleAdjustments,
+      scaleInSamePercentAsTrader: samePctMode,
+      scaleInFixedValueUsdt: fixedScaleVal,
+      entryTimestamp: Date.now(),
+    });
 
     return this.openPosition(
       params.symbol,
       params.side,
-      quantity,
+      lateEntryState.directQuantity,
       safePrice,
       leverage,
       params.sourceTraderName,
       params.sourceType,
       params.sourceTraderId,
       params.traderEntryTime,
-      mappedAdjustments,
-      finalScalePercent,
+      [lateEntryState.singleDirectAdjustment],
+      lateEntryState.netScalePercent,
       baseMarginUsdt,
       acc.id,
       params.traderEntryPrice
@@ -1434,10 +1394,14 @@ export class PaperEngine {
             console.warn('Exit sync skipped:', e);
           }
         } else if (rec.actionType === 'PARTIAL_EXIT') {
+          const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
+            recordTimestamp: rec.orderTime,
+            userPositionOpenTime: matchingOpen.openTime,
+          });
           const alreadyApplied = matchingOpen.scaleAdjustments?.some(
             (a) => Math.abs(a.timestamp - rec.orderTime) < 60000 && a.actionType === 'PARTIAL_EXIT'
           );
-          if (!alreadyApplied) {
+          if (isAfterOurEntry && !alreadyApplied) {
             try {
               const withdrawPct = Math.abs(rec.volumePercent || 30);
               const updated = this.partialExitPosition(
@@ -1469,10 +1433,14 @@ export class PaperEngine {
             }
           }
         } else if (rec.actionType === 'SCALE_IN') {
+          const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
+            recordTimestamp: rec.orderTime,
+            userPositionOpenTime: matchingOpen.openTime,
+          });
           const alreadyApplied = matchingOpen.scaleAdjustments?.some(
             (a) => Math.abs(a.timestamp - rec.orderTime) < 60000 && a.actionType === 'SCALE_IN'
           );
-          if (!alreadyApplied) {
+          if (isAfterOurEntry && !alreadyApplied) {
             try {
               const addPct = Math.abs(rec.volumePercent || 30);
               const updated = this.scaleInFromTraderSignal(
@@ -1563,16 +1531,20 @@ export class PaperEngine {
           }
         }
       } else {
-        // Position is still open by trader: check if trader added a new PARTIAL_EXIT or reduced currentScalePercent
+        // Position is still open by trader: only apply NEW PARTIAL_EXIT operations that happened AFTER our entry
         if (stillOpenByTrader.scaleAdjustments && stillOpenByTrader.scaleAdjustments.length > 0) {
           for (const adj of stillOpenByTrader.scaleAdjustments) {
             if (adj.actionType === 'PARTIAL_EXIT') {
+              const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
+                recordTimestamp: adj.timestamp,
+                userPositionOpenTime: userOpenPos.openTime,
+              });
               const alreadyApplied = userOpenPos.scaleAdjustments?.some(
                 (ua) =>
                   ua.actionType === 'PARTIAL_EXIT' &&
                   (ua.id === adj.id || Math.abs(ua.timestamp - adj.timestamp) < 60000)
               );
-              if (!alreadyApplied && adj.timestamp > userOpenPos.openTime - 5000) {
+              if (isAfterOurEntry && !alreadyApplied) {
                 try {
                   const withdrawPct = Math.abs(adj.volumePercent || 30);
                   const updated = this.partialExitPosition(
@@ -1607,10 +1579,13 @@ export class PaperEngine {
           }
         }
 
-        // Also check if trader's currentScalePercent dropped significantly below userOpenPos.currentScalePercent
+        // Only apply scale diff if the trader updated their position AFTER the user opened the trade
         const userScale = userOpenPos.currentScalePercent || 100;
         const traderScale = stillOpenByTrader.currentScalePercent || 100;
-        if (traderScale > 0 && userScale - traderScale >= 5) {
+        const traderUpdatedAfterOurEntry =
+          Boolean(stillOpenByTrader.lastUpdateTime) &&
+          (stillOpenByTrader.lastUpdateTime || 0) > userOpenPos.openTime;
+        if (traderUpdatedAfterOurEntry && traderScale > 0 && userScale - traderScale >= 5) {
           const withdrawPct = Math.min(
             95,
             Math.max(5, Math.round(((userScale - traderScale) / userScale) * 100))
@@ -1774,9 +1749,15 @@ export class PaperEngine {
             currentScalePercent: pos.currentScalePercent,
             accountId: acc.id,
           });
+          const compDetails = formatLateEntryComparisonDetails({
+            traderEntryPrice,
+            traderEntryTime: pos.entryTime,
+            userEntryPrice: opened.entryPrice,
+            userEntryTime: opened.openTime,
+          });
           logs.push({
             id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-            timestamp: pos.entryTime || Date.now(),
+            timestamp: opened.openTime || Date.now(),
             traderId: params.traderId,
             traderName: params.traderName,
             source: params.source,
@@ -1785,11 +1766,14 @@ export class PaperEngine {
             symbol: opened.symbol,
             side: opened.side,
             price: opened.entryPrice,
+            traderEntryPrice,
+            traderEntryTime: pos.entryTime,
+            userEntryTime: opened.openTime,
             quantity: opened.quantity,
             leverage: opened.leverage,
             accountId: acc.id,
             accountName: acc.name,
-            messageAr: `[${acc.name}] تنفيذ فوري بالسعر الحالي (${opened.symbol} ${opened.side} @ ${opened.entryPrice.toFixed(4)}) بقيمة ${opened.marginUsdt.toFixed(2)}$ (${opened.leverage}x) — ${evalResult.reasonAr}`,
+            messageAr: `[${acc.name}] دخول مباشر بقيمة الصفقة المتبقية (${opened.currentScalePercent || 100}% • ${opened.marginUsdt.toFixed(2)}$) على ${opened.symbol} ${opened.side} — ${compDetails.combinedSummaryAr}`,
           });
         } catch (err: any) {
           console.warn('Could not open synced position:', err);
@@ -1848,9 +1832,15 @@ export class PaperEngine {
                 traderEntryTime: rec.entryTime || rec.orderTime,
                 accountId: acc.id,
               });
+              const compDetails = formatLateEntryComparisonDetails({
+                traderEntryPrice,
+                traderEntryTime: rec.entryTime || rec.orderTime,
+                userEntryPrice: opened.entryPrice,
+                userEntryTime: opened.openTime,
+              });
               logs.push({
                 id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-                timestamp: rec.orderTime || Date.now(),
+                timestamp: opened.openTime || Date.now(),
                 traderId: params.traderId,
                 traderName: params.traderName,
                 source: params.source,
@@ -1859,11 +1849,14 @@ export class PaperEngine {
                 symbol: opened.symbol,
                 side: opened.side,
                 price: opened.entryPrice,
+                traderEntryPrice,
+                traderEntryTime: rec.entryTime || rec.orderTime,
+                userEntryTime: opened.openTime,
                 quantity: opened.quantity,
                 leverage: opened.leverage,
                 accountId: acc.id,
                 accountName: acc.name,
-                messageAr: `[${acc.name}] دخول بالسعر الحالي (${opened.symbol} ${opened.side} @ ${opened.entryPrice.toFixed(4)}) بحجمك المحدد (${userMarginUsdt}$ × ${opened.leverage}x)`,
+                messageAr: `[${acc.name}] دخول بالسعر الحالي (${opened.symbol} ${opened.side}) بحجمك المحدد (${userMarginUsdt}$ × ${opened.leverage}x) — ${compDetails.combinedSummaryAr}`,
               });
             } catch (e) {
               console.warn('Entry sync skipped:', e);

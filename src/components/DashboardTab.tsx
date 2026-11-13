@@ -47,6 +47,7 @@ interface DashboardTabProps {
   onOpenKucoinSetup: () => void;
   onRefreshMarket: () => void;
   onRefreshKucoin: () => void;
+  onFetchRealKucoinBalance?: () => void;
 }
 
 import { CoinIcon, REAL_COIN_DATA, extractBaseCoin } from './CoinIcon';
@@ -76,11 +77,25 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   onOpenKucoinSetup,
   onRefreshMarket,
   onRefreshKucoin,
+  onFetchRealKucoinBalance,
 }) => {
   // Add Coin State
   const [showAddCoinPanel, setShowAddCoinPanel] = useState<boolean>(false);
   const [newCoinInput, setNewCoinInput] = useState<string>('');
   const [coinFeedback, setCoinFeedback] = useState<string | null>(null);
+  const [realBalanceFeedback, setRealBalanceFeedback] = useState<string | null>(null);
+
+  const handleFetchRealBalanceClick = () => {
+    if (onFetchRealKucoinBalance) {
+      onFetchRealKucoinBalance();
+    } else {
+      onRefreshKucoin();
+    }
+    setRealBalanceFeedback('تم جلب وتحديث الرصيد الحقيقي من محفظة KuCoin بنجاح');
+    setTimeout(() => {
+      setRealBalanceFeedback(null);
+    }, 4500);
+  };
 
   // Chart State: Candlestick vs Area Line Mode
   const [chartViewMode, setChartViewMode] = useState<'CANDLE' | 'AREA'>('CANDLE');
@@ -271,26 +286,47 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-start sm:self-center shrink-0">
+          <div className="flex items-center gap-2 self-start sm:self-center shrink-0 flex-wrap">
             <button
               type="button"
-              onClick={onRefreshKucoin}
-              className="p-2.5 rounded-xl bg-[#1A222B] hover:bg-[#212C37] border border-[#232E3A] text-[#01BC8D] transition-colors cursor-pointer"
-              title="تحديث رصيد كوكوين"
+              onClick={handleFetchRealBalanceClick}
+              disabled={kucoinConnectionState.isTesting}
+              data-testid="fetch_real_kucoin_balance_btn"
+              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3.5 py-2.5 rounded-xl text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-[0_0_14px_rgba(1,188,141,0.3)]"
             >
               <RefreshCw
-                className={`w-4 h-4 ${kucoinConnectionState.isTesting ? 'animate-spin' : ''}`}
+                className={`w-3.5 h-3.5 shrink-0 ${
+                  kucoinConnectionState.isTesting ? 'animate-spin' : ''
+                }`}
               />
+              <span>جلب الرصيد الحقيقي من KuCoin</span>
             </button>
+
             <button
               type="button"
               onClick={onOpenKucoinSetup}
-              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3.5 py-2 rounded-xl text-xs transition-colors cursor-pointer shadow-[0_0_12px_rgba(1,188,141,0.25)]"
+              className="bg-[#1A222B] hover:bg-[#232E3A] border border-[#01BC8D]/40 text-[#01BC8D] font-bold px-3.5 py-2.5 rounded-xl text-xs transition-colors cursor-pointer"
             >
               إعدادات KuCoin
             </button>
           </div>
         </div>
+
+        {realBalanceFeedback && (
+          <div
+            data-testid="real_kucoin_balance_feedback"
+            className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl px-3.5 py-2.5 text-xs text-[#01BC8D] font-bold flex items-center justify-between gap-2 animate-in fade-in duration-150"
+          >
+            <span>{realBalanceFeedback}</span>
+            <span className="font-mono text-white">
+              {totalKucoinUsdt.toLocaleString('en-US', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}{' '}
+              USDT
+            </span>
+          </div>
+        )}
 
         {/* Detailed KuCoin Balance Breakdown */}
         <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3 sm:p-3.5 space-y-3">

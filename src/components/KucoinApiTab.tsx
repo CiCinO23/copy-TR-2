@@ -65,14 +65,12 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
   onOpenSettingsTab,
 }) => {
   const [apiKey, setApiKey] = useState<string>(config.apiKey);
-  const [apiSecret, setApiSecret] = useState<string>(config.apiSecret);
   const [passphrase, setPassphrase] = useState<string>(config.passphrase);
   const [marketType, setMarketType] = useState<'FUTURES' | 'SPOT'>(config.marketType);
   const [enableLiveExecution, setEnableLiveExecution] = useState<boolean>(
     config.enableLiveExecution
   );
 
-  const [showSecret, setShowSecret] = useState<boolean>(false);
   const [showPassphrase, setShowPassphrase] = useState<boolean>(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState<boolean>(false);
 
@@ -116,7 +114,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
     e.preventDefault();
     onSaveAndTest({
       apiKey: apiKey.trim(),
-      apiSecret: apiSecret.trim(),
+      apiSecret: '',
       passphrase: passphrase.trim(),
       apiType: config.apiType,
       marketType,
@@ -731,10 +729,10 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
 
       {/* API Form */}
       <form onSubmit={handleSave} className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
           <h3 className="font-bold text-sm text-[#01BC8D] flex items-center gap-2">
             <Key className="w-4 h-4" />
-            <span>بيانات مفتاح KuCoin API (API Key, Secret & Passphrase)</span>
+            <span>بيانات مفتاح KuCoin API (API Key & Passphrase بدون Secret)</span>
           </h3>
           {onOpenSimulationTab && (
             <button
@@ -750,39 +748,22 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
 
         {/* API Key */}
         <div>
-          <label className="block text-xs font-semibold text-white mb-1.5">
-            مفتاح API Key (من KuCoin)
-          </label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="block text-xs font-semibold text-white">
+              مفتاح API Key (من KuCoin)
+            </label>
+            <span className="text-[10px] text-[#8A99AD] font-mono">
+              لا يتطلب مفتاح سري (No API Secret)
+            </span>
+          </div>
           <input
             type="text"
+            data-testid="kucoin_api_key_input"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             placeholder="مثال: 64b8f... (KuCoin API Key)"
             className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3.5 py-2.5 text-xs text-white font-mono focus:outline-none"
           />
-        </div>
-
-        {/* API Secret */}
-        <div>
-          <label className="block text-xs font-semibold text-white mb-1.5">
-            المفتاح السري (API Secret)
-          </label>
-          <div className="relative">
-            <input
-              type={showSecret ? 'text' : 'password'}
-              value={apiSecret}
-              onChange={(e) => setApiSecret(e.target.value)}
-              placeholder="KuCoin API Secret"
-              className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl pr-3.5 pl-10 py-2.5 text-xs text-white font-mono focus:outline-none"
-            />
-            <button
-              type="button"
-              onClick={() => setShowSecret(!showSecret)}
-              className="absolute left-3 top-2.5 text-[#8A99AD] hover:text-white"
-            >
-              {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-          </div>
         </div>
 
         {/* Passphrase (Mandatory for KuCoin) */}
@@ -791,11 +772,12 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
             <label className="block text-xs font-semibold text-white">
               كلمة مرور المفتاح (API Passphrase)
             </label>
-            <span className="text-[10px] text-[#01BC8D]">مطلوبة إلزامياً في KuCoin</span>
+            <span className="text-[10px] text-[#01BC8D]">مطلوبة في KuCoin</span>
           </div>
           <div className="relative">
             <input
               type={showPassphrase ? 'text' : 'password'}
+              data-testid="kucoin_passphrase_input"
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
               placeholder="الكلمة التي قمت بتعيينها عند إنشاء المفتاح في كوكوين"
@@ -875,6 +857,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
           <button
             type="submit"
             disabled={connectionState.isTesting}
+            data-testid="kucoin_save_and_test_btn"
             className="flex-1 bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2.5 px-4 rounded-xl text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
           >
             <CheckCircle2 className="w-4 h-4" />
@@ -886,7 +869,6 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
               type="button"
               onClick={() => {
                 setApiKey('');
-                setApiSecret('');
                 setPassphrase('');
                 onClearKeys();
               }}

@@ -176,17 +176,22 @@ export const App: React.FC = () => {
   }, []);
 
   // Test connection to KuCoin API
-  const handleTestKuCoinConnection = useCallback(async (cfg: KuCoinConfig) => {
-    setKucoinConnectionState((prev) => ({
-      ...prev,
-      isTesting: true,
-      statusMessageAr: 'جاري فحص الاتصال ومزامنة الحساب مع KuCoin API...',
-      errorMessageAr: null,
-    }));
+  const handleTestKuCoinConnection = useCallback(
+    async (cfg: KuCoinConfig, forceRealBalance: boolean = false) => {
+      setKucoinConnectionState((prev) => ({
+        ...prev,
+        isTesting: true,
+        statusMessageAr: forceRealBalance
+          ? 'جاري جلب الرصيد الحقيقي ومزامنة محفظة KuCoin...'
+          : 'جاري فحص الاتصال ومزامنة الحساب مع KuCoin API...',
+        errorMessageAr: null,
+      }));
 
-    const res = await testKuCoinConnectionAndFetchData(cfg);
-    setKucoinConnectionState(res);
-  }, []);
+      const res = await testKuCoinConnectionAndFetchData(cfg, { forceRealBalance });
+      setKucoinConnectionState(res);
+    },
+    []
+  );
 
   // Save KuCoin config & test
   const handleSaveKuCoin = (updated: KuCoinConfig) => {
@@ -1042,6 +1047,7 @@ export const App: React.FC = () => {
             onOpenKucoinSetup={handleOpenKucoinApi}
             onRefreshMarket={() => handleTestBinanceConnection(binanceConfig)}
             onRefreshKucoin={() => handleTestKuCoinConnection(kucoinConfig)}
+            onFetchRealKucoinBalance={() => handleTestKuCoinConnection(kucoinConfig, true)}
           />
         )}
 
