@@ -87,12 +87,12 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       setIsStoppedByFullExit(false);
       handleUpdate(
         { appExitBehavior: 'KEEP_ALIVE_BACKGROUND' },
-        '✅ تم تفعيل وضع العمل في الخلفية: سيبقى التطبيق يعمل ويرسل الإشعارات حتى وإن أُقفل نهائياً.'
+        'تم تفعيل وضع العمل في الخلفية: سيبقى التطبيق يعمل ويرسل الإشعارات حتى وإن أُقفل نهائياً.'
       );
     } else {
       handleUpdate(
         { appExitBehavior: 'FULL_EXIT' },
-        '✅ تم ضبط وضع الإغلاق الكلي: سيتم إيقاف جميع العمليات الخلفية تماماً عند إغلاق التطبيق.'
+        'تم ضبط وضع الإغلاق الكلي: سيتم إيقاف جميع العمليات الخلفية تماماً عند إغلاق التطبيق.'
       );
     }
   };
@@ -102,14 +102,14 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     mobileNotifications.performFullAppExit();
     setIsStoppedByFullExit(true);
     setStatusFeedback(
-      '🛑 تم إيقاف جميع الخدمات والعمليات الخلفية للتطبيق بالكامل.'
+      'تم إيقاف جميع الخدمات والعمليات الخلفية للتطبيق بالكامل.'
     );
   };
 
   const handleResumeAppServices = () => {
     mobileNotifications.resumeFromFullExit();
     setIsStoppedByFullExit(false);
-    setStatusFeedback('✅ تم إعادة تشغيل خدمات التطبيق والمزامنة بنجاح.');
+    setStatusFeedback('تم إعادة تشغيل خدمات التطبيق والمزامنة بنجاح.');
   };
 
   const handleTestLockScreenNotification = async () => {
@@ -124,7 +124,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     });
     mobileNotifications.triggerTestNotification('OPEN_TRADE');
     setStatusFeedback(
-      '🔔 تم إرسال إشعار فوري مخصص لشاشة القفل! يمكنك قفل شاشة الهاتف لمعاينة ظهور الإشعار.'
+      'تم إرسال إشعار فوري مخصص لشاشة القفل بنجاح.'
     );
   };
 
@@ -159,7 +159,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     }
     handleUpdateSec(
       { pinCode: validation.normalizedNewPin, enabled: true },
-      '✅ تم تحديث رمز القفل الرقمي (PIN Code) لحماية تبويب التنفيذ المباشر (KuCoin) بنجاح.'
+      'تم تحديث رمز القفل الرقمي (PIN) لحماية تبويب التنفيذ المباشر بنجاح.'
     );
     setCurrentPinInput('');
     setNewPinInput('');
@@ -197,15 +197,15 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       {/* 1. Background Mode vs Full Exit Card */}
       <div
         data-testid="settings_background_mode_card"
-        className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4"
       >
-        <div className="flex items-start justify-between gap-3 border-b border-[#232E3A] pb-3">
+        <div className="flex items-start justify-between gap-3 border-b border-[#1E2733] pb-3">
           <div className="flex items-center gap-2.5">
             <div
               className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
                 appExitBehavior === 'KEEP_ALIVE_BACKGROUND' && !isStoppedByFullExit
-                  ? 'bg-[#0D2B24] border-[#01BC8D]/50 text-[#01BC8D]'
-                  : 'bg-[#3A1219] border-[#F6465D]/50 text-[#F6465D]'
+                  ? 'bg-[#0D2B24] border-[#01BC8D]/40 text-[#01BC8D]'
+                  : 'bg-[#3A1219] border-[#F6465D]/40 text-[#F6465D]'
               }`}
             >
               {appExitBehavior === 'KEEP_ALIVE_BACKGROUND' && !isStoppedByFullExit ? (
@@ -218,14 +218,15 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2 flex-wrap">
                 <span>وضع إغلاق التطبيق أو العمل في الخلفية</span>
                 <span
-                  className={`text-[10px] px-2 py-0.5 rounded-md font-bold ${
+                  className={`text-[11px] font-semibold ${
                     isStoppedByFullExit
-                      ? 'bg-[#3A1219] text-[#F6465D] border border-[#F6465D]/40'
+                      ? 'text-[#F6465D]'
                       : appExitBehavior === 'KEEP_ALIVE_BACKGROUND'
-                      ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
-                      : 'bg-[#3B2606] text-[#FBBF24] border border-[#F59E0B]/40'
+                      ? 'text-[#01BC8D]'
+                      : 'text-[#FBBF24]'
                   }`}
                 >
+                  ·{' '}
                   {isStoppedByFullExit
                     ? 'متوقف كلياً'
                     : appExitBehavior === 'KEEP_ALIVE_BACKGROUND'
@@ -233,8 +234,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                     : 'إغلاق كلي عند الخروج'}
                 </span>
               </h3>
-              <p className="text-[11px] text-[#8A99AD] mt-0.5">
-                اختر بين ترك التطبيق يعمل في الخلفية حتى وإن أُقفل نهائياً لمتابعة الصفقات، أو الإغلاق الكلي للتطبيق
+              <p className="text-xs text-[#8A99AD] mt-0.5">
+                اختر بين ترك التطبيق يعمل في الخلفية لمتابعة الصفقات، أو الإغلاق الكلي للتطبيق
               </p>
             </div>
           </div>
@@ -247,10 +248,10 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             type="button"
             data-testid="mode_keep_alive_background_btn"
             onClick={() => handleSelectExitBehavior('KEEP_ALIVE_BACKGROUND')}
-            className={`text-right rounded-xl p-3.5 border-2 transition-all cursor-pointer flex flex-col justify-between gap-2 ${
+            className={`text-right rounded-xl p-3.5 border transition-colors cursor-pointer flex flex-col justify-between gap-2 ${
               appExitBehavior === 'KEEP_ALIVE_BACKGROUND' && !isStoppedByFullExit
-                ? 'bg-[#0D2B24]/90 border-[#01BC8D] shadow-[0_0_18px_rgba(1,188,141,0.18)]'
-                : 'bg-[#0B0E11] border-[#232E3A] hover:border-[#01BC8D]/50'
+                ? 'bg-[#161D26] border-[#01BC8D]'
+                : 'bg-[#0B0E11] border-[#1E2733] hover:border-[#2C394A]'
             }`}
           >
             <div className="flex items-start justify-between gap-2 w-full">
@@ -263,7 +264,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                   }`}
                 />
                 <span className="text-xs sm:text-sm font-bold text-white">
-                  تركه يعمل في الخلفية (حتى وإن أُقفل نهائياً)
+                  تركه يعمل في الخلفية
                 </span>
               </div>
               <span
@@ -279,7 +280,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </span>
             </div>
             <p className="text-[11px] text-[#8A99AD] leading-relaxed">
-              يبقي محرك النسخ ومراقبة الصفقات ونسبة التراجع (Drawdown) نشطاً في الخلفية عبر خدمة النظام المستمرة لإرسال الإشعارات الفورية حتى بعد إغلاق التطبيق نهائياً.
+              يبقي محرك النسخ ومراقبة الصفقات ونسبة التراجع نشطاً في الخلفية لإرسال الإشعارات الفورية حتى بعد إغلاق التطبيق.
             </p>
           </button>
 
@@ -288,10 +289,10 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             type="button"
             data-testid="mode_full_exit_btn"
             onClick={() => handleSelectExitBehavior('FULL_EXIT')}
-            className={`text-right rounded-xl p-3.5 border-2 transition-all cursor-pointer flex flex-col justify-between gap-2 ${
+            className={`text-right rounded-xl p-3.5 border transition-colors cursor-pointer flex flex-col justify-between gap-2 ${
               appExitBehavior === 'FULL_EXIT' || isStoppedByFullExit
-                ? 'bg-[#2B1216]/90 border-[#F6465D] shadow-[0_0_18px_rgba(246,70,93,0.18)]'
-                : 'bg-[#0B0E11] border-[#232E3A] hover:border-[#F6465D]/50'
+                ? 'bg-[#2B1216]/70 border-[#F6465D]'
+                : 'bg-[#0B0E11] border-[#1E2733] hover:border-[#F6465D]/40'
             }`}
           >
             <div className="flex items-start justify-between gap-2 w-full">
@@ -376,37 +377,35 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         </div>
       </div>
 
-      {/* 2. Lock Screen Notifications Card (خاصية الإشعارات في شاشة القفل) */}
+      {/* 2. Lock Screen Notifications Card */}
       <div
         data-testid="settings_lockscreen_notifications_card"
-        className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4"
       >
-        <div className="flex items-start justify-between gap-3 border-b border-[#232E3A] pb-3">
+        <div className="flex items-start justify-between gap-3 border-b border-[#1E2733] pb-3">
           <div className="flex items-center gap-2.5">
             <div
               className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
                 lockScreenEnabled
-                  ? 'bg-[#0D2B24] border-[#01BC8D]/50 text-[#01BC8D]'
-                  : 'bg-[#1A222B] border-[#232E3A] text-[#8A99AD]'
+                  ? 'bg-[#0D2B24] border-[#01BC8D]/40 text-[#01BC8D]'
+                  : 'bg-[#161D26] border-[#1E2733] text-[#8A99AD]'
               }`}
             >
               <Lock className="w-5 h-5" />
             </div>
             <div>
               <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2 flex-wrap">
-                <span>الإشعارات في شاشة القفل (Lock Screen Notifications)</span>
+                <span>الإشعارات في شاشة القفل</span>
                 <span
-                  className={`text-[10px] px-2 py-0.5 rounded-md font-bold ${
-                    lockScreenEnabled
-                      ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
-                      : 'bg-[#3A1219] text-[#F6465D] border border-[#F6465D]/40'
+                  className={`text-[11px] font-semibold ${
+                    lockScreenEnabled ? 'text-[#01BC8D]' : 'text-[#F6465D]'
                   }`}
                 >
-                  {lockScreenEnabled ? 'مفعّلة على شاشة القفل' : 'غير مفعّلة'}
+                  · {lockScreenEnabled ? 'مفعّلة' : 'غير مفعّلة'}
                 </span>
               </h3>
-              <p className="text-[11px] text-[#8A99AD] mt-0.5">
-                إظهار تنبيهات فتح الصفقات، التدعيم، الإغلاق، وتنبيه التراجع (Drawdown) مباشرة على شاشة قفل الهاتف
+              <p className="text-xs text-[#8A99AD] mt-0.5">
+                إظهار تنبيهات فتح الصفقات والتدعيم والإغلاق والتراجع مباشرة على شاشة قفل الهاتف
               </p>
             </div>
           </div>
@@ -419,8 +418,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               handleUpdate(
                 { lockScreenNotificationsEnabled: e.target.checked },
                 e.target.checked
-                  ? '✅ تم تفعيل ظهور الإشعارات الفورية على شاشة القفل'
-                  : 'تم إيقاف إشعارات شاشة القفل'
+                  ? 'تم تفعيل ظهور الإشعارات الفورية على شاشة القفل.'
+                  : 'تم إيقاف إشعارات شاشة القفل.'
               )
             }
             className="w-5 h-5 accent-[#01BC8D] cursor-pointer shrink-0 mt-1"
@@ -429,7 +428,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {/* Toggle: Show Full Financial Details on Lock Screen */}
-          <label className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3 flex items-start justify-between gap-2.5 cursor-pointer">
+          <label className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 flex items-start justify-between gap-2.5 cursor-pointer">
             <div className="flex items-start gap-2">
               {showSensitiveDetails ? (
                 <Eye className="w-4 h-4 text-[#01BC8D] shrink-0 mt-0.5" />
@@ -440,9 +439,9 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 <div className="text-xs font-bold text-white">
                   إظهار التفاصيل المالية الكاملة على شاشة القفل
                 </div>
-                <div className="text-[10px] text-[#8A99AD] mt-0.5">
+                <div className="text-[11px] text-[#8A99AD] mt-0.5">
                   {showSensitiveDetails
-                    ? 'يعرض السعر، قيمة الصفقة، صافي الربح/الخسارة، ونسبة التراجع على شاشة القفل'
+                    ? 'يعرض السعر وقيمة الصفقة وصافي الربح ونسبة التراجع على شاشة القفل'
                     : 'يخفي المبالغ المالية والرصيد على شاشة القفل لحماية الخصوصية'}
                 </div>
               </div>
@@ -455,8 +454,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 handleUpdate(
                   { lockScreenShowSensitiveDetails: e.target.checked },
                   e.target.checked
-                    ? '✅ سيتم عرض التفاصيل المالية الكاملة على شاشة القفل'
-                    : '🔒 تم إخفاء المبالغ الحساسة على شاشة القفل للخصوصية'
+                    ? 'سيتم عرض التفاصيل المالية الكاملة على شاشة القفل.'
+                    : 'تم إخفاء المبالغ الحساسة على شاشة القفل للخصوصية.'
                 )
               }
               className="w-4 h-4 accent-[#01BC8D] cursor-pointer shrink-0 mt-0.5"
@@ -464,7 +463,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           </label>
 
           {/* Test Lock Screen Notification Button */}
-          <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3 flex flex-col justify-between gap-2">
+          <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 flex flex-col justify-between gap-2">
             <div className="text-[11px] text-[#8A99AD] flex items-center justify-between">
               <span>صلاحية إشعارات النظام وشاشة القفل:</span>
               <strong
@@ -472,7 +471,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                   browserPerm === 'granted' ? 'text-[#01BC8D]' : 'text-[#F59E0B]'
                 }
               >
-                {browserPerm === 'granted' ? 'ممنوحة وجاهزة ✅' : 'تحتاج تفعيل 🔔'}
+                {browserPerm === 'granted' ? 'ممنوحة وجاهزة' : 'تحتاج تفعيل'}
               </strong>
             </div>
 
@@ -480,46 +479,44 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               type="button"
               data-testid="test_lockscreen_notification_btn"
               onClick={handleTestLockScreenNotification}
-              className="w-full bg-[#0D2B24] hover:bg-[#01BC8D]/25 text-[#01BC8D] border border-[#01BC8D]/50 font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+              className="w-full bg-[#161D26] hover:bg-[#1E2733] text-[#01BC8D] border border-[#1E2733] font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              <span>🔒 تجربة إشعار شاشة القفل الآن</span>
+              <span>تجربة إشعار شاشة القفل الآن</span>
             </button>
           </div>
         </div>
       </div>
 
-      {/* 3. KuCoin Real Wallet PIN Code Security Card (قفل أمان تبويب التنفيذ المباشر KuCoin) */}
+      {/* 3. KuCoin Real Wallet PIN Code Security Card */}
       <div
         data-testid="settings_kucoin_security_lock_card"
-        className="bg-[#12171D] border border-[#01BC8D]/40 rounded-2xl p-4 sm:p-5 space-y-4"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4"
       >
-        <div className="flex items-start justify-between gap-3 border-b border-[#232E3A] pb-3">
+        <div className="flex items-start justify-between gap-3 border-b border-[#1E2733] pb-3">
           <div className="flex items-center gap-2.5">
             <div
               className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
                 securityConfig.enabled
-                  ? 'bg-[#0D2B24] border-[#01BC8D]/50 text-[#01BC8D]'
-                  : 'bg-[#1A222B] border-[#232E3A] text-[#8A99AD]'
+                  ? 'bg-[#0D2B24] border-[#01BC8D]/40 text-[#01BC8D]'
+                  : 'bg-[#161D26] border-[#1E2733] text-[#8A99AD]'
               }`}
             >
               <Lock className="w-5 h-5" />
             </div>
             <div>
               <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2 flex-wrap">
-                <span>قفل أمان تبويب التنفيذ المباشر والمحفظة الحقيقية (رمز PIN الرقمي)</span>
+                <span>قفل أمان التنفيذ المباشر والمحفظة الحقيقية</span>
                 <span
-                  className={`text-[10px] px-2 py-0.5 rounded-md font-bold ${
-                    securityConfig.enabled
-                      ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
-                      : 'bg-[#3A1219] text-[#F6465D] border border-[#F6465D]/40'
+                  className={`text-[11px] font-semibold ${
+                    securityConfig.enabled ? 'text-[#01BC8D]' : 'text-[#F6465D]'
                   }`}
                 >
-                  {securityConfig.enabled ? 'مفعّل لحماية المحفظة' : 'غير مفعّل'}
+                  · {securityConfig.enabled ? 'مفعّل' : 'غير مفعّل'}
                 </span>
               </h3>
-              <p className="text-[11px] text-[#8A99AD] mt-0.5">
-                طلب رمز قفل رقمي (PIN Code) عند فتح تبويب التنفيذ المباشر (KuCoin) أو التبديل للتداول الحقيقي
+              <p className="text-xs text-[#8A99AD] mt-0.5">
+                طلب رمز قفل رقمي (PIN) عند فتح تبويب كوكوين أو التبديل للتداول الحقيقي
               </p>
             </div>
           </div>
@@ -532,8 +529,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               handleUpdateSec(
                 { enabled: e.target.checked },
                 e.target.checked
-                  ? '✅ تم تفعيل رمز القفل الرقمي (PIN) لتبويب التنفيذ المباشر (KuCoin)'
-                  : 'تم إيقاف قفل الأمان لتبويب التنفيذ المباشر (KuCoin)'
+                  ? 'تم تفعيل رمز القفل الرقمي (PIN) لتبويب التنفيذ المباشر.'
+                  : 'تم إيقاف قفل الأمان لتبويب التنفيذ المباشر.'
               )
             }
             className="w-5 h-5 accent-[#01BC8D] cursor-pointer shrink-0 mt-1"
@@ -556,11 +553,11 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                         ? 'SESSION_TIMEOUT'
                         : 'ALWAYS_ON_TAB_OPEN',
                   },
-                  '✅ تم تحديث سياسة إعادة قفل تبويب التنفيذ المباشر (KuCoin)'
+                  'تم تحديث سياسة إعادة قفل تبويب التنفيذ المباشر.'
                 )
               }
               data-testid="select_kucoin_lock_scope"
-              className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none"
+              className="w-full bg-[#12171D] border border-[#1E2733] focus:border-[#01BC8D] rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none"
             >
               <option value="ALWAYS_ON_TAB_OPEN">
                 عند كل فتح لتبويب التنفيذ المباشر (KuCoin) — أمان أقصى
@@ -582,8 +579,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 handleUpdateSec(
                   { protectRealTradingSwitch: e.target.checked },
                   e.target.checked
-                    ? '✅ تمت حماية زر التبديل إلى التداول الحقيقي برمز PIN الرقمي'
-                    : 'تم إلغاء قفل زر التبديل للتداول الحقيقي'
+                    ? 'تمت حماية زر التبديل إلى التداول الحقيقي برمز PIN الرقمي.'
+                    : 'تم إلغاء قفل زر التبديل للتداول الحقيقي.'
                 )
               }
               className="w-4 h-4 accent-[#01BC8D] cursor-pointer shrink-0"
@@ -595,13 +592,13 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               type="button"
               onClick={() => {
                 onLockSecurityNow();
-                setStatusFeedback('🔒 تم قفل تبويب التنفيذ المباشر (KuCoin) والمحفظة الحقيقية فوراً.');
+                setStatusFeedback('تم قفل تبويب التنفيذ المباشر والمحفظة الحقيقية فوراً.');
               }}
               data-testid="settings_lock_kucoin_now_btn"
-              className="w-full bg-[#1A222B] hover:bg-[#232E3A] text-white border border-[#232E3A] font-bold py-1.5 px-3 rounded-lg text-[11px] flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+              className="w-full bg-[#161D26] hover:bg-[#1E2733] text-white border border-[#1E2733] font-bold py-2 px-3 rounded-lg text-[11px] flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
             >
               <Lock className="w-3.5 h-3.5 text-[#01BC8D]" />
-              <span>قفل تبويب التنفيذ المباشر (KuCoin) الآن</span>
+              <span>قفل تبويب التنفيذ المباشر الآن</span>
             </button>
           )}
         </div>
@@ -681,7 +678,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       </div>
 
       {/* 4. Main Platform & API Settings Card */}
-      <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4">
+      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4">
         <div>
           <div className="text-xs sm:text-sm font-semibold text-white">
             السوق: العقود الآجلة الدائمة USDⓈ-M Futures
@@ -703,47 +700,50 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           </div>
         </div>
 
-        <div className="h-px bg-[#232E3A]" />
+        <div className="h-px bg-[#1E2733]" />
 
         {/* Open Mobile Notifications button */}
         {onOpenNotifications && (
           <button
+            type="button"
             onClick={onOpenNotifications}
             data-testid="settings_open_notifications_button"
-            className="w-full bg-[#0D2B24] hover:bg-[#01BC8D]/25 border border-[#01BC8D] text-[#01BC8D] font-bold py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 text-xs sm:text-sm transition-colors cursor-pointer"
+            className="w-full bg-[#161D26] hover:bg-[#1E2733] border border-[#1E2733] text-[#01BC8D] font-bold py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 text-xs sm:text-sm transition-colors cursor-pointer"
           >
             <BellRing className="w-4 h-4" />
-            <span>إعدادات وسجل تنبيهات الموبايل (فتح صفقات، التدعيم، الخروج، والتراجع)</span>
+            <span>إعدادات وسجل تنبيهات الموبايل</span>
           </button>
         )}
 
         {/* Open API setup button */}
         <button
+          type="button"
           onClick={onOpenApiSetup}
           data-testid="settings_open_api_button"
           className="w-full bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 text-xs sm:text-sm transition-colors cursor-pointer"
         >
           <Key className="w-4 h-4" />
-          <span>إدارة ربط المنصات (KuCoin & Binance API)</span>
+          <span>إدارة ربط المنصات</span>
         </button>
 
         {/* Review Live Trading button */}
         <button
+          type="button"
           onClick={onLive}
           data-testid="settings_live_review_button"
-          className="w-full border border-[#01BC8D] hover:bg-[#01BC8D]/15 text-[#01BC8D] font-bold py-2.5 px-4 rounded-xl text-xs sm:text-sm transition-colors cursor-pointer"
+          className="w-full border border-[#1E2733] hover:border-[#01BC8D]/60 bg-[#161D26] text-[#01BC8D] font-bold py-2.5 px-4 rounded-xl text-xs sm:text-sm transition-colors cursor-pointer"
         >
-          مراجعة أمان التداول المباشر (Live Mode)
+          مراجعة أمان التداول المباشر
         </button>
 
         {/* Notice */}
-        <p className="text-[11px] text-[#8A99AD] leading-relaxed pt-2 border-t border-[#232E3A]">
-          تنبيه أمني: مفاتيح باينانس تعمل بوضع القراءة فقط (Read-Only) لجلب بيانات السوق والمتداولين، بينما يتم تنفيذ الصفقات عبر حسابك في KuCoin وفق الإعدادات الموحدة في نافذة التداول.
+        <p className="text-[11px] text-[#8A99AD] leading-relaxed pt-2 border-t border-[#1E2733]">
+          تنبيه أمني: مفاتيح باينانس تعمل بوضع القراءة فقط لجلب بيانات السوق والمتداولين، بينما يتم تنفيذ الصفقات عبر حسابك في كوكوين وفق الإعدادات الموحدة في نافذة التداول.
         </p>
       </div>
 
       {/* Safety Specs */}
-      <div className="bg-[#1A222B] border border-[#232E3A] rounded-2xl p-4 space-y-2">
+      <div className="bg-[#161D26] border border-[#1E2733] rounded-2xl p-4 space-y-2">
         <h3 className="font-bold text-xs text-[#01BC8D] flex items-center gap-2">
           <ShieldCheck className="w-4 h-4" />
           <span>معايير إدارة المخاطر المفروضة</span>

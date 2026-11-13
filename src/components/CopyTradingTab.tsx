@@ -22,7 +22,13 @@ import {
 } from 'lucide-react';
 import { SparklineSvg, QuickTradeBar } from './SparklineSvg';
 import { CoinIcon } from './CoinIcon';
+import { TraderAvatar } from './TraderAvatar';
 import { AccountCopyPickerModal } from './AccountCopyPickerModal';
+import {
+  formatTimeWestern,
+  formatSignedCurrency,
+  formatSignedPercent,
+} from '../utils/formatters';
 import {
   BinanceConnectionState,
   CopyTraderItem,
@@ -353,18 +359,7 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
     })}`;
   };
 
-  const formatTime = (ms: number) => {
-    if (!ms) return '--';
-    return new Date(ms)
-      .toLocaleString('ar-EG-u-nu-latn', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      })
-      .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
-  };
+  const formatTime = (ms: number) => formatTimeWestern(ms);
 
   const filteredRecords = latestRecords.filter((rec) => {
     if (recordsFilter === 'ALL') return true;
@@ -400,44 +395,39 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
 
       {/* If a Trader is selected, show the focused Trader Details & Positions / Latest records View */}
       {selectedTraderId && traderDetail ? (
-        <div className="bg-[#12171D] border border-[#01BC8D]/50 rounded-2xl p-4 sm:p-5 space-y-5">
+        <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-5">
           {/* Back button & Trader Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#232E3A] pb-4">
-            <div className="flex items-center gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#1E2733] pb-4">
+            <div className="flex items-center gap-3 flex-wrap">
               <button
                 onClick={() => setSelectedTraderId(null)}
-                className="bg-[#1A222B] hover:bg-[#293847] text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1 border border-[#232E3A] cursor-pointer"
+                className="bg-[#1A222B] hover:bg-[#232E3A] text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1 border border-[#1E2733] cursor-pointer"
               >
                 <ChevronLeft className="w-4 h-4 rotate-180" />
-                <span>عودة لقائمة المتداولين</span>
+                <span>عودة للقائمة</span>
               </button>
 
               <button
                 onClick={onOpenSimulationTab}
-                className="bg-[#0D2B24] hover:bg-[#01BC8D]/20 text-[#01BC8D] border border-[#01BC8D]/40 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                className="bg-[#161D26] hover:bg-[#1E2733] text-[#01BC8D] border border-[#1E2733] px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
                 title="العودة مباشرة لنافذة التداول والصفقات"
               >
-                <span>العودة لصفحة التداول ⬅️</span>
+                <ChevronLeft className="w-3.5 h-3.5 rotate-180" />
+                <span>نافذة التداول</span>
               </button>
 
               <div className="flex items-center gap-3">
-                {traderDetail.avatarUrl ? (
-                  <img
-                    src={traderDetail.avatarUrl}
-                    alt={traderDetail.nickname}
-                    className="w-12 h-12 rounded-full object-cover border-2 border-[#01BC8D]"
-                  />
-                ) : (
-                  <div className="w-12 h-12 rounded-full bg-[#01BC8D]/20 text-[#01BC8D] flex items-center justify-center font-bold text-lg border border-[#01BC8D]">
-                    {traderDetail.nickname.slice(0, 2).toUpperCase()}
-                  </div>
-                )}
+                <TraderAvatar
+                  src={traderDetail.avatarUrl}
+                  name={traderDetail.nickname}
+                  size="lg"
+                />
                 <div>
                   <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="text-base sm:text-lg font-bold text-white">
                       {traderDetail.nickname}
                     </h3>
-                    <span className="text-[10px] font-mono bg-[#1A222B] text-[#8A99AD] px-2 py-0.5 rounded border border-[#232E3A]">
+                    <span dir="ltr" className="text-[10px] font-mono bg-[#161D26] text-[#8A99AD] px-2 py-0.5 rounded border border-[#1E2733]">
                       ID: {traderDetail.leadPortfolioId.slice(0, 10)}...
                     </span>
                   </div>
@@ -454,41 +444,53 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                 onClick={() =>
                   selectedSummary && handleCopyTrader(selectedSummary)
                 }
-                className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-4 py-2.5 rounded-xl text-xs flex items-center gap-1.5 shadow-lg cursor-pointer"
+                className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-4 py-2.5 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
                 <span>
-                  نسخ المتداول ({marginPerTrade}$ × {tradeSettings?.leverage || 5}x)
+                  نسخ المتداول (<span dir="ltr" className="inline-block tabular-nums">${marginPerTrade} × {tradeSettings?.leverage || 5}x</span>)
                 </span>
               </button>
             </div>
           </div>
 
           {isLoadingDetail ? (
-            <div className="py-12 text-center text-sm text-[#8A99AD] flex flex-col items-center gap-2">
-              <RefreshCw className="w-6 h-6 animate-spin text-[#01BC8D]" />
-              <span>جاري جلب تفاصيل المتداول، المراكز المفتوحة (Positions)، وسجل الدخول والخروج (Latest records)...</span>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {[0, 1, 2, 3].map((idx) => (
+                  <div key={idx} className="bg-[#161D26] border border-[#1E2733] rounded-xl p-3 space-y-2 animate-pulse">
+                    <div className="h-3 w-20 bg-[#1E2733] rounded" />
+                    <div className="h-5 w-28 bg-[#232E3A] rounded" />
+                  </div>
+                ))}
+              </div>
+              <div className="space-y-2.5">
+                {[0, 1].map((idx) => (
+                  <div key={idx} className="h-24 bg-[#161D26] border border-[#1E2733] rounded-xl animate-pulse" />
+                ))}
+              </div>
             </div>
           ) : (
             <>
               {/* Comprehensive Trader Metrics Grid */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                <div className="bg-[#1A222B] border border-[#232E3A] rounded-xl p-3">
+                <div className="bg-[#161D26] border border-[#1E2733] rounded-xl p-3">
                   <span className="text-[11px] text-[#8A99AD] block">العائد (ROI)</span>
                   <span
-                    className={`text-base sm:text-lg font-bold font-mono mt-0.5 block ${
+                    dir="ltr"
+                    className={`inline-block text-base sm:text-lg font-bold font-mono tabular-nums mt-0.5 ${
                       traderDetail.roi >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'
                     }`}
                   >
-                    {traderDetail.roi >= 0 ? '+' : ''}
-                    {traderDetail.roi.toFixed(2)}%
+                    {formatSignedPercent(traderDetail.roi)}
                   </span>
                 </div>
 
-                <div className="bg-[#1A222B] border border-[#232E3A] rounded-xl p-3">
+                <div className="bg-[#161D26] border border-[#1E2733] rounded-xl p-3">
                   <span className="text-[11px] text-[#8A99AD] block">صافي ربح المتداول (PNL)</span>
                   <span
-                    className={`text-base sm:text-lg font-bold font-mono mt-0.5 block ${
+                    dir="ltr"
+                    className={`inline-block text-base sm:text-lg font-bold font-mono tabular-nums mt-0.5 ${
                       traderDetail.pnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'
                     }`}
                   >
@@ -496,23 +498,23 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                   </span>
                 </div>
 
-                <div className="bg-[#1A222B] border border-[#232E3A] rounded-xl p-3">
+                <div className="bg-[#161D26] border border-[#1E2733] rounded-xl p-3">
                   <span className="text-[11px] text-[#8A99AD] block">نسبة النجاح (Win Rate)</span>
-                  <span className="text-base sm:text-lg font-bold font-mono text-white mt-0.5 block">
+                  <span dir="ltr" className="inline-block text-base sm:text-lg font-bold font-mono tabular-nums text-white mt-0.5">
                     {traderDetail.winRate.toFixed(2)}%
                   </span>
-                  <span className="text-[10px] text-[#8A99AD]">
-                    رابحة: {traderDetail.winOrders} / {traderDetail.totalOrders}
+                  <span className="text-[10px] text-[#8A99AD] block">
+                    رابحة: <span dir="ltr" className="font-mono tabular-nums">{traderDetail.winOrders} / {traderDetail.totalOrders}</span>
                   </span>
                 </div>
 
-                <div className="bg-[#1A222B] border border-[#232E3A] rounded-xl p-3">
+                <div className="bg-[#161D26] border border-[#1E2733] rounded-xl p-3">
                   <span className="text-[11px] text-[#8A99AD] block">الأصول المدارة (AUM)</span>
-                  <span className="text-base sm:text-lg font-bold font-mono text-[#01BC8D] mt-0.5 block">
+                  <span dir="ltr" className="inline-block text-base sm:text-lg font-bold font-mono tabular-nums text-[#01BC8D] mt-0.5">
                     {traderDetail.aum.toLocaleString('en-US', { maximumFractionDigits: 0 })} USDT
                   </span>
-                  <span className="text-[10px] text-[#8A99AD]">
-                    الناسخون: {traderDetail.currentCopyCount}/{traderDetail.maxCopyCount}
+                  <span className="text-[10px] text-[#8A99AD] block">
+                    الناسخون: <span dir="ltr" className="font-mono tabular-nums">{traderDetail.currentCopyCount}/{traderDetail.maxCopyCount}</span>
                   </span>
                 </div>
 
@@ -1162,17 +1164,17 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
         /* Sorting, Filtering & Traders Grid View */
         <>
           {/* Filter & Sort Controls Card */}
-          <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 space-y-3">
+          <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 space-y-3">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {/* Sort Selector */}
               <div>
                 <label className="block text-[11px] text-[#8A99AD] mb-1">
-                  ترتيب المتداولين حسب الطلب:
+                  ترتيب المتداولين:
                 </label>
                 <select
                   value={sortBy}
                   onChange={(e) => setSortBy(e.target.value as CopyTradingSortType)}
-                  className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-semibold focus:outline-none"
+                  className="w-full bg-[#0B0E11] border border-[#1E2733] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-semibold focus:outline-none"
                 >
                   {SORT_OPTIONS.map((opt) => (
                     <option key={opt.key} value={opt.key}>
@@ -1194,7 +1196,7 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                       className={`py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
                         timeRange === tr.key
                           ? 'bg-[#01BC8D] text-[#0B0E11]'
-                          : 'bg-[#0B0E11] text-[#8A99AD] border border-[#232E3A] hover:text-white'
+                          : 'bg-[#0B0E11] text-[#8A99AD] border border-[#1E2733] hover:text-white'
                       }`}
                     >
                       {tr.labelAr}
@@ -1206,22 +1208,22 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
               {/* Search by Nickname */}
               <div>
                 <label className="block text-[11px] text-[#8A99AD] mb-1">
-                  بحث عن متداول في باينانس:
+                  بحث بالاسم:
                 </label>
                 <div className="relative">
                   <input
                     type="text"
                     value={searchNickname}
                     onChange={(e) => setSearchNickname(e.target.value)}
-                    placeholder="اكتب اسم المتداول (Nickname)..."
-                    className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl pr-8 pl-3 py-2 text-xs text-white focus:outline-none"
+                    placeholder="اكتب اسم المتداول..."
+                    className="w-full bg-[#0B0E11] border border-[#1E2733] focus:border-[#01BC8D] rounded-xl pr-8 pl-3 py-2 text-xs text-white focus:outline-none"
                   />
                   <Search className="w-3.5 h-3.5 text-[#8A99AD] absolute right-2.5 top-2.5" />
                 </div>
               </div>
             </div>
 
-            <div className="flex items-center justify-between pt-1 text-xs">
+            <div className="flex items-center justify-between pt-1 text-xs flex-wrap gap-2">
               <label className="flex items-center gap-2 text-[#8A99AD] cursor-pointer">
                 <input
                   type="checkbox"
@@ -1229,12 +1231,12 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                   onChange={(e) => setHideFull(e.target.checked)}
                   className="accent-[#01BC8D]"
                 />
-                <span>إظهار المتداولين المتاحين للنسخ فقط (إخفاء الممتلئين)</span>
+                <span>إظهار المتاحين للنسخ فقط</span>
               </label>
 
               <span className="text-[11px] text-[#8A99AD]">
-                إجمالي المتداولين في القائمة:{' '}
-                <strong className="text-[#01BC8D] font-mono">
+                إجمالي المتداولين:{' '}
+                <strong dir="ltr" className="text-[#01BC8D] font-mono tabular-nums inline-block">
                   {totalCount.toLocaleString('en-US')}
                 </strong>
               </span>
@@ -1243,9 +1245,29 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
 
           {/* Traders Grid */}
           {isLoadingList ? (
-            <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-10 text-center text-sm text-[#8A99AD] flex flex-col items-center gap-3">
-              <RefreshCw className="w-7 h-7 animate-spin text-[#01BC8D]" />
-              <span>جاري جلب قائمة متداولي النسخ الحية من Binance Copy Trading...</span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              {[0, 1, 2, 3].map((idx) => (
+                <div
+                  key={idx}
+                  className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 space-y-3.5 animate-pulse"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-full bg-[#1E2733]" />
+                      <div className="space-y-1.5">
+                        <div className="h-4 w-28 bg-[#1E2733] rounded" />
+                        <div className="h-3 w-20 bg-[#161D26] rounded" />
+                      </div>
+                    </div>
+                    <div className="h-6 w-14 bg-[#161D26] rounded-lg" />
+                  </div>
+                  <div className="h-28 bg-[#161D26] border border-[#1E2733] rounded-xl" />
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="h-9 bg-[#161D26] rounded-xl" />
+                    <div className="h-9 bg-[#1E2733] rounded-xl" />
+                  </div>
+                </div>
+              ))}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
@@ -1259,60 +1281,54 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                 return (
                   <div
                     key={trader.leadPortfolioId}
-                    className={`bg-[#12171D] border rounded-2xl p-4 flex flex-col justify-between gap-3.5 transition-all hover:border-[#01BC8D]/60 ${
-                      isCopied ? 'border-[#01BC8D]' : 'border-[#232E3A]'
+                    className={`bg-[#12171D] border rounded-2xl p-4 flex flex-col justify-between gap-3.5 transition-all hover:border-[#2E3B4E] ${
+                      isCopied ? 'border-[#01BC8D]/60' : 'border-[#1E2733]'
                     }`}
                   >
                     {/* Trader Top Row */}
                     <div className="flex items-start justify-between gap-2">
                       <div
                         onClick={() => handleSelectTrader(trader)}
-                        className="flex items-center gap-3 cursor-pointer group"
+                        className="flex items-center gap-3 cursor-pointer group min-w-0"
                       >
-                        {trader.avatarUrl ? (
-                          <img
-                            src={trader.avatarUrl}
-                            alt={trader.nickname}
-                            className="w-11 h-11 rounded-full object-cover border border-[#01BC8D]/50"
-                          />
-                        ) : (
-                          <div className="w-11 h-11 rounded-full bg-[#1A222B] text-[#01BC8D] flex items-center justify-center font-bold text-sm border border-[#01BC8D]/40">
-                            {trader.nickname.slice(0, 2).toUpperCase()}
-                          </div>
-                        )}
-                        <div>
-                          <h3 className="font-bold text-sm sm:text-base text-white group-hover:text-[#01BC8D] transition-colors flex items-center gap-1.5">
-                            <span>{trader.nickname}</span>
+                        <TraderAvatar
+                          src={trader.avatarUrl}
+                          name={trader.nickname}
+                          size="md"
+                        />
+                        <div className="min-w-0">
+                          <h3 className="font-bold text-sm sm:text-base text-white group-hover:text-[#01BC8D] transition-colors flex items-center gap-1.5 truncate">
+                            <span className="truncate">{trader.nickname}</span>
                             {trader.badgeName && (
-                              <Award className="w-3.5 h-3.5 text-[#01BC8D]" />
+                              <Award className="w-3.5 h-3.5 text-[#01BC8D] shrink-0" />
                             )}
                           </h3>
                           <div className="flex items-center gap-2 text-[11px] text-[#8A99AD] mt-0.5">
                             <span className="flex items-center gap-1" title="عدد الناسخين">
                               <Users className="w-3 h-3 text-[#01BC8D]" />
-                              <span className="font-mono">
+                              <span dir="ltr" className="font-mono tabular-nums">
                                 {trader.currentCopyCount}/{trader.maxCopyCount}
                               </span>
                             </span>
                             <span>•</span>
-                            <span className="font-mono text-[#EAECEF]" title="عدد أيام فتح حسابه للنسخ">
+                            <span className="font-mono tabular-nums text-[#EAECEF]" title="عدد أيام فتح حسابه للنسخ">
                               {trader.leadingDays || 120} يوم
                             </span>
                           </div>
                         </div>
                       </div>
 
-                      {/* Left Side: Filter Days in Green + Copy Status */}
+                      {/* Left Side: Filter Days + Copy Status */}
                       <div className="flex flex-col items-end gap-1.5 shrink-0">
                         <span
-                          className="text-[#01BC8D] bg-[#0D2B24] border border-[#01BC8D]/40 px-2.5 py-0.5 rounded-lg font-mono font-bold text-[11px]"
-                          title="الأيام الخاصة بالفلتر"
+                          className="text-[#01BC8D] bg-[#0D2B24]/80 border border-[#01BC8D]/30 px-2.5 py-0.5 rounded-lg font-mono font-bold text-[11px]"
+                          title="الفترة الزمنية"
                         >
                           {TIME_RANGES.find((t) => t.key === timeRange)?.labelAr || timeRange}
                         </span>
                         {isCopied && (
-                          <span className="bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/50 px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center gap-1.5 shadow-[0_0_10px_rgba(1,188,141,0.25)]">
-                            <span className="w-2 h-2 rounded-full bg-[#01BC8D] animate-pulse" />
+                          <span className="bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[#01BC8D]" />
                             <span>
                               منسوخ ({traderCopiedEntries.length > 1 ? `${traderCopiedEntries.length} حسابات` : traderCopiedEntries[0]?.accountName || 'يتم النسخ'})
                             </span>
@@ -1321,20 +1337,20 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                       </div>
                     </div>
 
-                    {/* Trader Metrics + KuCoin Sparkline */}
-                    <div className="bg-[#1A222B] rounded-xl p-3 border border-[#232E3A]/70 space-y-2.5">
+                    {/* Trader Metrics + Sparkline */}
+                    <div className="bg-[#161D26] rounded-xl p-3 border border-[#1E2733] space-y-2.5">
                       <div className="flex items-center justify-between gap-2">
                         <div>
                           <span className="text-[10px] text-[#8A99AD] block">
                             نسبة العائد (ROI)
                           </span>
                           <span
-                            className={`text-lg sm:text-xl font-extrabold font-mono tabular-nums ${
+                            dir="ltr"
+                            className={`inline-block text-lg sm:text-xl font-extrabold font-mono tabular-nums ${
                               isPositiveRoi ? 'text-[#01BC8D]' : 'text-[#F6465D]'
                             }`}
                           >
-                            {isPositiveRoi ? '+' : ''}
-                            {trader.roi.toFixed(2)}%
+                            {formatSignedPercent(trader.roi)}
                           </span>
                         </div>
 
@@ -1346,17 +1362,18 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                         />
                       </div>
 
-                      <div className="grid grid-cols-3 gap-2 pt-2 border-t border-[#232E3A]/80">
+                      <div className="grid grid-cols-3 gap-2 pt-2 border-t border-[#1E2733]">
                         <div>
                           <span className="text-[10px] text-[#8A99AD] block">
                             صافي الربح (PNL)
                           </span>
                           <span
-                            className={`text-xs font-bold font-mono tabular-nums ${
+                            dir="ltr"
+                            className={`inline-block text-xs font-bold font-mono tabular-nums ${
                               trader.pnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'
                             }`}
                           >
-                            {formatMoney(trader.pnl)}$
+                            {formatSignedCurrency(trader.pnl)}
                           </span>
                         </div>
 
@@ -1364,7 +1381,7 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                           <span className="text-[10px] text-[#8A99AD] block">
                             نسبة النجاح
                           </span>
-                          <span className="text-xs font-bold font-mono text-white tabular-nums">
+                          <span dir="ltr" className="inline-block text-xs font-bold font-mono text-white tabular-nums">
                             {trader.winRate.toFixed(1)}%
                           </span>
                         </div>
@@ -1373,8 +1390,8 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                           <span className="text-[10px] text-[#8A99AD] block">
                             AUM / MDD
                           </span>
-                          <span className="text-xs font-bold font-mono text-[#01BC8D] tabular-nums">
-                            {(trader.aum / 1000).toFixed(0)}K$ •{' '}
+                          <span dir="ltr" className="inline-block text-xs font-bold font-mono text-[#01BC8D] tabular-nums">
+                            ${(trader.aum / 1000).toFixed(0)}K •{' '}
                             <span className="text-[#F6465D]">{trader.mdd.toFixed(1)}%</span>
                           </span>
                         </div>
@@ -1385,7 +1402,7 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         onClick={() => handleSelectTrader(trader)}
-                        className="bg-[#1A222B] hover:bg-[#212C37] text-white border border-[#232E3A] font-semibold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                        className="bg-[#161D26] hover:bg-[#1E2733] text-white border border-[#1E2733] font-semibold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                       >
                         <Eye className="w-3.5 h-3.5 text-[#01BC8D]" />
                         <span>التفاصيل والصفقات</span>
@@ -1412,7 +1429,7 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                       ) : (
                         <button
                           onClick={() => handleCopyTrader(trader)}
-                          className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-[0_0_12px_rgba(1,188,141,0.2)]"
+                          className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                         >
                           <Copy className="w-3.5 h-3.5" />
                           <span>نسخ المتداول</span>

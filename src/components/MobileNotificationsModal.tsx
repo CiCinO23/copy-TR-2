@@ -30,6 +30,7 @@ import {
 } from '../types';
 import { CoinIcon } from './CoinIcon';
 import { mobileNotifications } from '../services/mobileNotifications';
+import { formatDateTimeWestern } from '../utils/formatters';
 
 function formatPriceClean(p: number): string {
   if (!p || isNaN(p)) return '0.00';
@@ -40,12 +41,13 @@ function formatPriceClean(p: number): string {
 
 function formatDateTimeAr(ts: number): string {
   try {
-    return new Date(ts).toLocaleString('ar-EG', {
+    return formatDateTimeWestern(ts, {
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
+      hour12: false,
     });
   } catch {
     return '';

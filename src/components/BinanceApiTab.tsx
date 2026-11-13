@@ -64,10 +64,10 @@ export const BinanceApiTab: React.FC<BinanceApiTabProps> = ({
 
       {/* Connection Status Diagnostics Card */}
       <div
-        className={`border rounded-2xl p-4 sm:p-5 transition-all ${
+        className={`border rounded-2xl p-4 sm:p-5 transition-colors ${
           connectionState.isAuthenticated
-            ? 'bg-[#0D2B24] border-[#01BC8D]/40'
-            : 'bg-[#1A222B] border-[#232E3A]'
+            ? 'bg-[#12171D] border-[#01BC8D]/40'
+            : 'bg-[#12171D] border-[#1E2733]'
         }`}
       >
         <div className="flex items-center justify-between gap-3 mb-2">
@@ -96,28 +96,40 @@ export const BinanceApiTab: React.FC<BinanceApiTabProps> = ({
         </p>
 
         {connectionState.latencyMs !== null && (
-          <div className="text-xs text-[#8A99AD] font-mono mb-1">
-            زمن الاستجابة (Ping): <strong className="text-white">{connectionState.latencyMs} ms</strong>
+          <div className="text-xs text-[#8A99AD] mb-1 flex items-center gap-1.5">
+            <span>زمن الاستجابة:</span>
+            <strong dir="ltr" className="text-white font-mono tabular-nums">
+              {connectionState.latencyMs} ms
+            </strong>
           </div>
         )}
 
         {connectionState.accountUsdtBalance && (
-          <div className="text-xs text-[#01BC8D] font-mono font-bold mt-1">
-            إجمالي رصيد العقود الآجلة: {connectionState.accountUsdtBalance} (المتاح:{' '}
-            {connectionState.accountAvailableBalance || '--'})
+          <div className="text-xs text-[#01BC8D] font-bold mt-1 flex items-center gap-1.5 flex-wrap">
+            <span>إجمالي رصيد العقود الآجلة:</span>
+            <span dir="ltr" className="font-mono tabular-nums">
+              {connectionState.accountUsdtBalance}
+            </span>
+            <span className="text-[#8A99AD] font-normal">
+              (المتاح:{' '}
+              <span dir="ltr" className="font-mono text-white">
+                {connectionState.accountAvailableBalance || '--'}
+              </span>
+              )
+            </span>
           </div>
         )}
 
         {connectionState.errorMessageAr && (
-          <p className="text-xs text-[#F6465D] bg-[#2B1216] p-2.5 rounded-lg border border-[#F6465D]/30 mt-3">
+          <p className="text-xs text-[#F6465D] bg-[#2B1216] p-2.5 rounded-xl border border-[#F6465D]/30 mt-3">
             {connectionState.errorMessageAr}
           </p>
         )}
       </div>
 
       {/* Environment Selection Card */}
-      <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5">
-        <h3 className="font-bold text-sm text-[#01BC8D] mb-3">1. بيئة الاتصال (Environment)</h3>
+      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5">
+        <h3 className="font-bold text-sm text-[#01BC8D] mb-3">1. بيئة الاتصال</h3>
 
         <div className="space-y-2 mb-4">
           {Object.values(BINANCE_ENVIRONMENTS).map((env) => {
@@ -278,14 +290,14 @@ export const BinanceApiTab: React.FC<BinanceApiTabProps> = ({
       </div>
 
       {/* Security Best Practices Card */}
-      <div className="bg-[#231D18] border border-[#01BC8D]/30 rounded-2xl p-4">
+      <div className="bg-[#161D26] border border-[#1E2733] rounded-2xl p-4">
         <div className="flex items-center gap-2 mb-2 text-[#01BC8D]">
           <ShieldCheck className="w-5 h-5" />
           <h4 className="font-bold text-xs sm:text-sm">إرشادات أمان مفاتيح باينانس</h4>
         </div>
         <ul className="text-xs text-[#8A99AD] space-y-1.5 leading-relaxed">
-          <li>• تم قفل التطبيق بوضع القراءة الآمنة (Read-Only) لمنع أي عمليات غير مقصودة.</li>
-          <li>• لا تقم مطلقاً بتفعيل صلاحية السحب (Enable Withdrawals) في مفاتيح باينانس.</li>
+          <li>• تم قفل التطبيق بوضع القراءة الآمنة فقط لمنع أي عمليات غير مقصودة.</li>
+          <li>• لا تقم مطلقاً بتفعيل صلاحية السحب في مفاتيح باينانس.</li>
           <li>• يمكنك التحقق من الرصيد والصفقات وتدفقات الحيتان في أي وقت بالضغط على زر التحديث.</li>
         </ul>
       </div>

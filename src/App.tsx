@@ -1040,27 +1040,26 @@ export const App: React.FC = () => {
           selectedTab === 'KuCoinAPI' ||
           selectedTab === 'BinanceAPI') && (
           <div className="space-y-4 animate-in fade-in duration-200">
-            {/* Unified API Header & KuCoin-style Underline Tabs */}
-            <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl px-4 pt-3.5 pb-0 overflow-hidden">
-              <div className="flex items-center justify-between gap-2 pb-2">
+            <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl px-4 pt-3.5 pb-0 overflow-hidden">
+              <div className="flex items-center justify-between gap-2 pb-2.5">
                 <div>
                   <h2 className="text-base sm:text-lg font-bold text-white">
-                    ربط المنصات (API)
+                    ربط المنصات
                   </h2>
-                  <p className="text-[11px] text-[#8A99AD]">
-                    كوكوين لتنفيذ الصفقات وإدارة الرصيد • باينانس لجلب معطيات المتداولين والحيتان والأسعار
+                  <p className="text-xs text-[#8A99AD] mt-0.5">
+                    كوكوين لتنفيذ الصفقات وإدارة الرصيد • باينانس لجلب بيانات المتداولين والحيتان والأسعار
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center border-t border-[#232E3A] -mx-4 px-4">
+              <div className="flex items-center border-t border-[#1E2733] -mx-4 px-4">
                 <button
                   type="button"
                   onClick={() => {
                     setApiSubTab('KUCOIN');
                   }}
                   data-testid="api_subtab_kucoin"
-                  className={`flex-1 py-3 px-3 text-xs sm:text-sm font-bold border-b-2 flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                  className={`flex-1 py-3 px-3 text-xs sm:text-sm font-bold border-b-2 flex items-center justify-center gap-2 transition-colors cursor-pointer ${
                     apiSubTab === 'KUCOIN'
                       ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
                       : 'border-transparent text-[#8A99AD] hover:text-white'
@@ -1071,7 +1070,7 @@ export const App: React.FC = () => {
                       kucoinConnectionState.isConnected ? 'bg-[#01BC8D]' : 'bg-[#F6465D]'
                     }`}
                   />
-                  <span>[KuCoin للتنفيذ]</span>
+                  <span>كوكوين للتنفيذ</span>
                   {kucoinSecurityConfig.enabled &&
                     (isKucoinSecurityUnlocked ? (
                       <Unlock className="w-3.5 h-3.5 text-[#01BC8D]" />
@@ -1086,7 +1085,7 @@ export const App: React.FC = () => {
                     setApiSubTab('BINANCE');
                   }}
                   data-testid="api_subtab_binance"
-                  className={`flex-1 py-3 px-3 text-xs sm:text-sm font-bold border-b-2 flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                  className={`flex-1 py-3 px-3 text-xs sm:text-sm font-bold border-b-2 flex items-center justify-center gap-2 transition-colors cursor-pointer ${
                     apiSubTab === 'BINANCE'
                       ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
                       : 'border-transparent text-[#8A99AD] hover:text-white'
@@ -1097,7 +1096,7 @@ export const App: React.FC = () => {
                       connectionState.isConnected ? 'bg-[#01BC8D]' : 'bg-[#F6465D]'
                     }`}
                   />
-                  <span>[Binance للمعلومات]</span>
+                  <span>باينانس للمعلومات</span>
                 </button>
               </div>
             </div>

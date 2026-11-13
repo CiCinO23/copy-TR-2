@@ -238,29 +238,27 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   return (
     <div className="space-y-4 sm:space-y-5 animate-in fade-in duration-200 w-full overflow-hidden">
       {/* 1. رصيد كوكوين الإجمالي وتفاصيل المحفظة */}
-      <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4 shadow-lg overflow-hidden">
+      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4 overflow-hidden">
         {/* Top Row: Header & Total Balance */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#232E3A] pb-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#1E2733] pb-4">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-12 h-12 rounded-2xl bg-[#01BC8D]/15 border border-[#01BC8D]/30 flex items-center justify-center text-[#01BC8D] shrink-0 shadow-inner">
-              <Wallet className="w-6 h-6" />
+            <div className="w-11 h-11 rounded-xl bg-[#161D26] border border-[#1E2733] flex items-center justify-center text-[#01BC8D] shrink-0">
+              <Wallet className="w-5 h-5" />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-xs sm:text-sm text-[#8A99AD] font-semibold">
-                  رصيد كوكوين الإجمالي (KuCoin Total Balance)
+                  رصيد كوكوين الإجمالي
                 </span>
                 <span
-                  className={`text-[10px] px-2 py-0.5 rounded-full font-bold font-mono shrink-0 ${
-                    isKucoinAuth
-                      ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
-                      : 'bg-[#1A222B] text-[#01BC8D] border border-[#01BC8D]/30'
+                  className={`text-[11px] font-semibold shrink-0 ${
+                    isKucoinAuth ? 'text-[#01BC8D]' : 'text-[#8A99AD]'
                   }`}
                 >
-                  {isKucoinAuth ? 'حساب KuCoin حقيقي' : 'وضع التداول الافتراضي'}
+                  · {isKucoinAuth ? 'حساب KuCoin حقيقي' : 'وضع التداول الافتراضي'}
                 </span>
               </div>
-              <div className="flex items-baseline gap-2 mt-1 flex-wrap">
+              <div className="flex items-baseline gap-2.5 mt-1 flex-wrap">
                 <span
                   dir="ltr"
                   className="text-2xl sm:text-3xl font-bold text-white font-mono tabular-nums tracking-tight"
@@ -279,8 +277,8 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                       : 'bg-[#2B1216] text-[#F6465D]'
                   }`}
                 >
-                  PNL: {unrealizedPnl >= 0 ? '+' : ''}
-                  {unrealizedPnl.toFixed(2)} USDT
+                  PNL {unrealizedPnl >= 0 ? '+' : '-'}
+                  ${Math.abs(unrealizedPnl).toFixed(2)}
                 </span>
               </div>
             </div>
@@ -292,22 +290,22 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
               onClick={handleFetchRealBalanceClick}
               disabled={kucoinConnectionState.isTesting}
               data-testid="fetch_real_kucoin_balance_btn"
-              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3.5 py-2.5 rounded-xl text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-[0_0_14px_rgba(1,188,141,0.3)]"
+              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3.5 py-2.5 rounded-xl text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               <RefreshCw
                 className={`w-3.5 h-3.5 shrink-0 ${
                   kucoinConnectionState.isTesting ? 'animate-spin' : ''
                 }`}
               />
-              <span>جلب الرصيد الحقيقي من KuCoin</span>
+              <span>جلب الرصيد الحقيقي</span>
             </button>
 
             <button
               type="button"
               onClick={onOpenKucoinSetup}
-              className="bg-[#1A222B] hover:bg-[#232E3A] border border-[#01BC8D]/40 text-[#01BC8D] font-bold px-3.5 py-2.5 rounded-xl text-xs transition-colors cursor-pointer"
+              className="bg-[#161D26] hover:bg-[#1E2733] border border-[#1E2733] text-[#F0F4F8] font-semibold px-3.5 py-2.5 rounded-xl text-xs transition-colors cursor-pointer"
             >
-              إعدادات KuCoin
+              إعدادات كوكوين
             </button>
           </div>
         </div>
@@ -318,7 +316,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl px-3.5 py-2.5 text-xs text-[#01BC8D] font-bold flex items-center justify-between gap-2 animate-in fade-in duration-150"
           >
             <span>{realBalanceFeedback}</span>
-            <span className="font-mono text-white shrink-0">
+            <span dir="ltr" className="font-mono text-white shrink-0 tabular-nums">
               {totalKucoinUsdt.toLocaleString('en-US', {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2,
@@ -329,25 +327,25 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         )}
 
         {/* Detailed KuCoin Balance Breakdown */}
-        <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3 sm:p-3.5 space-y-3">
-          <div className="flex items-center justify-between text-xs">
-            <div className="flex items-center gap-2">
-              <Layers className="w-4 h-4 text-[#01BC8D]" />
-              <h3 className="font-bold text-white">
-                تفصيل أرصدة محفظة كوكوين (KuCoin Breakdown)
+        <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 sm:p-3.5 space-y-3">
+          <div className="flex items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 min-w-0">
+              <Layers className="w-4 h-4 text-[#01BC8D] shrink-0" />
+              <h3 className="font-bold text-white truncate">
+                تفصيل أرصدة محفظة كوكوين
               </h3>
             </div>
-            <span className="text-[11px] text-[#8A99AD] font-mono">
-              المراكز النشطة: {kucoinConnectionState.positions.length}
+            <span className="text-[11px] text-[#8A99AD] font-mono whitespace-nowrap shrink-0 tabular-nums">
+              المراكز النشطة: <strong className="text-white">{kucoinConnectionState.positions.length}</strong>
             </span>
           </div>
 
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
             {/* 1. Futures Balance */}
-            <div className="bg-[#12171D] border border-[#232E3A] rounded-xl p-2.5 sm:p-3 flex flex-col justify-between">
+            <div className="bg-[#12171D] border border-[#1E2733] rounded-xl p-3 flex flex-col justify-between">
               <div className="flex items-center justify-between text-[11px] text-[#8A99AD]">
                 <span className="truncate">حساب الفيوتشر</span>
-                <span className="text-[10px] text-[#01BC8D] font-mono font-bold">Futures</span>
+                <span className="text-[10px] text-[#01BC8D] font-mono font-semibold">Futures</span>
               </div>
               <div
                 dir="ltr"
@@ -359,16 +357,16 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 })}{' '}
                 <span className="text-[10px] text-[#8A99AD]">USDT</span>
               </div>
-              <span className="text-[10px] text-[#01BC8D] block mt-0.5 truncate">
+              <span className="text-[10px] text-[#8A99AD] block mt-0.5 truncate">
                 مخصص للعقود والنسخ
               </span>
             </div>
 
             {/* 2. Spot Balance */}
-            <div className="bg-[#12171D] border border-[#232E3A] rounded-xl p-2.5 sm:p-3 flex flex-col justify-between">
+            <div className="bg-[#12171D] border border-[#1E2733] rounded-xl p-3 flex flex-col justify-between">
               <div className="flex items-center justify-between text-[11px] text-[#8A99AD]">
                 <span className="truncate">حساب السبوت</span>
-                <span className="text-[10px] text-[#01BC8D] font-mono font-bold">Spot</span>
+                <span className="text-[10px] text-[#8A99AD] font-mono font-semibold">Spot</span>
               </div>
               <div
                 dir="ltr"
@@ -386,10 +384,10 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             </div>
 
             {/* 3. Main / Funding */}
-            <div className="bg-[#12171D] border border-[#232E3A] rounded-xl p-2.5 sm:p-3 flex flex-col justify-between">
+            <div className="bg-[#12171D] border border-[#1E2733] rounded-xl p-3 flex flex-col justify-between">
               <div className="flex items-center justify-between text-[11px] text-[#8A99AD]">
                 <span className="truncate">حساب التمويل</span>
-                <span className="text-[10px] text-[#00C8FF] font-mono font-bold">Funding</span>
+                <span className="text-[10px] text-[#38BDF8] font-mono font-semibold">Funding</span>
               </div>
               <div
                 dir="ltr"
@@ -407,10 +405,10 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             </div>
 
             {/* 4. Available */}
-            <div className="bg-[#12171D] border border-[#232E3A] rounded-xl p-2.5 sm:p-3 flex flex-col justify-between">
+            <div className="bg-[#12171D] border border-[#1E2733] rounded-xl p-3 flex flex-col justify-between">
               <div className="flex items-center justify-between text-[11px] text-[#8A99AD]">
                 <span className="truncate">المتاح للتداول</span>
-                <span className="text-[10px] text-[#01BC8D] font-mono font-bold">Available</span>
+                <span className="text-[10px] text-[#01BC8D] font-mono font-semibold">Available</span>
               </div>
               <div
                 dir="ltr"
@@ -423,28 +421,31 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 <span className="text-[10px] text-[#8A99AD]">USDT</span>
               </div>
               <span className="text-[10px] text-[#8A99AD] font-mono block mt-0.5 truncate">
-                محجوز: {inOrderOrMargin.toFixed(2)} $
+                محجوز:{' '}
+                <span dir="ltr" className="inline-block tabular-nums">
+                  ${inOrderOrMargin.toFixed(2)}
+                </span>
               </span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* 2. أسعار العقود الآجلة الحية (Binance Futures Live) مع الأيقونات الحقيقية */}
-      <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-lg overflow-hidden">
+      {/* 2. أسعار العقود الآجلة الحية */}
+      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-3.5 overflow-hidden">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
             <Activity className="w-5 h-5 text-[#01BC8D] shrink-0" />
             <div>
               <h3 className="font-bold text-sm sm:text-base text-white flex items-center gap-2 flex-wrap">
-                <span>أسعار العقود الآجلة الحية (Binance Futures Live)</span>
-                <span className="text-[10px] bg-[#0D2B24] text-[#01BC8D] px-2 py-0.5 rounded-full font-mono flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#01BC8D] animate-ping" />
-                  مباشر 24س
+                <span>أسعار العقود الآجلة الحية</span>
+                <span className="text-[11px] text-[#01BC8D] font-semibold flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#01BC8D]" />
+                  <span>مباشر 24س</span>
                 </span>
               </h3>
               <p className="text-[11px] text-[#8A99AD]">
-                أيقونات العملات الحقيقية الرسمية. اضغط على أي عملة لعرض الشارت بالشموع اليابانية.
+                اضغط على أي عملة لعرض الشارت بالشموع اليابانية.
               </p>
             </div>
           </div>
@@ -454,16 +455,16 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
               type="button"
               onClick={() => setShowAddCoinPanel(!showAddCoinPanel)}
               data-testid="toggle_add_coin_btn"
-              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 transition-colors cursor-pointer shadow-[0_0_12px_rgba(1,188,141,0.2)]"
+              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               <Plus className="w-4 h-4" />
-              <span>{showAddCoinPanel ? 'إغلاق الإضافة' : 'إضافة عملة جديدة'}</span>
+              <span>{showAddCoinPanel ? 'إغلاق الإضافة' : 'إضافة عملة'}</span>
             </button>
             <button
               type="button"
               onClick={onRefreshMarket}
               data-testid="refresh_market_button"
-              className="p-2 rounded-xl bg-[#1A222B] hover:bg-[#212C37] border border-[#232E3A] text-[#01BC8D] transition-colors cursor-pointer"
+              className="p-2 rounded-xl bg-[#161D26] hover:bg-[#1E2733] border border-[#1E2733] text-[#01BC8D] transition-colors cursor-pointer"
               title="تحديث الأسعار"
             >
               <RefreshCw
@@ -672,7 +673,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
 
                 {/* Left side: Live Price + 24h Change */}
                 <div className="flex items-center gap-2 shrink-0">
-                  <div className="text-left font-mono">
+                  <div dir="ltr" className="text-left font-mono">
                     <div className="text-sm font-bold text-white tabular-nums tracking-tight">
                       {ticker.lastPrice}
                     </div>
@@ -707,13 +708,13 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         </div>
       </div>
 
-      {/* 3. الشارت التفاعلي بالشموع اليابانية على نمط KuCoin Futures Pro */}
+      {/* 3. الشارت التفاعلي بالشموع اليابانية */}
       <div
         data-testid="dashboard_futures_chart"
-        className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4 shadow-lg overflow-hidden"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4 overflow-hidden"
       >
-        {/* Coin Quick Switcher Underline Tabs (KuCoin Style) */}
-        <div className="flex items-center gap-1 overflow-x-auto border-b border-[#232E3A] -mx-4 px-4 sm:-mx-5 sm:px-5 no-scrollbar">
+        {/* Coin Quick Switcher Underline Tabs */}
+        <div className="flex items-center gap-1 overflow-x-auto border-b border-[#1E2733] -mx-4 px-4 sm:-mx-5 sm:px-5 no-scrollbar">
           {connectionState.tickers.map((t) => {
             const base = t.symbol.replace('USDT', '');
             const active = t.symbol === selectedChartSymbol;
@@ -722,7 +723,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 key={t.symbol}
                 type="button"
                 onClick={() => setSelectedChartSymbol(t.symbol)}
-                className={`px-3 py-2.5 text-xs font-mono font-bold flex items-center gap-1.5 shrink-0 border-b-2 transition-all cursor-pointer ${
+                className={`px-3 py-2.5 text-xs font-mono font-bold flex items-center gap-1.5 shrink-0 border-b-2 transition-colors cursor-pointer ${
                   active
                     ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
                     : 'border-transparent text-[#8A99AD] hover:text-white'
@@ -735,9 +736,8 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           })}
         </div>
 
-        {/* KuCoin Futures Pro Compact Ticker Strip */}
-        <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3 sm:p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          {/* Left/Right Main Symbol + Big Price + Change Capsule */}
+        {/* Compact Ticker Strip */}
+        <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 sm:p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           <div className="flex items-center gap-3 flex-wrap">
             <RealCoinIcon symbol={selectedChartSymbol} size="lg" />
             <div>
@@ -745,11 +745,11 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 <span className="font-bold text-sm sm:text-base text-white font-mono">
                   {selectedChartSymbol}
                 </span>
-                <span className="text-[10px] bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/30 px-1.5 py-0.5 rounded font-bold">
+                <span className="text-[10px] text-[#01BC8D] font-mono font-bold">
                   Perp
                 </span>
               </div>
-              <span className="text-[10px] text-[#8A99AD] block">
+              <span className="text-[11px] text-[#8A99AD] block">
                 عقود باينانس الآجلة الدائمة
               </span>
             </div>
@@ -764,10 +764,10 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                   {activeTicker.lastPrice}
                 </span>
                 <span
-                  className={`px-2.5 py-1 rounded-full text-xs font-bold font-mono tabular-nums ${
+                  className={`px-2 py-0.5 rounded-lg text-xs font-bold font-mono tabular-nums ${
                     isPositiveChart
-                      ? 'bg-[#01BC8D]/20 text-[#01BC8D] border border-[#01BC8D]/40'
-                      : 'bg-[#F6465D]/20 text-[#F6465D] border border-[#F6465D]/40'
+                      ? 'bg-[#0D2B24] text-[#01BC8D]'
+                      : 'bg-[#2B1216] text-[#F6465D]'
                   }`}
                 >
                   {activeTicker.priceChangePercent}
@@ -776,24 +776,23 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             )}
           </div>
 
-          {/* 24h High / 24h Low / 24h Turnover (KuCoin Official Order) */}
           {activeTicker && (
-            <div className="grid grid-cols-3 gap-3 pt-2.5 lg:pt-0 border-t lg:border-t-0 border-[#1A222B] text-[11px]">
+            <div className="grid grid-cols-3 gap-3 pt-2.5 lg:pt-0 border-t lg:border-t-0 border-[#1E2733] text-[11px]">
               <div>
-                <span className="text-[#8A99AD] block text-[10px]">24h High (أعلى)</span>
-                <span dir="ltr" className="text-white font-bold font-mono tabular-nums">
+                <span className="text-[#8A99AD] block text-[10px]">أعلى 24س</span>
+                <span dir="ltr" className="inline-block text-white font-bold font-mono tabular-nums">
                   {activeTicker.highPrice}
                 </span>
               </div>
               <div>
-                <span className="text-[#8A99AD] block text-[10px]">24h Low (أدنى)</span>
-                <span dir="ltr" className="text-white font-bold font-mono tabular-nums">
+                <span className="text-[#8A99AD] block text-[10px]">أدنى 24س</span>
+                <span dir="ltr" className="inline-block text-white font-bold font-mono tabular-nums">
                   {activeTicker.lowPrice}
                 </span>
               </div>
               <div>
-                <span className="text-[#8A99AD] block text-[10px]">24h Turnover (الحجم)</span>
-                <span dir="ltr" className="text-[#01BC8D] font-bold font-mono tabular-nums">
+                <span className="text-[#8A99AD] block text-[10px]">السيولة 24س</span>
+                <span dir="ltr" className="inline-block text-[#01BC8D] font-bold font-mono tabular-nums">
                   {activeTicker.quoteVolume}
                 </span>
               </div>
@@ -802,13 +801,12 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         </div>
 
         {/* Chart Controls: Underline Mode Switch (Candles vs Line) & Timeframes */}
-        <div className="flex items-center justify-between gap-2 border-b border-[#232E3A] pb-0 flex-wrap">
-          {/* Underline View Mode Tabs */}
+        <div className="flex items-center justify-between gap-2 border-b border-[#1E2733] pb-0 flex-wrap">
           <div className="flex items-center gap-4">
             <button
               type="button"
               onClick={() => setChartViewMode('CANDLE')}
-              className={`pb-2.5 text-xs font-bold flex items-center gap-1.5 border-b-2 transition-all cursor-pointer ${
+              className={`pb-2.5 text-xs font-bold flex items-center gap-1.5 border-b-2 transition-colors cursor-pointer ${
                 chartViewMode === 'CANDLE'
                   ? 'border-[#01BC8D] text-[#01BC8D]'
                   : 'border-transparent text-[#8A99AD] hover:text-white'
@@ -820,7 +818,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             <button
               type="button"
               onClick={() => setChartViewMode('AREA')}
-              className={`pb-2.5 text-xs font-bold flex items-center gap-1.5 border-b-2 transition-all cursor-pointer ${
+              className={`pb-2.5 text-xs font-bold flex items-center gap-1.5 border-b-2 transition-colors cursor-pointer ${
                 chartViewMode === 'AREA'
                   ? 'border-[#01BC8D] text-[#01BC8D]'
                   : 'border-transparent text-[#8A99AD] hover:text-white'
@@ -831,7 +829,6 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             </button>
           </div>
 
-          {/* Timeframe Underline Selector */}
           <div className="flex items-center gap-1 pb-1.5">
             {(
               [
@@ -847,7 +844,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 onClick={() => setChartInterval(tf.id)}
                 className={`px-2.5 py-1 rounded-lg text-[11px] font-bold font-mono transition-colors cursor-pointer ${
                   chartInterval === tf.id
-                    ? 'bg-[#01BC8D]/20 text-[#01BC8D] border border-[#01BC8D]/40'
+                    ? 'bg-[#01BC8D]/15 text-[#01BC8D]'
                     : 'text-[#8A99AD] hover:text-white'
                 }`}
               >
@@ -859,27 +856,28 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
 
         {/* Live Candle OHLC Summary Strip */}
         {displayedCandle && (
-          <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl px-3 py-2 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+          <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl px-3 py-2 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
             <div className="flex items-center gap-4 flex-wrap">
               <span className="text-[#8A99AD]">
-                الوقت: <strong className="text-white">{displayedCandle.timeLabel}</strong>
+                الوقت: <strong dir="ltr" className="inline-block text-white">{displayedCandle.timeLabel}</strong>
               </span>
               <span>
-                افتتاح (O):{' '}
-                <strong className="text-white tabular-nums">{displayedCandle.open}</strong>
+                افتتاح:{' '}
+                <strong dir="ltr" className="inline-block text-white tabular-nums">{displayedCandle.open}</strong>
               </span>
               <span>
-                أعلى (H):{' '}
-                <strong className="text-[#01BC8D] tabular-nums">{displayedCandle.high}</strong>
+                أعلى:{' '}
+                <strong dir="ltr" className="inline-block text-[#01BC8D] tabular-nums">{displayedCandle.high}</strong>
               </span>
               <span>
-                أدنى (L):{' '}
-                <strong className="text-[#F6465D] tabular-nums">{displayedCandle.low}</strong>
+                أدنى:{' '}
+                <strong dir="ltr" className="inline-block text-[#F6465D] tabular-nums">{displayedCandle.low}</strong>
               </span>
               <span>
-                إغلاق (C):{' '}
+                إغلاق:{' '}
                 <strong
-                  className={`tabular-nums ${
+                  dir="ltr"
+                  className={`inline-block tabular-nums ${
                     displayedCandle.close >= displayedCandle.open
                       ? 'text-[#01BC8D]'
                       : 'text-[#F6465D]'
@@ -890,16 +888,36 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
               </span>
             </div>
             <div className="text-[#8A99AD]">
-              الحجم: <strong className="text-white">{displayedCandle.volume.toLocaleString('en-US')}</strong>
+              الحجم: <strong dir="ltr" className="inline-block text-white tabular-nums">{displayedCandle.volume.toLocaleString('en-US')}</strong>
             </div>
           </div>
         )}
 
         {/* Main Candlestick / Area Chart Viewport */}
-        <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3 sm:p-4 relative">
+        <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 sm:p-4 relative">
           {isLoadingChart && klineData.length === 0 ? (
-            <div className="h-64 sm:h-72 flex items-center justify-center text-xs text-[#8A99AD]">
-              جاري جلب شموع {selectedChartSymbol} الحية من باينانس...
+            <div
+              data-testid="dashboard_chart_skeleton"
+              className="h-64 sm:h-72 flex flex-col justify-between p-2 animate-pulse"
+            >
+              <div className="flex items-center justify-between">
+                <div className="h-3 w-32 rounded bg-[#161D26]" />
+                <div className="h-3 w-20 rounded bg-[#161D26]" />
+              </div>
+              <div className="flex-1 flex items-end gap-2 py-4">
+                {[38, 62, 48, 74, 55, 80, 68, 44, 72, 60, 86, 54].map((h, idx) => (
+                  <div
+                    key={idx}
+                    className="flex-1 rounded-sm bg-[#161D26]"
+                    style={{ height: `${h}%` }}
+                  />
+                ))}
+              </div>
+              <div className="flex items-center justify-between">
+                <div className="h-2.5 w-12 rounded bg-[#161D26]" />
+                <div className="h-2.5 w-12 rounded bg-[#161D26]" />
+                <div className="h-2.5 w-12 rounded bg-[#161D26]" />
+              </div>
             </div>
           ) : chartViewMode === 'CANDLE' ? (
             /* رسم الشموع اليابانية التفاعلي الدقيق (SVG Candlesticks) */

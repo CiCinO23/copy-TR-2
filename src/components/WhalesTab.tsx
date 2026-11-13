@@ -19,7 +19,13 @@ import {
 import { WhaleIcon } from './WhaleIcon';
 import { SparklineSvg, QuickTradeBar } from './SparklineSvg';
 import { CoinIcon } from './CoinIcon';
+import { TraderAvatar } from './TraderAvatar';
 import { AccountCopyPickerModal } from './AccountCopyPickerModal';
+import {
+  formatTimeWestern,
+  formatSignedCurrency,
+  formatSignedPercent,
+} from '../utils/formatters';
 import {
   BinanceConnectionState,
   SmartMoneyTraderItem,
@@ -338,18 +344,7 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
     })}`;
   };
 
-  const formatTime = (ms: number) => {
-    if (!ms) return '--';
-    return new Date(ms)
-      .toLocaleString('ar-EG-u-nu-latn', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      })
-      .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
-  };
+  const formatTime = (ms: number) => formatTimeWestern(ms);
 
   const formatDuration = (startMs: number, endMs: number) => {
     if (!startMs || !endMs || endMs <= startMs) return '--';
@@ -386,45 +381,40 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
 
       {/* Selected Whale Detail Window (Focused Full View) */}
       {selectedWhaleId && whaleProfile ? (
-        <div className="bg-[#12171D] border border-[#01BC8D]/50 rounded-2xl p-4 sm:p-5 space-y-5">
+        <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-5">
           {/* Header & Back Button */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#232E3A] pb-4">
-            <div className="flex items-center gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#1E2733] pb-4">
+            <div className="flex items-center gap-3 flex-wrap">
               <button
                 onClick={() => setSelectedWhaleId(null)}
-                className="bg-[#1A222B] hover:bg-[#293847] text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1 border border-[#232E3A] cursor-pointer"
+                className="bg-[#1A222B] hover:bg-[#232E3A] text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1 border border-[#1E2733] cursor-pointer"
               >
                 <ChevronLeft className="w-4 h-4 rotate-180" />
-                <span>عودة لقائمة الحيتان</span>
+                <span>عودة للقائمة</span>
               </button>
 
               <button
                 onClick={onOpenSimulationTab}
-                className="bg-[#0D2B24] hover:bg-[#01BC8D]/20 text-[#01BC8D] border border-[#01BC8D]/40 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+                className="bg-[#161D26] hover:bg-[#1E2733] text-[#01BC8D] border border-[#1E2733] px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
                 title="العودة مباشرة لنافذة التداول والصفقات"
               >
-                <span>العودة لصفحة التداول ⬅️</span>
+                <ChevronLeft className="w-3.5 h-3.5 rotate-180" />
+                <span>نافذة التداول</span>
               </button>
 
               <div className="flex items-center gap-3">
-                {whaleProfile.avatarUrl ? (
-                  <img
-                    src={whaleProfile.avatarUrl}
-                    alt={whaleProfile.traderName}
-                    className="w-12 h-12 rounded-full object-cover border-2 border-[#01BC8D]"
-                  />
-                ) : (
-                  <div className="w-12 h-12 rounded-full bg-[#01BC8D]/20 text-[#01BC8D] flex items-center justify-center font-bold text-lg border border-[#01BC8D]">
-                    {whaleProfile.traderName.slice(0, 2).toUpperCase()}
-                  </div>
-                )}
+                <TraderAvatar
+                  src={whaleProfile.avatarUrl}
+                  name={whaleProfile.traderName}
+                  size="lg"
+                />
                 <div>
                   <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="text-base sm:text-lg font-bold text-white">
                       {whaleProfile.traderName}
                     </h3>
-                    <span className="text-[10px] font-mono bg-[#0D2B24] text-[#01BC8D] px-2 py-0.5 rounded border border-[#01BC8D]/30">
-                      Smart Money ID: #{whaleProfile.topTraderId}
+                    <span dir="ltr" className="text-[10px] font-mono bg-[#161D26] text-[#01BC8D] px-2 py-0.5 rounded border border-[#1E2733]">
+                      ID #{whaleProfile.topTraderId}
                     </span>
                   </div>
                   <p className="text-xs text-[#8A99AD] mt-0.5 line-clamp-1">
@@ -438,29 +428,41 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={() => selectedSummary && handleCopyWhale(selectedSummary)}
-                className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-4 py-2.5 rounded-xl text-xs flex items-center gap-1.5 shadow-lg cursor-pointer"
+                className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-4 py-2.5 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
                 <span>
-                  نسخ الحوت ({marginPerTrade}$ × {tradeSettings?.leverage || 5}x)
+                  نسخ الحوت (<span dir="ltr" className="inline-block tabular-nums">${marginPerTrade} × {tradeSettings?.leverage || 5}x</span>)
                 </span>
               </button>
             </div>
           </div>
 
           {isLoadingDetail ? (
-            <div className="py-12 text-center text-sm text-[#8A99AD] flex flex-col items-center gap-2">
-              <RefreshCw className="w-6 h-6 animate-spin text-[#01BC8D]" />
-              <span>جاري جلب الملف الكامل للحوت ومعلومات الصفقات من نافذتي Positions و Position...</span>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {[0, 1, 2, 3].map((idx) => (
+                  <div key={idx} className="bg-[#161D26] border border-[#1E2733] rounded-xl p-3 space-y-2 animate-pulse">
+                    <div className="h-3 w-20 bg-[#1E2733] rounded" />
+                    <div className="h-5 w-28 bg-[#232E3A] rounded" />
+                  </div>
+                ))}
+              </div>
+              <div className="space-y-2.5">
+                {[0, 1].map((idx) => (
+                  <div key={idx} className="h-24 bg-[#161D26] border border-[#1E2733] rounded-xl animate-pulse" />
+                ))}
+              </div>
             </div>
           ) : (
             <>
               {/* Whale Metrics Grid */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                <div className="bg-[#1A222B] border border-[#232E3A] rounded-xl p-3">
+                <div className="bg-[#161D26] border border-[#1E2733] rounded-xl p-3">
                   <span className="text-[11px] text-[#8A99AD] block">إجمالي ربح الحوت (PNL)</span>
                   <span
-                    className={`text-base sm:text-lg font-bold font-mono mt-0.5 block ${
+                    dir="ltr"
+                    className={`inline-block text-base sm:text-lg font-bold font-mono tabular-nums mt-0.5 ${
                       whaleProfile.pnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'
                     }`}
                   >
@@ -468,23 +470,23 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                   </span>
                 </div>
 
-                <div className="bg-[#1A222B] border border-[#232E3A] rounded-xl p-3">
+                <div className="bg-[#161D26] border border-[#1E2733] rounded-xl p-3">
                   <span className="text-[11px] text-[#8A99AD] block">نسبة العائد (ROI)</span>
                   <span
-                    className={`text-base sm:text-lg font-bold font-mono mt-0.5 block ${
+                    dir="ltr"
+                    className={`inline-block text-base sm:text-lg font-bold font-mono tabular-nums mt-0.5 ${
                       whaleProfile.roi >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'
                     }`}
                   >
-                    {whaleProfile.roi >= 0 ? '+' : ''}
-                    {whaleProfile.roi.toFixed(2)}%
+                    {formatSignedPercent(whaleProfile.roi)}
                   </span>
                 </div>
 
-                <div className="bg-[#1A222B] border border-[#232E3A] rounded-xl p-3">
+                <div className="bg-[#161D26] border border-[#1E2733] rounded-xl p-3">
                   <span className="text-[11px] text-[#8A99AD] block">
-                    رصيد العقود الآجلة (UM Balance)
+                    رصيد العقود الآجلة
                   </span>
-                  <span className="text-base sm:text-lg font-bold font-mono text-[#01BC8D] mt-0.5 block">
+                  <span dir="ltr" className="inline-block text-base sm:text-lg font-bold font-mono tabular-nums text-[#01BC8D] mt-0.5">
                     {whaleProfile.umMarginBalance.toLocaleString('en-US', {
                       maximumFractionDigits: 2,
                     })}{' '}
@@ -492,13 +494,13 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                   </span>
                 </div>
 
-                <div className="bg-[#1A222B] border border-[#232E3A] rounded-xl p-3">
-                  <span className="text-[11px] text-[#8A99AD] block">المشتركون / أيام النشاط</span>
-                  <span className="text-base sm:text-lg font-bold font-mono text-white mt-0.5 block">
-                    {whaleProfile.subscribers.toLocaleString('en-US')} متابع
+                <div className="bg-[#161D26] border border-[#1E2733] rounded-xl p-3">
+                  <span className="text-[11px] text-[#8A99AD] block">المشتركون / النشاط</span>
+                  <span className="text-base sm:text-lg font-bold font-mono tabular-nums text-white mt-0.5 block">
+                    <span dir="ltr" className="inline-block">{whaleProfile.subscribers.toLocaleString('en-US')}</span> متابع
                   </span>
-                  <span className="text-[10px] text-[#8A99AD]">
-                    نشط منذ {whaleProfile.daysActive} يوماً • Win Rate: {whaleProfile.winRate.toFixed(1)}%
+                  <span className="text-[10px] text-[#8A99AD] block">
+                    نشط منذ <span dir="ltr" className="font-mono">{whaleProfile.daysActive}</span> يوماً • النجاح: <span dir="ltr" className="font-mono">{whaleProfile.winRate.toFixed(1)}%</span>
                   </span>
                 </div>
               </div>
@@ -945,17 +947,17 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
         /* Smart Money Whales List & Sorting View */
         <>
           {/* Sorting & Filtering Controls */}
-          <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 space-y-3">
+          <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 space-y-3">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {/* Sort Selector */}
               <div>
                 <label className="block text-[11px] text-[#8A99AD] mb-1">
-                  ترتيب الحيتان حسب الطلب (Smart Money Ranking):
+                  ترتيب الحيتان:
                 </label>
                 <select
                   value={rankingType}
                   onChange={(e) => setRankingType(e.target.value as SmartMoneySortType)}
-                  className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-semibold focus:outline-none"
+                  className="w-full bg-[#0B0E11] border border-[#1E2733] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white font-semibold focus:outline-none"
                 >
                   {SMART_SORT_OPTIONS.map((opt) => (
                     <option key={opt.key} value={opt.key}>
@@ -977,7 +979,7 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                       className={`py-2 rounded-xl text-[11px] font-bold transition-colors cursor-pointer ${
                         timeRange === tr.key
                           ? 'bg-[#01BC8D] text-[#0B0E11]'
-                          : 'bg-[#0B0E11] text-[#8A99AD] border border-[#232E3A] hover:text-white'
+                          : 'bg-[#0B0E11] text-[#8A99AD] border border-[#1E2733] hover:text-white'
                       }`}
                     >
                       {tr.labelAr}
@@ -989,22 +991,22 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
               {/* Search by Whale Name */}
               <div>
                 <label className="block text-[11px] text-[#8A99AD] mb-1">
-                  بحث عن متداول في Smart Money:
+                  بحث عن حوت أو محفظة:
                 </label>
                 <div className="relative">
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="اسم الحوت أو المحفظة (مثال: 0x7ffa)..."
-                    className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl pr-8 pl-3 py-2 text-xs text-white focus:outline-none"
+                    placeholder="اسم الحوت أو المحفظة..."
+                    className="w-full bg-[#0B0E11] border border-[#1E2733] focus:border-[#01BC8D] rounded-xl pr-8 pl-3 py-2 text-xs text-white focus:outline-none"
                   />
                   <Search className="w-3.5 h-3.5 text-[#8A99AD] absolute right-2.5 top-2.5" />
                 </div>
               </div>
             </div>
 
-            <div className="flex items-center justify-between pt-1 text-xs">
+            <div className="flex items-center justify-between pt-1 text-xs flex-wrap gap-2">
               <label className="flex items-center gap-2 text-[#8A99AD] cursor-pointer">
                 <input
                   type="checkbox"
@@ -1012,12 +1014,12 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                   onChange={(e) => setOnlySharingPos(e.target.checked)}
                   className="accent-[#01BC8D]"
                 />
-                <span>إظهار الحيتان الذين يشاركون مراكزهم المفتوحة فقط (Sharing Positions)</span>
+                <span>إظهار الحيتان الذين يشاركون مراكزهم المفتوحة فقط</span>
               </label>
 
               <span className="text-[11px] text-[#8A99AD]">
-                إجمالي الحيتان المسجلين:{' '}
-                <strong className="text-[#01BC8D] font-mono">
+                إجمالي الحيتان:{' '}
+                <strong dir="ltr" className="text-[#01BC8D] font-mono tabular-nums inline-block">
                   {totalWhales.toLocaleString('en-US')}
                 </strong>
               </span>
@@ -1026,9 +1028,29 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
 
           {/* Smart Money Whales Grid */}
           {isLoadingWhales ? (
-            <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-10 text-center text-sm text-[#8A99AD] flex flex-col items-center gap-3">
-              <RefreshCw className="w-7 h-7 animate-spin text-[#01BC8D]" />
-              <span>جاري جلب قائمة الحيتان (Smart Money) من باينانس...</span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              {[0, 1, 2, 3].map((idx) => (
+                <div
+                  key={idx}
+                  className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 space-y-3.5 animate-pulse"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-full bg-[#1E2733]" />
+                      <div className="space-y-1.5">
+                        <div className="h-4 w-28 bg-[#1E2733] rounded" />
+                        <div className="h-3 w-20 bg-[#161D26] rounded" />
+                      </div>
+                    </div>
+                    <div className="h-6 w-16 bg-[#161D26] rounded-lg" />
+                  </div>
+                  <div className="h-28 bg-[#161D26] border border-[#1E2733] rounded-xl" />
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="h-9 bg-[#161D26] rounded-xl" />
+                    <div className="h-9 bg-[#1E2733] rounded-xl" />
+                  </div>
+                </div>
+              ))}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
@@ -1042,63 +1064,57 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                 return (
                   <div
                     key={whale.topTraderId}
-                    className={`bg-[#12171D] border rounded-2xl p-4 flex flex-col justify-between gap-3.5 transition-all hover:border-[#01BC8D]/60 ${
-                      isCopied ? 'border-[#01BC8D]' : 'border-[#232E3A]'
+                    className={`bg-[#12171D] border rounded-2xl p-4 flex flex-col justify-between gap-3.5 transition-all hover:border-[#2E3B4E] ${
+                      isCopied ? 'border-[#01BC8D]/60' : 'border-[#1E2733]'
                     }`}
                   >
                     {/* Top Row */}
                     <div className="flex items-start justify-between gap-2">
                       <div
                         onClick={() => handleSelectWhale(whale)}
-                        className="flex items-center gap-3 cursor-pointer group"
+                        className="flex items-center gap-3 cursor-pointer group min-w-0"
                       >
-                        <div className="relative">
-                          {whale.avatarUrl ? (
-                            <img
-                              src={whale.avatarUrl}
-                              alt={whale.traderName}
-                              className="w-11 h-11 rounded-full object-cover border border-[#01BC8D]/50"
-                            />
-                          ) : (
-                            <div className="w-11 h-11 rounded-full bg-[#1A222B] text-[#01BC8D] flex items-center justify-center font-bold text-sm border border-[#01BC8D]/40">
-                              {whale.traderName.slice(0, 2).toUpperCase()}
-                            </div>
-                          )}
-                          <span className="absolute -top-1 -right-1 bg-[#01BC8D] text-[#0B0E11] font-mono font-bold text-[9px] px-1.5 rounded-full">
+                        <div className="relative shrink-0">
+                          <TraderAvatar
+                            src={whale.avatarUrl}
+                            name={whale.traderName}
+                            size="md"
+                          />
+                          <span dir="ltr" className="absolute -top-1 -right-1 bg-[#01BC8D] text-[#0B0E11] font-mono font-bold text-[9px] px-1.5 rounded-full">
                             #{index + 1}
                           </span>
                         </div>
 
-                        <div>
-                          <h3 className="font-bold text-sm sm:text-base text-white group-hover:text-[#01BC8D] transition-colors">
+                        <div className="min-w-0">
+                          <h3 className="font-bold text-sm sm:text-base text-white group-hover:text-[#01BC8D] transition-colors truncate">
                             {whale.traderName}
                           </h3>
                           <div className="flex items-center gap-2 text-[11px] text-[#8A99AD] mt-0.5">
                             <span className="flex items-center gap-1" title="عدد المتابعين / الناسخين">
                               <Users className="w-3 h-3 text-[#01BC8D]" />
-                              <span className="font-mono">
-                                {whale.subscribers.toLocaleString('en-US')} متابع
+                              <span dir="ltr" className="font-mono tabular-nums">
+                                {whale.subscribers.toLocaleString('en-US')}
                               </span>
                             </span>
                             <span>•</span>
-                            <span className="font-mono text-[#EAECEF]" title="عدد أيام فتح حسابه للنسخ">
+                            <span className="font-mono tabular-nums text-[#EAECEF]" title="عدد أيام فتح حسابه للنسخ">
                               {whale.daysActive || 180} يوم
                             </span>
                           </div>
                         </div>
                       </div>
 
-                      {/* Left Side: Filter Days in Green + Status */}
+                      {/* Left Side: Filter Days + Status */}
                       <div className="flex flex-col items-end gap-1.5 shrink-0">
                         <span
-                          className="text-[#01BC8D] bg-[#0D2B24] border border-[#01BC8D]/40 px-2.5 py-0.5 rounded-lg font-mono font-bold text-[11px]"
-                          title="الأيام الخاصة بالفلتر"
+                          className="text-[#01BC8D] bg-[#0D2B24]/80 border border-[#01BC8D]/30 px-2.5 py-0.5 rounded-lg font-mono font-bold text-[11px]"
+                          title="الفترة الزمنية"
                         >
                           {SMART_TIME_RANGES.find((t) => t.key === timeRange)?.labelAr || timeRange}
                         </span>
                         {isCopied ? (
-                          <span className="bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/50 px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center gap-1.5 shadow-[0_0_10px_rgba(1,188,141,0.25)]">
-                            <span className="w-2 h-2 rounded-full bg-[#01BC8D] animate-pulse" />
+                          <span className="bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[#01BC8D]" />
                             <span>
                               منسوخ ({whaleCopiedEntries.length > 1 ? `${whaleCopiedEntries.length} حسابات` : whaleCopiedEntries[0]?.accountName || 'يتم النسخ'})
                             </span>
@@ -1108,7 +1124,7 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                             className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
                               inPos
                                 ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/30'
-                                : 'bg-[#1A222B] text-[#8A99AD] border border-[#232E3A]'
+                                : 'bg-[#161D26] text-[#8A99AD] border border-[#1E2733]'
                             }`}
                           >
                             {inPos ? 'مراكز نشطة' : 'مراقبة السيولة'}
@@ -1117,20 +1133,20 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                       </div>
                     </div>
 
-                    {/* Metrics + KuCoin Sparkline */}
-                    <div className="bg-[#1A222B] rounded-xl p-3 border border-[#232E3A]/70 space-y-2.5">
+                    {/* Metrics + Sparkline */}
+                    <div className="bg-[#161D26] rounded-xl p-3 border border-[#1E2733] space-y-2.5">
                       <div className="flex items-center justify-between gap-2">
                         <div>
                           <span className="text-[10px] text-[#8A99AD] block">
                             نسبة العائد (ROI)
                           </span>
                           <span
-                            className={`text-lg sm:text-xl font-extrabold font-mono tabular-nums ${
+                            dir="ltr"
+                            className={`inline-block text-lg sm:text-xl font-extrabold font-mono tabular-nums ${
                               whale.roi >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'
                             }`}
                           >
-                            {whale.roi >= 0 ? '+' : ''}
-                            {whale.roi.toFixed(2)}%
+                            {formatSignedPercent(whale.roi)}
                           </span>
                         </div>
 
@@ -1142,23 +1158,24 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                         />
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2 pt-2 border-t border-[#232E3A]/80">
+                      <div className="grid grid-cols-2 gap-2 pt-2 border-t border-[#1E2733]">
                         <div>
                           <span className="text-[10px] text-[#8A99AD] block">صافي الربح (PNL)</span>
                           <span
-                            className={`text-xs sm:text-sm font-bold font-mono tabular-nums ${
+                            dir="ltr"
+                            className={`inline-block text-xs sm:text-sm font-bold font-mono tabular-nums ${
                               whale.pnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'
                             }`}
                           >
-                            {whale.pnl >= 1000000
-                              ? `+$${(whale.pnl / 1000000).toFixed(2)}M`
-                              : `${formatMoney(whale.pnl)}$`}
+                            {Math.abs(whale.pnl) >= 1000000
+                              ? `${whale.pnl >= 0 ? '+' : '-'}$${(Math.abs(whale.pnl) / 1000000).toFixed(2)}M`
+                              : formatSignedCurrency(whale.pnl)}
                           </span>
                         </div>
 
                         <div>
                           <span className="text-[10px] text-[#8A99AD] block">الأصول (Assets)</span>
-                          <span className="text-xs sm:text-sm font-bold font-mono text-[#01BC8D] tabular-nums">
+                          <span dir="ltr" className="inline-block text-xs sm:text-sm font-bold font-mono text-[#01BC8D] tabular-nums">
                             {whale.assets >= 1000000
                               ? `$${(whale.assets / 1000000).toFixed(2)}M`
                               : `$${(whale.assets / 1000).toFixed(1)}K`}
@@ -1171,10 +1188,10 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         onClick={() => handleSelectWhale(whale)}
-                        className="bg-[#1A222B] hover:bg-[#212C37] text-white border border-[#232E3A] font-semibold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                        className="bg-[#161D26] hover:bg-[#1E2733] text-white border border-[#1E2733] font-semibold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                       >
                         <Eye className="w-3.5 h-3.5 text-[#01BC8D]" />
-                        <span>Positions & التفاصيل</span>
+                        <span>المراكز والتفاصيل</span>
                       </button>
 
                       {isCopied ? (
@@ -1198,7 +1215,7 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                       ) : (
                         <button
                           onClick={() => handleCopyWhale(whale)}
-                          className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-[0_0_12px_rgba(1,188,141,0.2)]"
+                          className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                         >
                           <Copy className="w-3.5 h-3.5" />
                           <span>نسخ الحوت</span>

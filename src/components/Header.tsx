@@ -42,48 +42,48 @@ export const Header: React.FC<HeaderProps> = ({
       : '-- ms';
 
   return (
-    <header className="w-full bg-[#12171D]/95 backdrop-blur-md border-b border-[#232E3A] px-3 sm:px-4 py-2 sm:py-2.5 sticky top-0 z-40 shadow-[0_4px_20px_rgba(0,0,0,0.45)] header-safe pl-safe pr-safe">
+    <header className="w-full bg-[#12171D]/95 backdrop-blur-md border-b border-[#1E2733] px-3 sm:px-4 py-2 sm:py-2.5 sticky top-0 z-40 header-safe pl-safe pr-safe">
       <div className="max-w-4xl mx-auto flex items-center justify-between gap-2 sm:gap-3">
-        {/* أقصى اليمين: رمز التطبيق بهالة متوهجة أنيقة متناسقة مع ثيم كوكوين الرسمي */}
+        {/* أقصى اليمين: رمز التطبيق بتصميم احترافي هادئ */}
         <button
           type="button"
           onClick={onOpenHomeTab}
           data-testid="header_app_logo"
-          title="Copy TR - الصفحة الرئيسية"
-          className="relative group w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center cursor-pointer focus:outline-none shrink-0 select-none active:scale-95 transition-transform"
+          title="Copy TR - الرئيسية"
+          className="group flex items-center gap-2.5 cursor-pointer focus:outline-none shrink-0 select-none active:scale-95 transition-transform"
         >
-          {/* هالة متوهجة بلون كوكوين الرسمي (#01BC8D) */}
-          <span className="absolute -inset-1 rounded-full bg-gradient-to-tr from-[#01BC8D]/50 via-[#00D49F]/35 to-[#00C8FF]/40 blur-sm opacity-80 group-hover:opacity-100 transition-opacity animate-pulse" />
-          <div className="relative w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-[#0B0E11] ring-1.5 ring-[#01BC8D] shadow-[0_0_12px_rgba(1,188,141,0.5)] overflow-hidden flex items-center justify-center shrink-0">
+          <div className="w-9 h-9 rounded-xl bg-[#0B0E11] border border-[#232E3A] group-hover:border-[#01BC8D]/60 overflow-hidden flex items-center justify-center shrink-0 transition-colors">
             <img
               src="/assets/aistudio/icone_c1401ade.png"
               alt="Copy TR"
-              className="w-full h-full max-w-full max-h-full object-cover rounded-full pointer-events-none"
+              className="w-full h-full object-cover pointer-events-none"
             />
           </div>
-          {/* إشارة متوهجة حية على زاوية الرمز */}
-          <span className="absolute -bottom-0.5 -left-0.5 flex h-3 w-3 items-center justify-center pointer-events-none">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#01BC8D] opacity-80" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-[#01BC8D] ring-1.5 ring-[#0B0E11] shadow-[0_0_8px_#01BC8D]" />
-          </span>
+          <div className="hidden sm:flex flex-col text-right leading-tight">
+            <span className="text-xs font-extrabold text-white tracking-tight font-mono">
+              Copy TR
+            </span>
+            <span className="text-[10px] text-[#8A99AD] font-medium">
+              منصة التداول والنسخ
+            </span>
+          </div>
         </button>
 
-        {/* خانات الهيدر: بتنسيق مصغر ومتناسق تماماً ومريح للمس */}
+        {/* خانات الهيدر: بتنسيق متناسق ومريح للمس */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           {/* 1. خانة باينانس (بيانات السوق والمتداولين) */}
           <button
             type="button"
             onClick={onOpenApiTab}
             data-testid="header_status_badge"
-            title="ربط المنصات - Binance للمعلومات"
-            className={`h-8 sm:h-9 px-2 py-1 sm:px-2.5 sm:py-1 rounded-lg border flex items-center gap-1.5 transition-all cursor-pointer shrink-0 select-none active:scale-95 ${
+            title="ربط المنصات - باينانس للمعلومات"
+            className={`h-9 px-2.5 rounded-xl border flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 select-none ${
               activeApiSubTab === 'BINANCE'
-                ? 'bg-[#0D2B24] border-[#01BC8D] shadow-[0_0_10px_rgba(1,188,141,0.25)]'
-                : 'bg-[#1A222B] hover:bg-[#212C37] border-[#232E3A] hover:border-[#01BC8D]/50'
+                ? 'bg-[#161D26] border-[#01BC8D] text-white'
+                : 'bg-[#161D26] hover:bg-[#1A222B] border-[#1E2733] hover:border-[#2C394A]'
             }`}
           >
-            {/* رمز باينانس الرسمي مصغر */}
-            <span className="w-4 h-4 rounded-md bg-[#F3BA2F]/15 border border-[#F3BA2F]/35 flex items-center justify-center shrink-0">
+            <span className="w-4 h-4 rounded-md bg-[#F3BA2F]/15 flex items-center justify-center shrink-0">
               <svg
                 viewBox="0 0 24 24"
                 className="w-3 h-3 text-[#F3BA2F]"
@@ -93,19 +93,15 @@ export const Header: React.FC<HeaderProps> = ({
               </svg>
             </span>
 
-            {/* نقطة الاتصال */}
             <span
-              className={`w-2 h-2 rounded-full shrink-0 ${
-                isBinanceConnected
-                  ? 'bg-[#01BC8D] shadow-[0_0_6px_#01BC8D]'
-                  : 'bg-[#F6465D] shadow-[0_0_6px_#F6465D]'
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                isBinanceConnected ? 'bg-[#01BC8D]' : 'bg-[#F6465D]'
               }`}
             />
 
-            {/* سرعة الاستجابة */}
             <span
               dir="ltr"
-              className="text-[10px] sm:text-[11px] font-mono font-bold text-[#F0F4F8] tabular-nums"
+              className="text-[11px] font-mono font-semibold text-[#F0F4F8] tabular-nums"
             >
               {binanceLatency}
             </span>
@@ -116,15 +112,14 @@ export const Header: React.FC<HeaderProps> = ({
             type="button"
             onClick={onOpenKucoinTab}
             data-testid="header_kucoin_badge"
-            title="ربط المنصات - KuCoin للتنفيذ"
-            className={`h-8 sm:h-9 px-2 py-1 sm:px-2.5 sm:py-1 rounded-lg border flex items-center gap-1.5 transition-all cursor-pointer shrink-0 select-none active:scale-95 ${
+            title="ربط المنصات - كوكوين للتنفيذ"
+            className={`h-9 px-2.5 rounded-xl border flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 select-none ${
               activeApiSubTab === 'KUCOIN'
-                ? 'bg-[#0D2B24] border-[#01BC8D] shadow-[0_0_10px_rgba(1,188,141,0.25)]'
-                : 'bg-[#1A222B] hover:bg-[#212C37] border-[#232E3A] hover:border-[#01BC8D]/50'
+                ? 'bg-[#161D26] border-[#01BC8D] text-white'
+                : 'bg-[#161D26] hover:bg-[#1A222B] border-[#1E2733] hover:border-[#2C394A]'
             }`}
           >
-            {/* رمز كوكوين الرسمي مصغر */}
-            <span className="w-4 h-4 rounded-md bg-[#01BC8D]/15 border border-[#01BC8D]/35 flex items-center justify-center shrink-0">
+            <span className="w-4 h-4 rounded-md bg-[#01BC8D]/15 flex items-center justify-center shrink-0">
               <svg
                 viewBox="0 0 24 24"
                 className="w-3 h-3 text-[#01BC8D]"
@@ -140,19 +135,15 @@ export const Header: React.FC<HeaderProps> = ({
               </svg>
             </span>
 
-            {/* نقطة الاتصال */}
             <span
-              className={`w-2 h-2 rounded-full shrink-0 ${
-                isKucoinConnected
-                  ? 'bg-[#01BC8D] shadow-[0_0_6px_#01BC8D]'
-                  : 'bg-[#F6465D] shadow-[0_0_6px_#F6465D]'
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                isKucoinConnected ? 'bg-[#01BC8D]' : 'bg-[#F6465D]'
               }`}
             />
 
-            {/* سرعة الاستجابة */}
             <span
               dir="ltr"
-              className="text-[10px] sm:text-[11px] font-mono font-bold text-[#F0F4F8] tabular-nums"
+              className="text-[11px] font-mono font-semibold text-[#F0F4F8] tabular-nums"
             >
               {kucoinLatency}
             </span>
@@ -163,16 +154,19 @@ export const Header: React.FC<HeaderProps> = ({
             type="button"
             onClick={onOpenNotifications}
             data-testid="header_notifications_button"
-            title="تنبيهات الموبايل (فتح صفقات، التدعيم، والخروج)"
-            className={`relative w-8 h-8 sm:w-9 sm:h-9 rounded-lg border flex items-center justify-center transition-all cursor-pointer shrink-0 select-none active:scale-95 ${
+            title="تنبيهات الموبايل"
+            className={`relative w-9 h-9 rounded-xl border flex items-center justify-center transition-colors cursor-pointer shrink-0 select-none ${
               unreadNotificationsCount > 0
-                ? 'bg-[#0D2B24] border-[#01BC8D] text-[#01BC8D] shadow-[0_0_10px_rgba(1,188,141,0.25)]'
-                : 'bg-[#1A222B] hover:bg-[#232E3A] border-[#232E3A] hover:border-[#01BC8D]/50 text-[#8A99AD] hover:text-[#01BC8D]'
+                ? 'bg-[#0D2B24] border-[#01BC8D]/60 text-[#01BC8D]'
+                : 'bg-[#161D26] hover:bg-[#1A222B] border-[#1E2733] hover:border-[#2C394A] text-[#8A99AD] hover:text-white'
             }`}
           >
             <BellRing className="w-4 h-4" />
             {unreadNotificationsCount > 0 ? (
-              <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full bg-[#01BC8D] text-[#0B0E11] font-mono font-extrabold text-[9px] flex items-center justify-center shadow-[0_0_6px_#01BC8D]">
+              <span
+                dir="ltr"
+                className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full bg-[#01BC8D] text-[#0B0E11] font-mono font-bold text-[9px] flex items-center justify-center"
+              >
                 {unreadNotificationsCount > 99 ? '99+' : unreadNotificationsCount}
               </span>
             ) : (
@@ -182,16 +176,16 @@ export const Header: React.FC<HeaderProps> = ({
             )}
           </button>
 
-          {/* 4. زر الإعدادات (في أقصى اليسار) */}
+          {/* 4. زر الإعدادات */}
           <button
             type="button"
             onClick={onOpenSettingsTab}
             data-testid="header_settings_button"
             title="الإعدادات وإدارة المخاطر"
-            className={`w-8 h-8 sm:w-9 sm:h-9 rounded-lg border flex items-center justify-center transition-all cursor-pointer shrink-0 select-none active:scale-95 ${
+            className={`w-9 h-9 rounded-xl border flex items-center justify-center transition-colors cursor-pointer shrink-0 select-none ${
               isSettingsActive
-                ? 'bg-[#01BC8D]/20 border-[#01BC8D] text-[#01BC8D] shadow-[0_0_10px_rgba(1,188,141,0.25)]'
-                : 'bg-[#1A222B] hover:bg-[#232E3A] border-[#232E3A] hover:border-[#01BC8D]/50 text-[#8A99AD] hover:text-[#01BC8D]'
+                ? 'bg-[#01BC8D]/15 border-[#01BC8D] text-[#01BC8D]'
+                : 'bg-[#161D26] hover:bg-[#1A222B] border-[#1E2733] hover:border-[#2C394A] text-[#8A99AD] hover:text-white'
             }`}
           >
             <Settings className="w-4 h-4" />

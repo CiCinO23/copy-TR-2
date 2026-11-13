@@ -5,6 +5,7 @@ import {
   PaperPosition,
   PaperVirtualAccountSummary,
 } from '../types';
+import { formatTimeWestern } from '../utils/formatters';
 
 const NOTIFICATIONS_STORAGE_KEY = 'whale_mobile_notifications_log_v1';
 const NOTIFICATION_SETTINGS_KEY = 'whale_mobile_notification_settings_v1';
@@ -612,11 +613,7 @@ class MobileNotificationService {
 
     const token = this.settings.telegramBotToken.trim();
     const chatId = this.settings.telegramChatId.trim();
-    const timeStr = new Date(item.timestamp).toLocaleTimeString('ar-EG', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
+    const timeStr = formatTimeWestern(item.timestamp);
 
     if (item.actionType === 'DRAWDOWN_ALERT') {
       const accName = item.accountName || item.traderName || 'حساب افتراضي';

@@ -25,6 +25,12 @@ import {
 } from 'lucide-react';
 import { WhaleIcon } from './WhaleIcon';
 import { CoinIcon } from './CoinIcon';
+import { TraderAvatar } from './TraderAvatar';
+import {
+  formatDateWestern,
+  formatWeekdayWestern,
+  formatDateTimeWestern,
+} from '../utils/formatters';
 import {
   ResponsiveContainer,
   AreaChart,
@@ -175,6 +181,9 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       mobileNotifications.updateSettings(partial);
     }
   };
+
+  // Sub-Tab Organization (تنظيم نافذة التداول إلى 3 أقسام واضحة)
+  const [simSubTab, setSimSubTab] = useState<'ACTIVE' | 'ACCOUNTS_SETTINGS' | 'STATS_HISTORY'>('ACTIVE');
 
   // Multi-Account UI State
   const [isCreatingAccount, setIsCreatingAccount] = useState<boolean>(false);
@@ -1374,7 +1383,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       days.push({
         date: dateKey,
         label: monthDayLabel,
-        fullDate: d.toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' }),
+        fullDate: formatDateWestern(d),
         dailyPnl: dayPnl,
         cumulativePnl: roundedCum,
         tradesCount: dayData.count,
@@ -1423,7 +1432,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
 
       const csvRows = dailyCumulativePnl30Days.data.map((day) => {
         const dayDate = new Date(day.date);
-        const dayName = dayDate.toLocaleDateString('ar-EG', { weekday: 'long' });
+        const dayName = formatWeekdayWestern(dayDate);
         const status =
           day.dailyPnl > 0 ? 'يوم رابح' : day.dailyPnl < 0 ? 'يوم خاسر' : 'بدون صفقات';
         return [
@@ -1450,7 +1459,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
     const rowsHtml = dailyCumulativePnl30Days.data
       .map((day, idx) => {
         const dayDate = new Date(day.date);
-        const dayName = dayDate.toLocaleDateString('ar-EG', { weekday: 'long' });
+        const dayName = formatWeekdayWestern(dayDate);
         const isProfit = day.cumulativePnl >= 0;
         const cumColor = isProfit ? '#01BC8D' : '#F6465D';
         const dailyColor =
@@ -1585,40 +1594,40 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
 
   return (
     <div className="space-y-5 animate-in fade-in duration-200">
-      {/* Header & Mode Switcher (التبديل بين التداول الافتراضي والحقيقي) */}
-      <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4 shadow-lg">
+      {/* Header & Mode Switcher */}
+      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2.5 flex-wrap">
-              <h2 className="text-xl sm:text-2xl font-bold text-white tracking-wide">
-                نافذة التداول (إدارة الصفقات والنسخ)
+              <h2 className="text-lg sm:text-xl font-bold text-white tracking-wide">
+                نافذة التداول وإدارة الصفقات
               </h2>
               <span
                 data-testid="trading_mode_badge"
                 className={`text-xs px-2.5 py-0.5 rounded-full font-bold font-mono border ${
                   isRealMode
                     ? 'bg-[#01BC8D]/15 text-[#01BC8D] border-[#01BC8D]/40'
-                    : 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/40'
+                    : 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/30'
                 }`}
               >
-                {isRealMode ? 'وضع التداول الحقيقي (REAL KUCOIN)' : 'وضع التداول الافتراضي (VIRTUAL)'}
+                {isRealMode ? 'التداول الحقيقي' : 'التداول الافتراضي'}
               </span>
             </div>
-            <p className="text-xs text-[#8A99AD] mt-1.5 leading-relaxed">
-              تحكم كامل في رصيد التداول الافتراضي، إعدادات حجم الصفقة والرافعة والعمولة، عدد الصفقات المفتوحة بنفس الوقت، والتبديل الفوري بين التداول الافتراضي والحقيقي.
+            <p className="text-xs text-[#8A99AD] mt-1 leading-relaxed">
+              إدارة المراكز المفتوحة، الحسابات الافتراضية، إعدادات النسخ والرافعة، وسجل الأداء التفصيلي.
             </p>
           </div>
         </div>
 
         {/* Mode Toggle Bar */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 bg-[#0B0E11] p-2 rounded-xl border border-[#232E3A]">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-[#0B0E11] p-1.5 rounded-xl border border-[#1E2733]">
           <button
             type="button"
             onClick={() => handleModeSwitch('VIRTUAL')}
             data-testid="mode_switch_virtual"
             className={`py-2.5 px-4 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
               !isRealMode
-                ? 'bg-[#01BC8D] text-[#0B0E11] shadow-md'
+                ? 'bg-[#01BC8D] text-[#0B0E11]'
                 : 'text-[#8A99AD] hover:text-white'
             }`}
           >
@@ -1632,7 +1641,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             data-testid="mode_switch_real"
             className={`py-2.5 px-4 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
               isRealMode
-                ? 'bg-[#01BC8D] text-white shadow-md'
+                ? 'bg-[#01BC8D] text-[#0B0E11]'
                 : 'text-[#8A99AD] hover:text-white'
             }`}
           >
@@ -1643,7 +1652,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             ) : (
               <Zap className="w-4 h-4 shrink-0" />
             )}
-            <span>التداول الحقيقي (عبر حساب KuCoin API)</span>
+            <span>التداول الحقيقي (عبر KuCoin API)</span>
           </button>
         </div>
 
@@ -1698,22 +1707,161 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </div>
         )}
 
-        {/* Multi-Account Virtual Trading Bar (فتح وتسمية عدة حسابات افتراضية في نفس الوقت) */}
-        {!isRealMode && (
-          <div
-            data-testid="virtual_multi_accounts_bar"
-            className="bg-[#0B0E11] border border-[#01BC8D]/40 rounded-xl p-3 sm:p-3.5 space-y-3"
+        {/* Real Mode Status Notice */}
+        {isRealMode && (
+          <div className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 text-[#01BC8D]">
+              <ShieldCheck className="w-4 h-4 shrink-0" />
+              <span>
+                {kucoinConnectionState.isAuthenticated
+                  ? (
+                    <>
+                      متصل بحسابك الحقيقي في KuCoin • الرصيد المتاح:{' '}
+                      <strong dir="ltr" className="font-mono tabular-nums inline-block">
+                        {kucoinConnectionState.availableUsdt.toFixed(2)} USDT
+                      </strong>
+                    </>
+                  )
+                  : 'أنت في وضع التداول الحقيقي على KuCoin. يرجى التأكد من إدخال مفاتيح KuCoin API وتفعيل الإرسال الحقيقي.'}
+              </span>
+            </div>
+            <button
+              onClick={() => onNavigateToTab('KuCoinAPI')}
+              className="bg-[#01BC8D] text-[#0B0E11] font-bold px-3 py-1.5 rounded-lg text-[11px] shrink-0 cursor-pointer"
+            >
+              إعدادات مفاتيح KuCoin
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Sub-Navigation Bar (تقسيم نافذة التداول إلى 3 أقسام نظيفة) */}
+      <div
+        data-testid="simulation_subtabs_bar"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-1.5 grid grid-cols-3 gap-1.5"
+      >
+        <button
+          type="button"
+          data-testid="sim_subtab_active"
+          onClick={() => setSimSubTab('ACTIVE')}
+          className={`py-2.5 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-colors cursor-pointer ${
+            simSubTab === 'ACTIVE'
+              ? 'bg-[#01BC8D] text-[#0B0E11]'
+              : 'text-[#8A99AD] hover:text-white hover:bg-[#161D26]'
+          }`}
+        >
+          <Layers className="w-4 h-4 shrink-0" />
+          <span className="truncate">المراكز النشطة</span>
+          <span
+            dir="ltr"
+            className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded-md ${
+              simSubTab === 'ACTIVE'
+                ? 'bg-[#0B0E11]/15 text-[#0B0E11]'
+                : 'bg-[#161D26] text-[#01BC8D]'
+            }`}
           >
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div className="flex items-center gap-2 flex-wrap">
-                <Wallet className="w-4 h-4 text-[#01BC8D] shrink-0" />
-                <span className="text-xs sm:text-sm font-bold text-white">
-                  الحسابات الافتراضية المفتوحة ({accounts.length})
-                </span>
-                <span className="text-[11px] bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 px-2 py-0.5 rounded-lg font-bold">
-                  الحساب النشط: {activeAccountName}
-                </span>
-              </div>
+            {openPositions.length}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          data-testid="sim_subtab_accounts_settings"
+          onClick={() => setSimSubTab('ACCOUNTS_SETTINGS')}
+          className={`py-2.5 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-colors cursor-pointer ${
+            simSubTab === 'ACCOUNTS_SETTINGS'
+              ? 'bg-[#01BC8D] text-[#0B0E11]'
+              : 'text-[#8A99AD] hover:text-white hover:bg-[#161D26]'
+          }`}
+        >
+          <Sliders className="w-4 h-4 shrink-0" />
+          <span className="truncate">الحسابات والإعدادات</span>
+          <span
+            dir="ltr"
+            className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded-md ${
+              simSubTab === 'ACCOUNTS_SETTINGS'
+                ? 'bg-[#0B0E11]/15 text-[#0B0E11]'
+                : 'bg-[#161D26] text-white'
+            }`}
+          >
+            {accounts.length}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          data-testid="sim_subtab_stats_history"
+          onClick={() => setSimSubTab('STATS_HISTORY')}
+          className={`py-2.5 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-colors cursor-pointer ${
+            simSubTab === 'STATS_HISTORY'
+              ? 'bg-[#01BC8D] text-[#0B0E11]'
+              : 'text-[#8A99AD] hover:text-white hover:bg-[#161D26]'
+          }`}
+        >
+          <BarChart3 className="w-4 h-4 shrink-0" />
+          <span className="truncate">السجل والإحصائيات</span>
+          <span
+            dir="ltr"
+            className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded-md ${
+              simSubTab === 'STATS_HISTORY'
+                ? 'bg-[#0B0E11]/15 text-[#0B0E11]'
+                : 'bg-[#161D26] text-[#8A99AD]'
+            }`}
+          >
+            {closedPositions.length}
+          </span>
+        </button>
+      </div>
+
+      {/* Compact Active Account Strip on ACTIVE tab for quick switching */}
+      {simSubTab === 'ACTIVE' && !isRealMode && accounts.length > 0 && (
+        <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] text-[#8A99AD]">الحساب الافتراضي النشط:</span>
+            {accounts.map((acc) => {
+              const isSelected = acc.id === activeAccountId;
+              return (
+                <button
+                  key={acc.id}
+                  type="button"
+                  onClick={() => onSelectAccount && onSelectAccount(acc.id)}
+                  className={`text-xs px-2.5 py-1 rounded-lg font-bold transition-colors cursor-pointer ${
+                    isSelected
+                      ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
+                      : 'bg-[#161D26] text-[#8A99AD] hover:text-white border border-[#1E2733]'
+                  }`}
+                >
+                  {acc.name} (<span dir="ltr" className="font-mono tabular-nums">{acc.settings.tradeValueUsdt}$×{acc.settings.leverage}x</span>)
+                </button>
+              );
+            })}
+          </div>
+          <button
+            type="button"
+            onClick={() => setSimSubTab('ACCOUNTS_SETTINGS')}
+            className="text-[11px] text-[#01BC8D] hover:underline font-semibold cursor-pointer"
+          >
+            إدارة الحسابات والإعدادات
+          </button>
+        </div>
+      )}
+
+      {/* Multi-Account Virtual Trading Bar (Inside ACCOUNTS_SETTINGS tab) */}
+      {simSubTab === 'ACCOUNTS_SETTINGS' && !isRealMode && (
+        <div
+          data-testid="virtual_multi_accounts_bar"
+          className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-3"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <Wallet className="w-4 h-4 text-[#01BC8D] shrink-0" />
+              <span className="text-xs sm:text-sm font-bold text-white">
+                الحسابات الافتراضية المفتوحة ({accounts.length})
+              </span>
+              <span className="text-[11px] bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 px-2 py-0.5 rounded-lg font-bold">
+                الحساب النشط: {activeAccountName}
+              </span>
+            </div>
 
               <div className="flex flex-wrap items-center gap-1.5">
                 <button
@@ -1772,7 +1920,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                   className="text-[11px] bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] px-3 py-1.5 rounded-lg flex items-center gap-1 font-bold cursor-pointer shadow-sm transition-colors"
                 >
                   <PlusCircle className="w-3.5 h-3.5" />
-                  <span>+ فتح حساب افتراضي جديد</span>
+                  <span>فتح حساب افتراضي جديد</span>
                 </button>
               </div>
             </div>
@@ -2030,7 +2178,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                         </span>
                         {isDrawdownBreached && (
                           <span className="text-[9px] bg-[#F6465D] text-white px-1.5 py-0.5 rounded font-bold shrink-0">
-                            ⚠️ تراجع {accDrawdown.toFixed(1)}%
+                            تراجع <span dir="ltr" className="font-mono tabular-nums inline-block">{accDrawdown.toFixed(1)}%</span>
                           </span>
                         )}
                       </div>
@@ -2141,48 +2289,29 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                   className="bg-[#3A1219] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/40 px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer transition-colors"
                   title="إرسال إشعار فوري تجريبي لتنبيه التراجع الآن"
                 >
-                  🔔 تجربة الإشعار
+                  <Zap className="w-3.5 h-3.5 inline-block ml-1" />
+                  <span>تجربة الإشعار</span>
                 </button>
 
                 {onOpenNotificationsCenter && (
                   <button
                     type="button"
                     onClick={onOpenNotificationsCenter}
-                    className="bg-[#1A222B] hover:bg-[#232E3A] text-[#8A99AD] hover:text-white border border-[#232E3A] px-2 py-1 rounded-lg text-[11px] cursor-pointer"
+                    className="bg-[#1A222B] hover:bg-[#232E3A] text-[#8A99AD] hover:text-white border border-[#1E2733] px-2 py-1 rounded-lg text-[11px] cursor-pointer"
                   >
                     سجل التنبيهات
                   </button>
                 )}
               </div>
             </div>
-          </div>
-        )}
+        </div>
+      )}
 
-        {/* Real Mode Status Notice */}
-        {isRealMode && (
-          <div className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-            <div className="flex items-center gap-2 text-[#01BC8D]">
-              <ShieldCheck className="w-4 h-4 shrink-0" />
-              <span>
-                {kucoinConnectionState.isAuthenticated
-                  ? `متصل بحسابك الحقيقي في KuCoin • الرصيد المتاح: ${kucoinConnectionState.availableUsdt.toFixed(2)} USDT`
-                  : 'أنت في وضع التداول الحقيقي على KuCoin. يرجى التأكد من إدخال مفاتيح KuCoin API وتفعيل الإرسال الحقيقي.'}
-              </span>
-            </div>
-            <button
-              onClick={() => onNavigateToTab('KuCoinAPI')}
-              className="bg-[#01BC8D] text-white font-bold px-3 py-1.5 rounded-lg text-[11px] shrink-0 cursor-pointer"
-            >
-              إعدادات مفاتيح KuCoin
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Balance & Portfolio Metrics Row (مع إمكانية تعديل الرصيد الافتراضي) */}
+      {/* Balance & Portfolio Metrics Row (Inside ACTIVE tab) */}
+      {simSubTab === 'ACTIVE' && (
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
         {/* Editable Virtual / Real Balance Card */}
-        <div className="bg-[#12171D] border border-[#01BC8D]/50 rounded-2xl p-4 sm:col-span-2 flex flex-col justify-between">
+        <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:col-span-2 flex flex-col justify-between">
           <div className="flex items-center justify-between">
             <span className="text-xs text-[#8A99AD] font-semibold">
               {isRealMode ? 'رصيد KuCoin المتاح للتداول' : 'رصيد التداول الافتراضي المتاح'}
@@ -2203,15 +2332,15 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             )}
           </div>
 
-          <div className="my-2 flex items-baseline justify-between">
-            <span className="text-xl sm:text-2xl font-bold text-white font-mono tabular-nums">
+          <div className="my-2 flex items-baseline justify-between gap-2 flex-wrap">
+            <span dir="ltr" className="inline-block text-xl sm:text-2xl font-bold text-white font-mono tabular-nums">
               {isRealMode
                 ? `${kucoinConnectionState.availableUsdt.toFixed(2)} USDT`
                 : `${paperSnapshot.availableBalance.toFixed(2)} USDT`}
             </span>
             {!isRealMode && (
               <span className="text-xs text-[#8A99AD] font-mono tabular-nums">
-                الرصيد الكلي المبدئي: {paperSnapshot.initialBalance.toFixed(0)}$
+                الرصيد المبدئي: <span dir="ltr" className="inline-block">${paperSnapshot.initialBalance.toFixed(0)}</span>
               </span>
             )}
           </div>
@@ -2270,41 +2399,42 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           ) : (
             <div className="flex items-center justify-between text-[11px] text-[#01BC8D]">
               <span>
-                إجمالي القيمة (Equity):{' '}
-                <strong className="font-mono tabular-nums text-[#01BC8D]">
+                إجمالي القيمة:{' '}
+                <strong dir="ltr" className="inline-block font-mono tabular-nums text-[#01BC8D]">
                   {paperSnapshot.totalEquity.toFixed(2)} USDT
                 </strong>
               </span>
               <span className="text-[#8A99AD] font-mono tabular-nums">
-                العمولات المخصومة: {paperSnapshot.totalCommissionsPaid.toFixed(3)}$
+                العمولات: <span dir="ltr" className="inline-block">${paperSnapshot.totalCommissionsPaid.toFixed(3)}</span>
               </span>
             </div>
           )}
         </div>
 
         {/* Unrealized PNL Card */}
-        <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 flex flex-col justify-between">
+        <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 flex flex-col justify-between">
           <span className="text-xs text-[#8A99AD]">الأرباح غير المحققة (PNL)</span>
           <span
-            className={`text-xl font-bold font-mono tabular-nums my-2 block ${
+            dir="ltr"
+            className={`inline-block self-start text-xl font-bold font-mono tabular-nums my-2 ${
               paperSnapshot.unrealizedPnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'
             }`}
           >
-            {paperSnapshot.unrealizedPnl >= 0 ? '+' : ''}
-            {paperSnapshot.unrealizedPnl.toFixed(2)} $
+            {paperSnapshot.unrealizedPnl >= 0 ? '+$' : '-$'}
+            {Math.abs(paperSnapshot.unrealizedPnl).toFixed(2)}
           </span>
           <span className="text-[11px] text-[#8A99AD]">تحديث لحظي من السوق</span>
         </div>
 
         {/* Concurrent Open Positions Slot Counter */}
-        <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 flex flex-col justify-between">
+        <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 flex flex-col justify-between">
           <span className="text-xs text-[#8A99AD]">الصفقات المفتوحة بنفس الوقت</span>
           <div className="my-2 flex items-baseline gap-1.5">
-            <span className="text-xl font-bold font-mono tabular-nums text-white">
+            <span dir="ltr" className="inline-block text-xl font-bold font-mono tabular-nums text-white">
               {openPositions.length}
             </span>
             <span className="text-xs text-[#8A99AD] font-mono tabular-nums">
-              / {settings.maxConcurrentTrades} كحد أقصى
+              / <span dir="ltr" className="inline-block">{settings.maxConcurrentTrades}</span> كحد أقصى
             </span>
           </div>
           <span className="text-[11px] text-[#01BC8D]">
@@ -2312,11 +2442,13 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </span>
         </div>
       </div>
+      )}
 
-      {/* Portfolio Statistics & Recharts Visualization Section (قسم إحصائيات المحفظة المنسوخة) */}
+      {/* Portfolio Statistics & Recharts Visualization Section (Inside STATS_HISTORY tab) */}
+      {simSubTab === 'STATS_HISTORY' && (
       <div
         data-testid="portfolio_statistics_section"
-        className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4"
       >
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#232E3A] pb-3">
           <div className="flex items-center gap-2.5">
@@ -2692,9 +2824,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </div>
         </div>
       </div>
+      )}
 
-      {/* Trade & Copy Settings Configuration Card (إعدادات الصفقات المخصصة للمستخدم) */}
-      <div className="bg-[#12171D] border border-[#01BC8D]/40 rounded-2xl p-4 sm:p-5 space-y-4">
+      {/* Trade & Copy Settings Configuration Card (Inside ACCOUNTS_SETTINGS tab) */}
+      {simSubTab === 'ACCOUNTS_SETTINGS' && (
+      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#232E3A] pb-3">
           <div className="flex items-center gap-2">
             <Sliders className="w-5 h-5 text-[#01BC8D]" />
@@ -3029,9 +3163,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </button>
         </form>
       </div>
+      )}
 
-      {/* Multi-Trader Copy Management Section (إدارة نسخ أكثر من متداول بنفس الوقت عبر الحسابات) */}
-      <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-3">
+      {/* Multi-Trader Copy Management Section (Inside ACCOUNTS_SETTINGS tab) */}
+      {simSubTab === 'ACCOUNTS_SETTINGS' && (
+      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Users className="w-5 h-5 text-[#01BC8D]" />
@@ -3144,19 +3280,13 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                         className="relative group shrink-0 cursor-pointer focus:outline-none"
                         title={`اضغط للدخول إلى صفحة إحصائيات المتداول ${ct.nickname}`}
                       >
-                        {ct.avatarUrl ? (
-                          <img
-                            src={ct.avatarUrl}
-                            alt={ct.nickname}
-                            className="w-10 h-10 rounded-full object-cover border border-[#01BC8D] group-hover:scale-105 group-hover:ring-2 group-hover:ring-[#01BC8D] transition-all shadow-[0_0_10px_rgba(1,188,141,0.25)]"
-                          />
-                        ) : (
-                          <div className="w-10 h-10 rounded-full bg-[#0D2B24] text-[#01BC8D] group-hover:bg-[#01BC8D] group-hover:text-[#0B0E11] flex items-center justify-center font-bold text-xs border border-[#01BC8D]/50 group-hover:ring-2 group-hover:ring-[#01BC8D] transition-all shadow-[0_0_10px_rgba(1,188,141,0.25)]">
-                            {ct.nickname.slice(0, 2).toUpperCase()}
-                          </div>
-                        )}
+                        <TraderAvatar
+                          src={ct.avatarUrl}
+                          name={ct.nickname}
+                          size="md"
+                        />
                         <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-[#0B0E11] border border-[#01BC8D] flex items-center justify-center text-[9px] text-[#01BC8D]">
-                          ↗
+                          <ExternalLink className="w-2.5 h-2.5" />
                         </span>
                       </button>
 
@@ -3216,9 +3346,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           );
         })()}
       </div>
+      )}
 
-      {/* قسم معالجة الصفقات السابقة بعد انقطاع الاتصال وخيارات التنفيذ بالسعر الحالي (يعرض فقط صفقات المتداول المنسوخ في هذه الصفحة) */}
-      {(() => {
+      {/* قسم معالجة الصفقات السابقة بعد انقطاع الاتصال (Inside ACTIVE tab) */}
+      {simSubTab === 'ACTIVE' && (() => {
         const copiedTradersOnThisPage = copiedTraders.filter(
           (ct) => (ct.accountId || 'acc_default') === activeAccountId
         );
@@ -3252,8 +3383,8 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                     <strong className="text-[#F6465D]">بيع (SHORT)</strong> والسعر الحالي{' '}
                     <strong className="text-[#01BC8D]">أعلى من سعر الدخول</strong> (أو{' '}
                     <strong className="text-[#01BC8D]">شراء LONG</strong> والسعر الحالي{' '}
-                    <strong className="text-[#01BC8D]">أدنى من سعر الدخول</strong>) أي في مصلحتك ⬅️{' '}
-                    <strong className="text-white">تُنفذ مباشرة بالسعر الحالي</strong>. أما إذا كان السعر أسوأ ⬅️{' '}
+                    <strong className="text-[#01BC8D]">أدنى من سعر الدخول</strong>) أي في مصلحتك ←{' '}
+                    <strong className="text-white">تُنفذ مباشرة بالسعر الحالي</strong>. أما إذا كان السعر أسوأ ←{' '}
                     <strong className="text-[#FBBF24]">تظهر هنا كخيار تنفيذ خاص بالمتداول المنسوخ في هذه الصفحة</strong>.
                   </p>
                 </div>
@@ -3368,8 +3499,8 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                           </div>
                           <div className="text-[10px] text-[#FBBF24]">
                             {isShort
-                              ? '⚠️ صفقة بيع (SHORT) للمتداول المنسوخ والسعر الحالي أقل من سعر دخوله — هل ترغب بتنفيذها بالسعر الحالي الآن؟'
-                              : '⚠️ صفقة شراء (LONG) للمتداول المنسوخ والسعر الحالي أعلى من سعر دخوله — هل ترغب بتنفيذها بالسعر الحالي الآن؟'}
+                              ? 'صفقة بيع (SHORT) للمتداول المنسوخ والسعر الحالي أقل من سعر دخوله — هل ترغب بتنفيذها بالسعر الحالي الآن؟'
+                              : 'صفقة شراء (LONG) للمتداول المنسوخ والسعر الحالي أعلى من سعر دخوله — هل ترغب بتنفيذها بالسعر الحالي الآن؟'}
                           </div>
                         </div>
 
@@ -3378,9 +3509,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                             type="button"
                             data-testid={`execute_pending_choice_btn_${choice.id}`}
                             onClick={() => onExecutePendingChoice && onExecutePendingChoice(choice.id)}
-                            className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-extrabold px-3 py-2 rounded-xl text-xs cursor-pointer transition-colors"
+                            className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-extrabold px-3 py-2 rounded-xl text-xs cursor-pointer transition-colors flex items-center gap-1.5"
                           >
-                            ✅ تنفيذ بالسعر الحالي الآن
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>تنفيذ بالسعر الحالي الآن</span>
                           </button>
                           <button
                             type="button"
@@ -3401,8 +3533,9 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
         );
       })()}
 
-      {/* Open Positions Card */}
-      <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5">
+      {/* Open Positions Card (Inside ACTIVE tab) */}
+      {simSubTab === 'ACTIVE' && (
+      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-[#01BC8D]" />
@@ -3513,7 +3646,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                               data-testid={`late_entry_delay_badge_${p.id}`}
                               className="text-[10px] px-2 py-0.5 rounded font-bold bg-[#3B2606] text-[#FBBF24] border border-[#F59E0B]/50"
                             >
-                              ⏱️ {lateEntryComp.delayTextAr}
+                              {lateEntryComp.delayTextAr}
                             </span>
                           )}
                           {p.stopLossPrice && p.stopLossPrice > 0 && (
@@ -3714,15 +3847,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                           const isScaleIn = adj.actionType === 'SCALE_IN';
                           const isPartial = adj.actionType === 'PARTIAL_EXIT';
                           const absPct = Math.abs(adj.volumePercent);
-                          const adjTime = new Date(adj.timestamp)
-                            .toLocaleString('ar-EG-u-nu-latn', {
-                              month: 'short',
-                              day: 'numeric',
-                              hour: '2-digit',
-                              minute: '2-digit',
-                              hour12: false,
-                            })
-                            .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+                          const adjTime = formatDateTimeWestern(adj.timestamp);
                           return (
                             <div
                               key={adj.id}
@@ -3765,11 +3890,13 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </div>
         )}
       </div>
+      )}
 
-      {/* لوحة البيانات الإحصائية لسجل الصفقات المغلقة (Closed Trades Statistical Dashboard Widget) */}
+      {/* لوحة البيانات الإحصائية لسجل الصفقات المغلقة (Inside STATS_HISTORY tab) */}
+      {simSubTab === 'STATS_HISTORY' && (
       <div
         data-testid="closed_trades_dashboard_widget"
-        className="bg-[#12171D] border border-[#01BC8D]/40 rounded-2xl p-4 sm:p-5 space-y-4 shadow-lg"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4"
       >
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#232E3A] pb-3">
           <div className="flex items-center gap-2.5">
@@ -4182,11 +4309,13 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </div>
         </div>
       </div>
+      )}
 
-      {/* Dedicated Closed Positions Table (جدول سجل الصفقات المغلقة منفصل عن الصفقات المفتوحة مع التصدير إلى Excel) */}
+      {/* Dedicated Closed Positions Table (Inside STATS_HISTORY tab) */}
+      {simSubTab === 'STATS_HISTORY' && (
       <div
         data-testid="closed_positions_table_section"
-        className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5 space-y-4"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4"
       >
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#232E3A] pb-3.5">
           <div>
@@ -4385,28 +4514,24 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                     cp.sourceTraderName !== 'يدوي' &&
                     cp.sourceTraderName !== 'تداول يدوي';
 
-                  const openTimeStr = new Date(cp.openTime)
-                    .toLocaleString('ar-EG-u-nu-latn', {
-                      year: 'numeric',
-                      month: 'short',
-                      day: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      hour12: false,
-                    })
-                    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+                  const openTimeStr = formatDateTimeWestern(cp.openTime, {
+                    year: 'numeric',
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: false,
+                  });
 
                   const closeTimeStr = cp.closeTime
-                    ? new Date(cp.closeTime)
-                        .toLocaleString('ar-EG-u-nu-latn', {
-                          year: 'numeric',
-                          month: 'short',
-                          day: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                          hour12: false,
-                        })
-                        .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+                    ? formatDateTimeWestern(cp.closeTime, {
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false,
+                      })
                     : '--';
 
                   return (
@@ -4620,9 +4745,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </div>
         )}
       </div>
+      )}
 
-      {/* Quick Manual Trade Form using the configured Trade Settings */}
-      <div className="bg-[#12171D] border border-[#232E3A] rounded-2xl p-4 sm:p-5">
+      {/* Quick Manual Trade Form (Inside ACTIVE tab) */}
+      {simSubTab === 'ACTIVE' && (
+      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5">
         <h3 className="font-bold text-sm text-[#01BC8D] mb-3 flex items-center gap-2">
           <PlusCircle className="w-4 h-4" />
           <span>
@@ -4695,6 +4822,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </button>
         </form>
       </div>
+      )}
     </div>
   );
 };

@@ -32,6 +32,7 @@ import {
   getReadableSymbolBadge,
 } from '../services/kucoinOrdersFilter';
 import { CoinIcon } from './CoinIcon';
+import { formatDateTimeWestern } from '../utils/formatters';
 
 interface KucoinApiTabProps {
   config: KuCoinConfig;
@@ -339,28 +340,34 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
 
         {connectionState.latencyMs !== null && (
           <div className="text-xs text-[#8A99AD] font-mono mb-2">
-            زمن استجابة خادم KuCoin: <strong className="text-white">{connectionState.latencyMs} ms</strong>
-            {connectionState.serverTimeFormatted && ` • توقيت الخادم: ${connectionState.serverTimeFormatted}`}
+            زمن استجابة خادم KuCoin: <strong dir="ltr" className="text-white inline-block tabular-nums">{connectionState.latencyMs} ms</strong>
+            {connectionState.serverTimeFormatted && (
+              <>
+                {' '}• توقيت الخادم: <span dir="ltr" className="inline-block tabular-nums">{connectionState.serverTimeFormatted}</span>
+              </>
+            )}
           </div>
         )}
 
         {connectionState.isAuthenticated && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 mt-3 pt-3 border-t border-[#232E3A]/70">
-            <div className="bg-[#0B0E11] p-2.5 rounded-xl">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 mt-3 pt-3 border-t border-[#1E2733]">
+            <div className="bg-[#0B0E11] border border-[#1E2733] p-2.5 rounded-xl">
               <span className="text-[10px] text-[#8A99AD] block">رصيد KuCoin المتاح للتداول</span>
               <span
+                dir="ltr"
                 data-testid="kucoin_available_balance_value"
-                className="text-sm sm:text-base font-bold font-mono text-[#01BC8D]"
+                className="inline-block text-sm sm:text-base font-bold font-mono tabular-nums text-[#01BC8D]"
               >
                 {connectionState.availableUsdt.toFixed(2)} USDT
               </span>
             </div>
 
-            <div className="bg-[#0B0E11] p-2.5 rounded-xl">
+            <div className="bg-[#0B0E11] border border-[#1E2733] p-2.5 rounded-xl">
               <span className="text-[10px] text-[#8A99AD] block">إجمالي رصيد المحفظة</span>
               <span
+                dir="ltr"
                 data-testid="kucoin_total_balance_value"
-                className="text-sm sm:text-base font-bold font-mono text-white"
+                className="inline-block text-sm sm:text-base font-bold font-mono tabular-nums text-white"
               >
                 {connectionState.usdtBalance.toFixed(2)} USDT
               </span>
@@ -393,11 +400,11 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
       <form
         onSubmit={handleSave}
         data-testid="kucoin_api_connection_form"
-        className="bg-[#12171D] border border-[#01BC8D]/40 rounded-2xl p-4 sm:p-5 space-y-4 shadow-lg"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4"
       >
-        <div className="flex items-center justify-between gap-2 flex-wrap border-b border-[#232E3A] pb-3">
-          <h3 className="font-bold text-sm sm:text-base text-[#01BC8D] flex items-center gap-2">
-            <Key className="w-4 h-4" />
+        <div className="flex items-center justify-between gap-2 flex-wrap border-b border-[#1E2733] pb-3">
+          <h3 className="font-bold text-sm sm:text-base text-white flex items-center gap-2">
+            <Key className="w-4 h-4 text-[#01BC8D]" />
             <span>إعدادات الربط ومفاتيح KuCoin API</span>
           </h3>
           <div className="flex items-center gap-2 flex-wrap">
@@ -405,9 +412,10 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
               type="button"
               onClick={handleQuickDemoConnect}
               data-testid="kucoin_quick_demo_connect_btn"
-              className="text-xs bg-[#0D2B24] hover:bg-[#01BC8D] text-[#01BC8D] hover:text-[#0B0E11] border border-[#01BC8D]/50 px-3 py-1.5 rounded-xl font-bold transition-colors cursor-pointer"
+              className="text-xs bg-[#161D26] hover:bg-[#01BC8D] text-[#01BC8D] hover:text-[#0B0E11] border border-[#1E2733] px-3 py-1.5 rounded-xl font-bold transition-colors cursor-pointer flex items-center gap-1.5"
             >
-              ⚡ تفعيل الربط التجريبي ومزامنة الرصيد فوراً
+              <Zap className="w-3.5 h-3.5" />
+              <span>تفعيل الربط التجريبي ومزامنة الرصيد</span>
             </button>
             {onOpenSimulationTab && (
               <button
@@ -416,7 +424,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
                 className="text-[11px] text-[#01BC8D] hover:underline font-bold flex items-center gap-1 cursor-pointer"
               >
                 <Sliders className="w-3.5 h-3.5" />
-                <span>إعدادات الصفقات (التداول) ←</span>
+                <span>إعدادات التداول</span>
               </button>
             )}
           </div>
@@ -600,7 +608,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
             type="submit"
             disabled={connectionState.isTesting}
             data-testid="kucoin_save_and_test_btn"
-            className="flex-1 bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2.5 px-4 rounded-xl text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-[0_0_16px_rgba(1,188,141,0.25)]"
+            className="flex-1 bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2.5 px-4 rounded-xl text-xs sm:text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
           >
             <CheckCircle2 className="w-4 h-4" />
             <span>حفظ المفاتيح واختبار الاتصال مع كوكوين</span>
@@ -634,7 +642,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
       {/* Recent Orders Section with Filtering by Trade Type (Buy/Sell) & Symbol */}
       <div
         data-testid="kucoin_recent_orders_section"
-        className="bg-[#12171D] border border-[#01BC8D]/40 rounded-2xl p-4 sm:p-5 space-y-4 shadow-lg"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4"
       >
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#232E3A] pb-3.5">
           <div className="flex items-start gap-2.5">
@@ -929,16 +937,14 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
                 {filteredOrders.map((ord) => {
                   const isBuy = (ord.side || '').toLowerCase() === 'buy';
                   const badge = getReadableSymbolBadge(ord.symbol);
-                  const timeFormatted = new Date(ord.createdAt)
-                    .toLocaleString('ar-EG-u-nu-latn', {
-                      month: 'short',
-                      day: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      second: '2-digit',
-                      hour12: false,
-                    })
-                    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+                  const timeFormatted = formatDateTimeWestern(ord.createdAt, {
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false,
+                  });
 
                   return (
                     <tr
