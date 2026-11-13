@@ -5,7 +5,7 @@ import {
   PaperPosition,
   PaperVirtualAccountSummary,
 } from '../types';
-import { formatTimeWestern } from '../utils/formatters';
+import { formatDateTimeWestern } from '../utils/formatters';
 
 const NOTIFICATIONS_STORAGE_KEY = 'whale_mobile_notifications_log_v1';
 const NOTIFICATION_SETTINGS_KEY = 'whale_mobile_notification_settings_v1';
@@ -613,7 +613,7 @@ class MobileNotificationService {
 
     const token = this.settings.telegramBotToken.trim();
     const chatId = this.settings.telegramChatId.trim();
-    const timeStr = formatTimeWestern(item.timestamp);
+    const timeStr = formatDateTimeWestern(item.timestamp);
 
     if (item.actionType === 'DRAWDOWN_ALERT') {
       const accName = item.accountName || item.traderName || 'حساب افتراضي';
@@ -787,25 +787,9 @@ class MobileNotificationService {
       actionTitleAr = '🟢 فتح صفقة جديدة';
       volPct = position.currentScalePercent || 100;
       remainingPct = position.currentScalePercent || 100;
-      const userTimeStr = new Date(position.openTime || Date.now())
-        .toLocaleString('ar-EG-u-nu-latn', {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-        })
-        .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+      const userTimeStr = formatDateTimeWestern(position.openTime || Date.now());
       const traderTimeStr = position.traderEntryTime
-        ? new Date(position.traderEntryTime)
-            .toLocaleString('ar-EG-u-nu-latn', {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-              hour12: false,
-            })
-            .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+        ? formatDateTimeWestern(position.traderEntryTime)
         : userTimeStr;
       const isCopiedOrLate =
         (position.sourceType && position.sourceType !== 'MANUAL') ||

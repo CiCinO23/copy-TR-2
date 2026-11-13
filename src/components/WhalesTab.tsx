@@ -22,7 +22,7 @@ import { CoinIcon } from './CoinIcon';
 import { TraderAvatar } from './TraderAvatar';
 import { AccountCopyPickerModal } from './AccountCopyPickerModal';
 import {
-  formatTimeWestern,
+  formatDateTimeWestern,
   formatSignedCurrency,
   formatSignedPercent,
 } from '../utils/formatters';
@@ -64,6 +64,7 @@ interface WhalesTabProps {
     source: 'COPY_TRADING' | 'SMART_MONEY';
     positions: TraderOpenPosition[];
     latestRecords: TraderLatestRecord[];
+    positionHistory?: TraderPositionHistoryItem[];
     marginPerTradeUsdt: number;
     accountId?: string;
   }) => CopiedSyncLog[];
@@ -301,6 +302,7 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
         source: 'SMART_MONEY',
         positions: fullData.positions,
         latestRecords: fullData.latestRecords,
+        positionHistory: fullData.positionHistory,
         marginPerTradeUsdt: accMarginPerTrade,
         accountId: targetAccountId,
       });
@@ -344,7 +346,7 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
     })}`;
   };
 
-  const formatTime = (ms: number) => formatTimeWestern(ms);
+  const formatTime = (ms: number) => formatDateTimeWestern(ms);
 
   const formatDuration = (startMs: number, endMs: number) => {
     if (!startMs || !endMs || endMs <= startMs) return '--';
@@ -623,13 +625,13 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                               <div className="flex flex-wrap items-center gap-3 pt-1 text-[11px]">
                                 <span className="bg-[#0B0E11] border border-[#232E3A] px-2.5 py-1 rounded-lg text-[#8A99AD]">
                                   وقت الدخول:{' '}
-                                  <strong className="text-white font-mono">
+                                  <strong dir="ltr" className="text-white font-mono inline-block whitespace-nowrap">
                                     {formatTime(pos.entryTime)}
                                   </strong>
                                 </span>
                                 <span className="bg-[#0B0E11] border border-[#232E3A] px-2.5 py-1 rounded-lg text-[#8A99AD]">
                                   آخر حركة (تدعيم/انسحاب):{' '}
-                                  <strong className="text-[#01BC8D] font-mono">
+                                  <strong dir="ltr" className="text-[#01BC8D] font-mono inline-block whitespace-nowrap">
                                     {formatTime(pos.lastUpdateTime)}
                                   </strong>
                                 </span>
@@ -731,7 +733,7 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                                       </div>
                                       <div className="flex items-center justify-between text-[#8A99AD] pt-0.5 border-t border-[#232E3A]/60">
                                         <span>الكمية: {adj.executedQty}</span>
-                                        <span className="font-mono text-white">
+                                        <span dir="ltr" className="font-mono text-white inline-block whitespace-nowrap">
                                           {formatTime(adj.timestamp)}
                                         </span>
                                       </div>
@@ -812,13 +814,13 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                               <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px]">
                                 <span className="bg-[#0B0E11] border border-[#232E3A] px-2.5 py-1 rounded-lg text-[#8A99AD]">
                                   وقت الدخول:{' '}
-                                  <strong className="text-[#01BC8D] font-mono">
+                                  <strong dir="ltr" className="text-[#01BC8D] font-mono inline-block whitespace-nowrap">
                                     {formatTime(item.opened)}
                                   </strong>
                                 </span>
                                 <span className="bg-[#0B0E11] border border-[#232E3A] px-2.5 py-1 rounded-lg text-[#8A99AD]">
                                   وقت الخروج:{' '}
-                                  <strong className="text-[#01BC8D] font-mono">
+                                  <strong dir="ltr" className="text-[#01BC8D] font-mono inline-block whitespace-nowrap">
                                     {formatTime(item.closed)}
                                   </strong>
                                 </span>
@@ -926,7 +928,7 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                                       </div>
                                       <div className="text-[#8A99AD] font-mono text-[9px] pt-0.5 border-t border-[#232E3A]/50 flex items-center justify-between">
                                         <span>الوقت:</span>
-                                        <span className="text-white">{formatTime(adj.timestamp)}</span>
+                                        <span dir="ltr" className="text-white inline-block whitespace-nowrap">{formatTime(adj.timestamp)}</span>
                                       </div>
                                     </div>
                                   );

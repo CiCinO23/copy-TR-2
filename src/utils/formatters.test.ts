@@ -30,6 +30,7 @@ test('date, time, and weekday formatters never emit Hindi numerals', () => {
   assert.equal(HINDI_RE.test(d), false, `Expected no Hindi numerals in "${d}"`);
   assert.equal(HINDI_RE.test(t), false, `Expected no Hindi numerals in "${t}"`);
   assert.equal(HINDI_RE.test(wd), false, `Expected no Hindi numerals in "${wd}"`);
+  assert.match(dt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   assert.match(dt, /2026/);
   assert.match(d, /2026/);
   assert.ok(wd.length > 0);

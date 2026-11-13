@@ -502,12 +502,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           : 0;
       if (dd > maxDrawdownPercent) maxDrawdownPercent = dd;
 
-      const timeStr = new Date(pos.closeTime || pos.openTime)
-        .toLocaleTimeString('en-GB', {
-          hour: '2-digit',
-          minute: '2-digit',
-        })
-        .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+      const timeStr = formatDateTimeWestern(pos.closeTime || pos.openTime);
 
       equityCurve.push({
         step: `#${idx + 1} ${pos.symbol.replace('USDT', '')}`,
@@ -3571,12 +3566,14 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                                 </strong>{' '}
                                 <span className="text-[10px] text-[#01BC8D] font-mono">
                                   (الوقت:{' '}
-                                  {formatLateEntryComparisonDetails({
-                                    traderEntryPrice: choice.traderEntryPrice,
-                                    traderEntryTime: choice.traderEntryTime || choice.createdAt,
-                                    userEntryPrice: liveNow,
-                                    userEntryTime: Date.now(),
-                                  }).traderTimeStr}
+                                  <span dir="ltr" className="inline-block whitespace-nowrap">
+                                    {formatLateEntryComparisonDetails({
+                                      traderEntryPrice: choice.traderEntryPrice,
+                                      traderEntryTime: choice.traderEntryTime || choice.createdAt,
+                                      userEntryPrice: liveNow,
+                                      userEntryTime: Date.now(),
+                                    }).traderTimeStr}
+                                  </span>
                                   )
                                 </span>
                               </span>
@@ -3588,12 +3585,14 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                                 </strong>{' '}
                                 <span className="text-[10px] text-[#FBBF24] font-mono">
                                   (الوقت الآن:{' '}
-                                  {formatLateEntryComparisonDetails({
-                                    traderEntryPrice: choice.traderEntryPrice,
-                                    traderEntryTime: choice.traderEntryTime || choice.createdAt,
-                                    userEntryPrice: liveNow,
-                                    userEntryTime: Date.now(),
-                                  }).userTimeStr}
+                                  <span dir="ltr" className="inline-block whitespace-nowrap">
+                                    {formatLateEntryComparisonDetails({
+                                      traderEntryPrice: choice.traderEntryPrice,
+                                      traderEntryTime: choice.traderEntryTime || choice.createdAt,
+                                      userEntryPrice: liveNow,
+                                      userEntryTime: Date.now(),
+                                    }).userTimeStr}
+                                  </span>
                                   )
                                 </span>
                               </span>
@@ -3816,7 +3815,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                               </strong>
                             </span>
                             <span className="text-[10px] text-[#8A99AD] bg-[#12171D] px-1.5 py-0.5 rounded border border-[#232E3A]">
-                              الوقت: <strong className="text-white font-mono">{lateEntryComp.traderTimeStr}</strong>
+                              الوقت: <strong dir="ltr" className="text-white font-mono inline-block whitespace-nowrap">{lateEntryComp.traderTimeStr}</strong>
                             </span>
                           </div>
 
@@ -3831,7 +3830,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                               </strong>
                             </span>
                             <span className="text-[10px] text-[#8A99AD] bg-[#12171D] px-1.5 py-0.5 rounded border border-[#01BC8D]/30">
-                              الوقت: <strong className="text-[#01BC8D] font-mono">{lateEntryComp.userTimeStr}</strong>
+                              الوقت: <strong dir="ltr" className="text-[#01BC8D] font-mono inline-block whitespace-nowrap">{lateEntryComp.userTimeStr}</strong>
                             </span>
                           </div>
                         </div>
@@ -3960,7 +3959,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                           return (
                             <div
                               key={adj.id}
-                              className={`px-2.5 py-1.5 rounded-lg border text-[10px] flex items-center gap-2 ${
+                              className={`px-2.5 py-1.5 rounded-lg border text-[10px] flex flex-wrap items-center gap-2 ${
                                 isScaleIn
                                   ? 'bg-[#0D2B24]/50 border-[#01BC8D]/40 text-[#01BC8D]'
                                   : isPartial
@@ -3968,8 +3967,20 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                                   : 'bg-[#12171D] border-[#232E3A] text-white'
                               }`}
                             >
-                              <span className="font-bold">{adj.actionLabelAr}</span>
-                              <span className="font-mono font-bold px-1.5 py-0.5 rounded bg-[#0B0E11]">
+                              <span className="font-bold">
+                                {adj.actionLabelAr
+                                  .split(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/g)
+                                  .map((part, idx) =>
+                                    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(part) ? (
+                                      <span key={idx} dir="ltr" className="inline-block whitespace-nowrap">
+                                        {part}
+                                      </span>
+                                    ) : (
+                                      <React.Fragment key={idx}>{part}</React.Fragment>
+                                    )
+                                  )}
+                              </span>
+                              <span className="font-mono font-bold px-1.5 py-0.5 rounded bg-[#0B0E11] whitespace-nowrap">
                                 {isScaleIn
                                   ? `+${absPct}%`
                                   : isPartial
@@ -3977,16 +3988,16 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                                   : `${absPct}%`}
                               </span>
                               {adj.marginDeltaUsdt !== undefined && (
-                                <span className="font-mono font-bold text-white bg-[#1A222B] px-1.5 py-0.5 rounded">
+                                <span dir="ltr" className="font-mono font-bold text-white bg-[#1A222B] px-1.5 py-0.5 rounded inline-block whitespace-nowrap">
                                   {adj.marginDeltaUsdt > 0 ? '+' : ''}
                                   {adj.marginDeltaUsdt.toFixed(2)}$
                                 </span>
                               )}
-                              <span className="text-[#8A99AD] font-mono">
+                              <span className="text-[#8A99AD] font-mono whitespace-nowrap">
                                 المتبقي: {adj.remainingPercentAfter}%
                               </span>
-                              <span className="text-[#8A99AD] font-mono">@ {adj.price.toFixed(2)}</span>
-                              <span className="text-white font-mono">{adjTime}</span>
+                              <span dir="ltr" className="text-[#8A99AD] font-mono inline-block whitespace-nowrap">@ {adj.price.toFixed(2)}</span>
+                              <span dir="ltr" className="text-white font-mono inline-block whitespace-nowrap shrink-0">{adjTime}</span>
                             </div>
                           );
                         })}
@@ -4623,24 +4634,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                     cp.sourceTraderName !== 'يدوي' &&
                     cp.sourceTraderName !== 'تداول يدوي';
 
-                  const openTimeStr = formatDateTimeWestern(cp.openTime, {
-                    year: 'numeric',
-                    month: 'short',
-                    day: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    hour12: false,
-                  });
+                  const openTimeStr = formatDateTimeWestern(cp.openTime);
 
                   const closeTimeStr = cp.closeTime
-                    ? formatDateTimeWestern(cp.closeTime, {
-                        year: 'numeric',
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        hour12: false,
-                      })
+                    ? formatDateTimeWestern(cp.closeTime)
                     : '--';
 
                   return (
@@ -4702,23 +4699,27 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                         {margin.toFixed(2)} $
                       </td>
                       <td className="py-3 px-2.5 font-mono text-[11px] text-[#8A99AD] whitespace-nowrap">
-                        <div>دخولي: <span className="text-white">{openTimeStr}</span></div>
+                        <div>
+                          دخولي: <span dir="ltr" className="text-white inline-block whitespace-nowrap">{openTimeStr}</span>
+                        </div>
                         {cp.traderEntryTime && (
                           <div className="text-[10px] text-[#01BC8D]">
                             المتداول:{' '}
-                            {
-                              formatLateEntryComparisonDetails({
-                                traderEntryPrice: cp.traderEntryPrice || cp.entryPrice,
-                                traderEntryTime: cp.traderEntryTime,
-                                userEntryPrice: cp.entryPrice,
-                                userEntryTime: cp.openTime,
-                              }).traderTimeStr
-                            }
+                            <span dir="ltr" className="inline-block whitespace-nowrap">
+                              {
+                                formatLateEntryComparisonDetails({
+                                  traderEntryPrice: cp.traderEntryPrice || cp.entryPrice,
+                                  traderEntryTime: cp.traderEntryTime,
+                                  userEntryPrice: cp.entryPrice,
+                                  userEntryTime: cp.openTime,
+                                }).traderTimeStr
+                              }
+                            </span>
                           </div>
                         )}
                       </td>
                       <td className="py-3 px-2.5 font-mono text-[11px] text-[#8A99AD] whitespace-nowrap">
-                        {closeTimeStr}
+                        <span dir="ltr" className="inline-block whitespace-nowrap">{closeTimeStr}</span>
                       </td>
                       <td
                         className="py-3 px-2.5 whitespace-nowrap"

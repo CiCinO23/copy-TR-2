@@ -10,9 +10,14 @@
 
 import type {
   ActiveCopiedTrader,
+  PaperPosition,
   PendingReconnectTradeChoice,
   PositionScaleAdjustment,
+  TraderLatestRecord,
+  TraderPositionHistoryItem,
+  TraderSyncCheckpoint,
 } from '../types';
+import { formatDateTimeWestern } from '../utils/formatters';
 
 export interface PriceAdvantageEvaluation {
   isFavorable: boolean;
@@ -200,23 +205,11 @@ export function filterPendingChoicesForCopiedTradersOnPage(
 }
 
 /**
- * Formats a timestamp into a clean, readable Arabic date & time string with Latin digits.
+ * Formats a timestamp into a clean date & time string (YYYY-MM-DD HH:mm:ss) with Western Latin digits.
  */
 export function formatTradeTimestampAr(ts?: number): string {
   if (!ts || ts <= 0 || isNaN(ts)) return '--';
-  try {
-    return new Date(ts)
-      .toLocaleString('ar-EG-u-nu-latn', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      })
-      .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
-  } catch {
-    return new Date(ts).toISOString().slice(0, 16).replace('T', ' ');
-  }
+  return formatDateTimeWestern(ts);
 }
 
 /**
@@ -607,5 +600,167 @@ export function isTraderActionAlreadyProcessed(params: {
 
   return false;
 }
+
+/**
+ * Checks whether a candidate trader position is ALREADY permanently closed
+ * according to `latestRecords` (an EXIT without any newer ENTRY) or `positionHistory`.
+ * Prevents fetching/deriving/opening old or permanently closed historical trades.
+ */
+export function isTraderTradePermanentlyClosed(params: {
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  entryTime?: number;
+  latestRecords?: TraderLatestRecord[];
+  positionHistory?: TraderPositionHistoryItem[];
+}): boolean {
+  const sym = String(params.symbol || '').toUpperCase().trim();
+  const entryTs = Number(params.entryTime || 0);
+  const records = params.latestRecords || [];
+  const history = params.positionHistory || [];
+
+  const matchingRecords = records
+    .filter((r) => {
+      if (String(r.symbol || '').toUpperCase().trim() !== sym) return false;
+      if (r.positionSide === 'LONG' || r.positionSide === 'SHORT') {
+        return r.positionSide === params.side;
+      }
+      return true;
+    })
+    .sort((a, b) => (a.exitTime || a.orderTime || 0) - (b.exitTime || b.orderTime || 0));
+
+  let latestEntryAfterExitTs = 0;
+  let latestExitTs = 0;
+  for (const r of matchingRecords) {
+    const recTs = Number(r.exitTime || r.orderTime || 0);
+    if (r.actionType === 'EXIT') {
+      if (recTs > latestExitTs) latestExitTs = recTs;
+    } else if (r.actionType === 'ENTRY' || r.actionType === 'SCALE_IN') {
+      if (recTs > latestEntryAfterExitTs) latestEntryAfterExitTs = recTs;
+    }
+  }
+
+  // If a full EXIT occurred after/at this position's entryTime and no newer ENTRY followed it
+  if (latestExitTs > 0 && latestEntryAfterExitTs <= latestExitTs + 5_000) {
+    if (entryTs <= 0 || latestExitTs >= entryTs - 60_000) {
+      return true;
+    }
+  }
+
+  // Also check explicit closed positionHistory for the same symbol & side
+  for (const h of history) {
+    if (String(h.symbol || '').toUpperCase().trim() !== sym) continue;
+    if (h.side !== params.side) continue;
+    const closedTs = Number(h.closed || 0);
+    const openedTs = Number(h.opened || 0);
+    if (closedTs <= 0) continue;
+
+    // Only consider closed if no newer ENTRY record opened after that close
+    const hasNewerEntryAfterClose = latestEntryAfterExitTs > closedTs + 5_000;
+    if (hasNewerEntryAfterClose) continue;
+
+    if (entryTs > 0) {
+      if (closedTs >= entryTs - 60_000 || Math.abs(openedTs - entryTs) < 120_000) {
+        return true;
+      }
+    } else {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Prevents re-opening a trader position that has ALREADY been synced/entered/closed
+ * for this account, stopping endless open/close sync loops.
+ * Allows opening only if it is a genuinely NEW trade (newer entryTime & unseen action ID).
+ */
+export function hasTraderEntryAlreadyBeenSynced(params: {
+  traderId: string;
+  traderName?: string;
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  rawPositionId?: string;
+  entryTime?: number;
+  accountPositions: PaperPosition[];
+  checkpoint?: TraderSyncCheckpoint | null;
+}): boolean {
+  const sym = String(params.symbol || '').toUpperCase().trim();
+  const entryTs = Number(params.entryTime || 0);
+
+  const belongsToTrader = (p: PaperPosition) =>
+    p.symbol.toUpperCase() === sym &&
+    p.side === params.side &&
+    (p.sourceTraderId === params.traderId ||
+      (!!params.traderName && p.sourceTraderName === params.traderName));
+
+  // 1. Already open right now
+  if (params.accountPositions.some((p) => p.status === 'OPEN' && belongsToTrader(p))) {
+    return true;
+  }
+
+  // 2. Already copied & closed for this same trader entry (or closed after/around this entryTime)
+  for (const p of params.accountPositions) {
+    if (p.status !== 'CLOSED' || !belongsToTrader(p)) continue;
+    const pTraderEntry = Number(p.traderEntryTime || 0);
+    const pCloseTime = Number(p.closeTime || 0);
+    const pOpenTime = Number(p.openTime || 0);
+
+    if (entryTs > 0) {
+      if (pTraderEntry > 0 && Math.abs(pTraderEntry - entryTs) < 120_000) {
+        return true;
+      }
+      if (pCloseTime > 0 && entryTs <= pCloseTime + 5_000) {
+        return true;
+      }
+      if (pOpenTime > 0 && entryTs <= pOpenTime) {
+        // Check if we already opened and closed a copy of an entry that predates our open
+        if (pCloseTime > 0) {
+          return true;
+        }
+      }
+    } else if (pCloseTime > 0) {
+      return true;
+    }
+  }
+
+  // 3. Per-trader checkpoint already recorded this ENTRY or a FULL_EXIT at/after this entryTime
+  const cp = params.checkpoint;
+  if (cp) {
+    const idWithRaw = buildTraderActionId({
+      traderId: params.traderId,
+      symbol: sym,
+      actionType: 'ENTRY',
+      rawId: params.rawPositionId,
+      timestamp: entryTs,
+    });
+    const idByTime = buildTraderActionId({
+      traderId: params.traderId,
+      symbol: sym,
+      actionType: 'ENTRY',
+      timestamp: entryTs,
+    });
+    const processed = new Set(cp.processedActionIds || []);
+    if (
+      (params.rawPositionId && processed.has(idWithRaw)) ||
+      (entryTs > 0 && processed.has(idByTime))
+    ) {
+      return true;
+    }
+
+    const lastForSym = cp.lastActionsBySymbol?.[sym];
+    if (
+      lastForSym &&
+      (lastForSym.actionType === 'ENTRY' || lastForSym.actionType === 'FULL_EXIT') &&
+      entryTs > 0 &&
+      lastForSym.timestamp >= entryTs - 5_000
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 
 

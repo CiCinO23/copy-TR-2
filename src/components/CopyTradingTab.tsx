@@ -25,7 +25,7 @@ import { CoinIcon } from './CoinIcon';
 import { TraderAvatar } from './TraderAvatar';
 import { AccountCopyPickerModal } from './AccountCopyPickerModal';
 import {
-  formatTimeWestern,
+  formatDateTimeWestern,
   formatSignedCurrency,
   formatSignedPercent,
 } from '../utils/formatters';
@@ -69,6 +69,7 @@ interface CopyTradingTabProps {
     source: 'COPY_TRADING' | 'SMART_MONEY';
     positions: TraderOpenPosition[];
     latestRecords: TraderLatestRecord[];
+    positionHistory?: TraderPositionHistoryItem[];
     marginPerTradeUsdt: number;
     accountId?: string;
   }) => CopiedSyncLog[];
@@ -316,6 +317,7 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
         source: 'COPY_TRADING',
         positions: fullData.positions,
         latestRecords: fullData.latestRecords,
+        positionHistory: fullData.positionHistory,
         marginPerTradeUsdt: accMarginPerTrade,
         accountId: targetAccountId,
       });
@@ -359,7 +361,7 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
     })}`;
   };
 
-  const formatTime = (ms: number) => formatTimeWestern(ms);
+  const formatTime = (ms: number) => formatDateTimeWestern(ms);
 
   const filteredRecords = latestRecords.filter((rec) => {
     if (recordsFilter === 'ALL') return true;
@@ -681,14 +683,14 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                                 <div className="flex flex-wrap items-center gap-3 text-[11px] text-[#8A99AD] pt-1">
                                   <span>
                                     وقت الدخول:{' '}
-                                    <strong className="text-white font-mono tabular-nums">
+                                    <strong dir="ltr" className="text-white font-mono tabular-nums inline-block whitespace-nowrap">
                                       {formatTime(pos.entryTime)}
                                     </strong>
                                   </span>
                                   <span aria-hidden="true">·</span>
                                   <span>
                                     آخر تدعيم / انسحاب:{' '}
-                                    <strong className="text-[#01BC8D] font-mono tabular-nums">
+                                    <strong dir="ltr" className="text-[#01BC8D] font-mono tabular-nums inline-block whitespace-nowrap">
                                       {formatTime(pos.lastUpdateTime)}
                                     </strong>
                                   </span>
@@ -778,8 +780,11 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                                             {adj.volumePercent > 0 ? `+${adj.volumePercent}%` : `${adj.volumePercent}%`}
                                           </span>
                                         </div>
-                                        <div className="flex items-center justify-between text-[10px] text-[#8A99AD] font-mono tabular-nums">
-                                          <span>الوقت: {formatTime(adj.timestamp)}</span>
+                                        <div className="flex items-center justify-between gap-1.5 text-[10px] text-[#8A99AD] font-mono tabular-nums">
+                                          <span className="flex items-center gap-1">
+                                            <span>الوقت:</span>
+                                            <span dir="ltr" className="text-white inline-block whitespace-nowrap">{formatTime(adj.timestamp)}</span>
+                                          </span>
                                           <span>السعر: {adj.price}</span>
                                         </div>
                                         <div className="flex items-center justify-between text-[10px] text-[#8A99AD] font-mono tabular-nums">
@@ -941,7 +946,7 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                                   <span aria-hidden="true">·</span>
                                   <span>
                                     وقت الدخول الأصلي:{' '}
-                                    <strong className="text-white">
+                                    <strong dir="ltr" className="text-white inline-block whitespace-nowrap">
                                       {formatTime(rec.entryTime || rec.orderTime)}
                                     </strong>
                                   </span>
@@ -950,7 +955,7 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                                       <span aria-hidden="true">·</span>
                                       <span>
                                         وقت الانسحاب/الخروج:{' '}
-                                        <strong className="text-[#01BC8D]">
+                                        <strong dir="ltr" className="text-[#01BC8D] inline-block whitespace-nowrap">
                                           {formatTime(rec.exitTime)}
                                         </strong>
                                       </span>
@@ -1074,11 +1079,11 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                                   {h.symbol}
                                 </span>
                                 <span className="text-[11px] text-[#8A99AD] font-mono tabular-nums">
-                                  وقت الدخول: <strong className="text-white">{formatTime(h.opened)}</strong>
+                                  وقت الدخول: <strong dir="ltr" className="text-white inline-block whitespace-nowrap">{formatTime(h.opened)}</strong>
                                 </span>
                                 <span aria-hidden="true" className="text-[#8A99AD]">←</span>
                                 <span className="text-[11px] text-[#8A99AD] font-mono tabular-nums">
-                                  وقت الخروج: <strong className="text-[#01BC8D]">{formatTime(h.closed)}</strong>
+                                  وقت الخروج: <strong dir="ltr" className="text-[#01BC8D] inline-block whitespace-nowrap">{formatTime(h.closed)}</strong>
                                 </span>
                                 <span className="text-[10px] text-[#8A99AD] font-mono">
                                   (المدة: {durationLabel})
@@ -1142,8 +1147,9 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                                       <div className="text-white font-sans font-semibold truncate">
                                         {step.actionLabelAr}
                                       </div>
-                                      <div className="text-[#8A99AD]">
-                                        {formatTime(step.timestamp)} • {step.price}$
+                                      <div className="text-[#8A99AD] flex items-center justify-between gap-1">
+                                        <span dir="ltr" className="inline-block whitespace-nowrap">{formatTime(step.timestamp)}</span>
+                                        <span dir="ltr" className="inline-block">{step.price}$</span>
                                       </div>
                                     </div>
                                   );

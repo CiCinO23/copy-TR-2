@@ -15,6 +15,7 @@ import {
   RecordActionCategory,
 } from '../types';
 import { getCachedPrice } from './binanceApi';
+import { isTraderTradePermanentlyClosed } from './tradeExecutionRules';
 
 export interface FetchCopyTradersParams {
   pageNumber?: number;
@@ -738,12 +739,14 @@ export async function fetchCopyTraderFullData(
   }
 
   let positions: TraderOpenPosition[] = [];
+  let hasAuthoritativePositions = false;
   const positionsArePublic = detail.positionShow;
   try {
     if (posRes && posRes.ok) {
       const posJson = await posRes.json();
       const rawPositions = posJson?.data;
       if (Array.isArray(rawPositions)) {
+        hasAuthoritativePositions = true;
         const active = rawPositions.filter(
           (p: any) => Math.abs(parseFloat(p.positionAmount || '0')) > 0
         );
@@ -859,63 +862,98 @@ export async function fetchCopyTraderFullData(
     console.warn('Error parsing copy trader position history:', e);
   }
 
-  // If the trader currently has no active open positions returned by BAPI, synthesize active positions from their latest ENTRY records
-  if (positions.length === 0 && latestRecords.length > 0) {
-    const recentEntry =
-      latestRecords.find((r) => r.actionType === 'ENTRY' || r.actionType === 'SCALE_IN') ||
-      latestRecords[0];
-    const mark = getLivePriceForSymbol(recentEntry.symbol, tickers);
-    const entry = recentEntry.avgPrice > 0 ? recentEntry.avgPrice : mark * 0.996;
-    const side: 'LONG' | 'SHORT' =
-      recentEntry.positionSide === 'SHORT' ||
-      (recentEntry.positionSide === 'BOTH' && recentEntry.side === 'SELL')
-        ? 'SHORT'
-        : 'LONG';
-    const qty =
-      recentEntry.executedQty > 0 ? recentEntry.executedQty : Number((1500 / mark).toFixed(3));
-    const dir = side === 'LONG' ? 1 : -1;
-    const uPnl = (mark - entry) * qty * dir;
-    const notional = qty * mark;
-    const lev = 10;
-    const posId = `${portfolioId}_derived_pos_1`;
-    const entryTime = recentEntry.entryTime || recentEntry.orderTime || STABLE_FALLBACK_ANCHOR - 5400000;
-
-    const scaling = buildOpenPositionScaleAdjustments({
-      posId,
-      symbol: recentEntry.symbol,
-      side,
-      currentQty: qty,
-      entryPrice: entry,
-      markPrice: mark,
-      entryTime,
-      matchingOrders: latestRecords.filter((r) => r.symbol === recentEntry.symbol),
-      allowSyntheticSteps: false,
+  // Only if the trader hides public positions (positionShow === false) and live positions API was unavailable,
+  // check if any recent (<= 24h) chronological symbol still appears open (never closed by EXIT or positionHistory).
+  if (
+    !hasAuthoritativePositions &&
+    !positionsArePublic &&
+    positions.length === 0 &&
+    latestRecords.length > 0
+  ) {
+    const recentCutoff = Date.now() - 86_400_000;
+    const recentEntry = latestRecords.find((r) => {
+      if (r.actionType !== 'ENTRY' && r.actionType !== 'SCALE_IN') return false;
+      if ((r.orderTime || 0) < recentCutoff) return false;
+      const candidateSide: 'LONG' | 'SHORT' =
+        r.positionSide === 'SHORT' || (r.positionSide === 'BOTH' && r.side === 'SELL')
+          ? 'SHORT'
+          : 'LONG';
+      return !isTraderTradePermanentlyClosed({
+        symbol: r.symbol,
+        side: candidateSide,
+        entryTime: r.entryTime || r.orderTime,
+        latestRecords,
+        positionHistory,
+      });
     });
 
-    positions = [
-      {
-        id: posId,
+    if (recentEntry) {
+      const mark = getLivePriceForSymbol(recentEntry.symbol, tickers);
+      const entry = recentEntry.avgPrice > 0 ? recentEntry.avgPrice : mark * 0.996;
+      const side: 'LONG' | 'SHORT' =
+        recentEntry.positionSide === 'SHORT' ||
+        (recentEntry.positionSide === 'BOTH' && recentEntry.side === 'SELL')
+          ? 'SHORT'
+          : 'LONG';
+      const qty =
+        recentEntry.executedQty > 0 ? recentEntry.executedQty : Number((1500 / mark).toFixed(3));
+      const dir = side === 'LONG' ? 1 : -1;
+      const uPnl = (mark - entry) * qty * dir;
+      const notional = qty * mark;
+      const lev = 10;
+      const posId = `${portfolioId}_derived_pos_1`;
+      const entryTime =
+        recentEntry.entryTime || recentEntry.orderTime || STABLE_FALLBACK_ANCHOR - 5400000;
+
+      const scaling = buildOpenPositionScaleAdjustments({
+        posId,
         symbol: recentEntry.symbol,
-        collateral: 'USDT',
-        positionAmount: qty,
-        initialPositionAmount: scaling.initialPositionAmount,
         side,
+        currentQty: qty,
         entryPrice: entry,
         markPrice: mark,
-        breakEvenPrice: entry * 1.0005,
-        unrealizedProfit: uPnl,
-        cumRealized: recentEntry.totalPnl || 0,
-        notionalValue: notional,
-        leverage: lev,
-        isolated: false,
-        roePercent: notional > 0 ? (uPnl / (notional / lev)) * 100 : 0,
         entryTime,
-        lastUpdateTime: scaling.lastUpdateTime,
-        currentScalePercent: scaling.currentScalePercent,
-        scaleAdjustments: scaling.scaleAdjustments,
-      },
-    ];
+        matchingOrders: latestRecords.filter((r) => r.symbol === recentEntry.symbol),
+        allowSyntheticSteps: false,
+      });
+
+      positions = [
+        {
+          id: posId,
+          symbol: recentEntry.symbol,
+          collateral: 'USDT',
+          positionAmount: qty,
+          initialPositionAmount: scaling.initialPositionAmount,
+          side,
+          entryPrice: entry,
+          markPrice: mark,
+          breakEvenPrice: entry * 1.0005,
+          unrealizedProfit: uPnl,
+          cumRealized: recentEntry.totalPnl || 0,
+          notionalValue: notional,
+          leverage: lev,
+          isolated: false,
+          roePercent: notional > 0 ? (uPnl / (notional / lev)) * 100 : 0,
+          entryTime,
+          lastUpdateTime: scaling.lastUpdateTime,
+          currentScalePercent: scaling.currentScalePercent,
+          scaleAdjustments: scaling.scaleAdjustments,
+        },
+      ];
+    }
   }
+
+  // Final defense-in-depth: exclude any position already marked permanently closed in latestRecords or positionHistory
+  positions = positions.filter(
+    (p) =>
+      !isTraderTradePermanentlyClosed({
+        symbol: p.symbol,
+        side: p.side,
+        entryTime: p.entryTime,
+        latestRecords,
+        positionHistory,
+      })
+  );
 
   return {
     detail,
@@ -1124,6 +1162,7 @@ export async function fetchSmartMoneyWhaleDetail(
 
   // Attempt Smart Money positions endpoint in case session is available
   let positions: TraderOpenPosition[] = [];
+  let hasAuthoritativeSmPositions = false;
   try {
     const smPosRes = await fetch(
       `/bapi/asset/v1/private/future/smart-money/profile/query-positions?topTraderId=${encodeURIComponent(
@@ -1133,6 +1172,9 @@ export async function fetchSmartMoneyWhaleDetail(
     if (smPosRes.ok) {
       const smPosJson = await smPosRes.json();
       const rows = smPosJson?.data?.rows || smPosJson?.data;
+      if (Array.isArray(rows)) {
+        hasAuthoritativeSmPositions = true;
+      }
       if (Array.isArray(rows) && rows.length > 0) {
         positions = rows.map((p: any, idx: number) => {
           const symbol = String(p.symbol || 'BTCUSDT');
@@ -1195,8 +1237,11 @@ export async function fetchSmartMoneyWhaleDetail(
 
   const whaleBalance = Math.max(profile.umMarginBalance || 250000, 50000);
   const now = STABLE_FALLBACK_ANCHOR;
+  const isWhaleActiveInPosition =
+    profile.sharingPosition !== false &&
+    (!summaryItem?.positionStatus || summaryItem.positionStatus === 'IN_POSITION');
 
-  if (positions.length === 0) {
+  if (!hasAuthoritativeSmPositions && positions.length === 0 && isWhaleActiveInPosition) {
     const activeSymbols = [primarySym, secondarySym, tertiarySym].filter(
       (v, i, a) => a.indexOf(v) === i
     );
@@ -1254,37 +1299,64 @@ export async function fetchSmartMoneyWhaleDetail(
     });
   }
 
-  const positionHistory: TraderPositionHistoryItem[] = positions.map((pos, idx) => {
-    const isLong = pos.side === 'LONG';
+  // Historical closed positions must strictly PRE-DATE any currently open positions so closed history never conflicts with active trades
+  const historySeedSymbols =
+    positions.length > 0
+      ? positions.map((p) => ({
+          sym: p.symbol,
+          side: p.side,
+          entry: p.entryPrice,
+          mark: p.markPrice,
+          amt: p.positionAmount,
+          isolated: p.isolated,
+          anchorBefore: p.entryTime,
+        }))
+      : [primarySym, secondarySym].map((sym, idx) => {
+          const mark = getLivePriceForSymbol(sym, tickers);
+          const side: 'LONG' | 'SHORT' = (seed + idx) % 2 === 0 ? 'LONG' : 'SHORT';
+          const entry = Number((mark * (side === 'LONG' ? 0.97 : 1.03)).toFixed(mark > 100 ? 2 : 4));
+          return {
+            sym,
+            side,
+            entry,
+            mark,
+            amt: Number((50000 / mark).toFixed(mark > 1000 ? 3 : 2)),
+            isolated: false,
+            anchorBefore: now - (idx + 2) * 6200000,
+          };
+        });
+
+  const positionHistory: TraderPositionHistoryItem[] = historySeedSymbols.map((hSeed, idx) => {
+    const isLong = hSeed.side === 'LONG';
     const closePrice = Number(
-      (pos.entryPrice * (isLong ? 1.032 : 0.968)).toFixed(pos.markPrice > 100 ? 2 : 4)
+      (hSeed.entry * (isLong ? 1.032 : 0.968)).toFixed(hSeed.mark > 100 ? 2 : 4)
     );
-    const closedVol = Number((pos.positionAmount * 1.2).toFixed(3));
+    const closedVol = Number((hSeed.amt * 1.2).toFixed(3));
     const dir = isLong ? 1 : -1;
-    const cPnl = Number(((closePrice - pos.entryPrice) * closedVol * dir).toFixed(2));
+    const cPnl = Number(((closePrice - hSeed.entry) * closedVol * dir).toFixed(2));
     const histId = `sm_${topTraderId}_hist_${idx}`;
-    const opened = now - (idx + 3) * 14400000;
-    const closed = now - (idx + 1) * 3600000;
+    const closed = hSeed.anchorBefore - (idx + 1) * 3600000;
+    const opened = closed - 14400000;
 
     return {
       id: histId,
-      symbol: pos.symbol,
-      side: pos.side,
+      symbol: hSeed.sym,
+      side: hSeed.side,
       opened,
       closed,
-      avgCost: pos.entryPrice,
+      avgCost: hSeed.entry,
       avgClosePrice: closePrice,
       closingPnl: cPnl,
       maxOpenInterest: closedVol,
       closedVolume: closedVol,
-      isolated: pos.isolated,
+      isolated: hSeed.isolated,
       scaleAdjustments: buildClosedPositionScaleAdjustments({
         histId,
-        symbol: pos.symbol,
-        side: pos.side,
+        symbol: hSeed.sym,
+        side: hSeed.side,
         opened,
         closed,
-        avgCost: pos.entryPrice,
+        avgCost: hSeed.entry,
         avgClosePrice: closePrice,
         closedVolume: closedVol,
         closingPnl: cPnl,

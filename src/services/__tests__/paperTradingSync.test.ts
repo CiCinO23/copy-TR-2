@@ -429,3 +429,203 @@ test('PaperEngine executes late unfavorable trades automatically at market price
   assert.equal((snap.pendingReconnectChoices || []).length, 0);
 });
 
+test('PaperEngine NEVER opens permanently closed or historical latestRecords trades and never loops open/close', () => {
+  memoryStorage.clear();
+  mobileNotifications.clearAllNotifications();
+  const engine = new PaperEngine();
+  engine.clearAllDataAndReset({ scope: 'ALL_ACCOUNTS' });
+  engine.updateSettings({ promptOnUnfavorableLateEntry: false });
+
+  const oldEntryTs = Date.now() - 7200_000;
+  const oldExitTs = Date.now() - 3600_000;
+
+  const historicalRecords: TraderLatestRecord[] = [
+    {
+      id: 'hist_exit_btc',
+      symbol: 'BTCUSDT',
+      baseAsset: 'BTC',
+      quoteAsset: 'USDT',
+      side: 'SELL',
+      type: 'MARKET',
+      positionSide: 'LONG',
+      actionType: 'EXIT',
+      actionLabelAr: 'خروج كامل',
+      volumePercent: -100,
+      remainingPercentAfter: 0,
+      executedQty: 1,
+      avgPrice: 91000,
+      totalPnl: 1000,
+      orderTime: oldExitTs,
+      entryTime: oldEntryTs,
+      exitTime: oldExitTs,
+    },
+    {
+      id: 'hist_entry_btc',
+      symbol: 'BTCUSDT',
+      baseAsset: 'BTC',
+      quoteAsset: 'USDT',
+      side: 'BUY',
+      type: 'MARKET',
+      positionSide: 'LONG',
+      actionType: 'ENTRY',
+      actionLabelAr: 'دخول أولي',
+      volumePercent: 100,
+      remainingPercentAfter: 100,
+      executedQty: 1,
+      avgPrice: 90000,
+      totalPnl: 0,
+      orderTime: oldEntryTs,
+      entryTime: oldEntryTs,
+    },
+    {
+      id: 'hist_entry_sol',
+      symbol: 'SOLUSDT',
+      baseAsset: 'SOL',
+      quoteAsset: 'USDT',
+      side: 'BUY',
+      type: 'MARKET',
+      positionSide: 'LONG',
+      actionType: 'ENTRY',
+      actionLabelAr: 'دخول قديم',
+      volumePercent: 100,
+      remainingPercentAfter: 100,
+      executedQty: 10,
+      avgPrice: 180,
+      totalPnl: 0,
+      orderTime: oldEntryTs,
+      entryTime: oldEntryTs,
+    },
+  ];
+
+  // 1. Trader currently has NO open positions (positions: []), only historical latestRecords:
+  // Engine must NOT open historical/closed trades!
+  for (let i = 0; i < 5; i++) {
+    const logs = engine.syncTraderPositionsAndRecords({
+      traderId: 'trader_hist_only',
+      traderName: 'HistTrader',
+      source: 'COPY_TRADING',
+      positions: [],
+      latestRecords: historicalRecords,
+      currentPrices: { BTCUSDT: 89500, SOLUSDT: 175 },
+    });
+    assert.equal(logs.length, 0);
+    assert.equal(engine.getAccount().positions.length, 0);
+  }
+
+  // 2. Even if stale API cache temporarily passes a BTCUSDT LONG position that already has EXIT in latestRecords,
+  // it must be filtered out and never opened!
+  const staleClosedPos: TraderOpenPosition = {
+    id: 'stale_btc_pos',
+    symbol: 'BTCUSDT',
+    collateral: 'USDT',
+    positionAmount: 1,
+    side: 'LONG',
+    entryPrice: 90000,
+    markPrice: 91000,
+    breakEvenPrice: 90000,
+    unrealizedProfit: 1000,
+    cumRealized: 0,
+    notionalValue: 91000,
+    leverage: 5,
+    isolated: false,
+    roePercent: 5,
+    entryTime: oldEntryTs,
+    lastUpdateTime: oldEntryTs,
+    currentScalePercent: 100,
+    scaleAdjustments: [],
+  };
+
+  const staleLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_hist_only',
+    traderName: 'HistTrader',
+    source: 'COPY_TRADING',
+    positions: [staleClosedPos],
+    latestRecords: historicalRecords,
+    currentPrices: { BTCUSDT: 89500 },
+  });
+  assert.equal(staleLogs.length, 0);
+  assert.equal(engine.getAccount().positions.length, 0);
+
+  // 3. Live open trade opens once, then trader exits -> must close once and NEVER re-open on repeated polls
+  const liveEntryTs = Date.now() - 10_000;
+  const livePos: TraderOpenPosition = {
+    id: 'live_eth_1',
+    symbol: 'ETHUSDT',
+    collateral: 'USDT',
+    positionAmount: 5,
+    side: 'SHORT',
+    entryPrice: 3000,
+    markPrice: 2980,
+    breakEvenPrice: 3000,
+    unrealizedProfit: 100,
+    cumRealized: 0,
+    notionalValue: 14900,
+    leverage: 5,
+    isolated: false,
+    roePercent: 3,
+    entryTime: liveEntryTs,
+    lastUpdateTime: liveEntryTs,
+    currentScalePercent: 100,
+    scaleAdjustments: [],
+  };
+
+  const openLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_loop_guard',
+    traderName: 'LoopGuard',
+    source: 'COPY_TRADING',
+    positions: [livePos],
+    latestRecords: [],
+    currentPrices: { ETHUSDT: 2980 },
+  });
+  assert.equal(openLogs.filter((l) => l.action === 'POSITION_SYNC').length, 1);
+
+  const exitTs = Date.now() + 2000;
+  const exitRecord: TraderLatestRecord = {
+    id: 'eth_exit_final',
+    symbol: 'ETHUSDT',
+    baseAsset: 'ETH',
+    quoteAsset: 'USDT',
+    side: 'BUY',
+    type: 'MARKET',
+    positionSide: 'SHORT',
+    actionType: 'EXIT',
+    actionLabelAr: 'خروج كامل',
+    volumePercent: -100,
+    remainingPercentAfter: 0,
+    executedQty: 5,
+    avgPrice: 2950,
+    totalPnl: 250,
+    orderTime: exitTs,
+    entryTime: liveEntryTs,
+    exitTime: exitTs,
+  };
+
+  const closeLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'trader_loop_guard',
+    traderName: 'LoopGuard',
+    source: 'COPY_TRADING',
+    positions: [],
+    latestRecords: [exitRecord],
+    currentPrices: { ETHUSDT: 2950 },
+  });
+  assert.equal(closeLogs.filter((l) => l.action === 'EXIT').length, 1);
+  assert.equal(engine.getAccount().positions.filter((p) => p.status === 'OPEN').length, 0);
+  assert.equal(engine.getAccount().positions.filter((p) => p.status === 'CLOSED').length, 1);
+
+  // Now simulate repeated polls where stale `livePos` re-appears from cache -> must NEVER re-open!
+  for (let i = 0; i < 6; i++) {
+    const loopLogs = engine.syncTraderPositionsAndRecords({
+      traderId: 'trader_loop_guard',
+      traderName: 'LoopGuard',
+      source: 'COPY_TRADING',
+      positions: [livePos],
+      latestRecords: [],
+      currentPrices: { ETHUSDT: 2950 + i },
+    });
+    assert.equal(loopLogs.length, 0);
+    assert.equal(engine.getAccount().positions.filter((p) => p.status === 'OPEN').length, 0);
+    assert.equal(engine.getAccount().positions.filter((p) => p.status === 'CLOSED').length, 1);
+  }
+});
+
+

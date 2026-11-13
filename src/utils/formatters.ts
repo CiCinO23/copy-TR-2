@@ -16,18 +16,19 @@ export function normalizeToWesternDigits(value: string | number | null | undefin
 
 export function formatDateTimeWestern(
   ts: number | string | Date,
-  options: Intl.DateTimeFormatOptions = {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }
+  options?: Intl.DateTimeFormatOptions
 ): string {
   const date = ts instanceof Date ? ts : new Date(ts);
   if (Number.isNaN(date.getTime())) return '--';
+  if (!options) {
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    const hh = String(date.getHours()).padStart(2, '0');
+    const min = String(date.getMinutes()).padStart(2, '0');
+    const ss = String(date.getSeconds()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+  }
   return normalizeToWesternDigits(date.toLocaleString('ar-EG-u-nu-latn', options));
 }
 

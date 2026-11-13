@@ -41,14 +41,7 @@ function formatPriceClean(p: number): string {
 
 function formatDateTimeAr(ts: number): string {
   try {
-    return formatDateTimeWestern(ts, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    });
+    return formatDateTimeWestern(ts);
   } catch {
     return '';
   }
@@ -190,7 +183,7 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
                   </span>
                 )}
                 <span>•</span>
-                <span className="font-mono">{formatDateTimeAr(notification.timestamp)}</span>
+                <span dir="ltr" className="font-mono inline-block whitespace-nowrap">{formatDateTimeAr(notification.timestamp)}</span>
               </div>
             </div>
           </div>
@@ -242,7 +235,7 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
                 ${formatPriceClean(notification.traderOriginalEntryPrice || notification.entryPrice)}
               </span>
               {notification.traderOriginalEntryTime && (
-                <span className="font-mono text-[10px] text-[#8A99AD] block mt-0.5">
+                <span dir="ltr" className="font-mono text-[10px] text-[#8A99AD] block mt-0.5 whitespace-nowrap">
                   {formatDateTimeAr(notification.traderOriginalEntryTime)}
                 </span>
               )}
@@ -252,7 +245,7 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
               <span className="font-mono font-extrabold text-[#FBBF24] text-xs block mt-0.5">
                 ${formatPriceClean(notification.price)}
               </span>
-              <span className="font-mono text-[10px] text-[#8A99AD] block mt-0.5">
+              <span dir="ltr" className="font-mono text-[10px] text-[#8A99AD] block mt-0.5 whitespace-nowrap">
                 {formatDateTimeAr(notification.timestamp)}
               </span>
             </div>
@@ -297,11 +290,19 @@ export const MobilePushToastBanner: React.FC<MobilePushToastBannerProps> = ({
               <span className="font-mono font-bold text-white text-xs block mt-0.5">
                 {notification.actionType === 'OPEN_TRADE' ? (
                   <>
-                    <span>دخولي: ${formatPriceClean(notification.entryPrice)} ({formatDateTimeAr(notification.userEntryTime || notification.timestamp)})</span>
+                    <span className="block">دخولي: ${formatPriceClean(notification.entryPrice)}</span>
+                    <span dir="ltr" className="block text-[10px] text-[#8A99AD] whitespace-nowrap">
+                      {formatDateTimeAr(notification.userEntryTime || notification.timestamp)}
+                    </span>
                     {notification.traderOriginalEntryPrice && (
-                      <span className="block text-[10px] text-[#01BC8D] mt-0.5">
-                        المتداول: ${formatPriceClean(notification.traderOriginalEntryPrice)} ({formatDateTimeAr(notification.traderOriginalEntryTime || notification.timestamp)})
-                      </span>
+                      <>
+                        <span className="block text-[10px] text-[#01BC8D] mt-1">
+                          المتداول: ${formatPriceClean(notification.traderOriginalEntryPrice)}
+                        </span>
+                        <span dir="ltr" className="block text-[10px] text-[#8A99AD] whitespace-nowrap">
+                          {formatDateTimeAr(notification.traderOriginalEntryTime || notification.timestamp)}
+                        </span>
+                      </>
                     )}
                   </>
                 ) : notification.actionType === 'SCALE_IN'
@@ -787,7 +788,7 @@ export const MobileNotificationsCenterModal: React.FC<MobileNotificationsCenterM
                                   </span>
                                 )}
                                 <span>•</span>
-                                <span className="font-mono">{formatDateTimeAr(item.timestamp)}</span>
+                                <span dir="ltr" className="font-mono inline-block whitespace-nowrap">{formatDateTimeAr(item.timestamp)}</span>
                               </div>
                             </div>
                           </div>

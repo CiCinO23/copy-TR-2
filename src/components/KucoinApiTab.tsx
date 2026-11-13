@@ -937,14 +937,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
                 {filteredOrders.map((ord) => {
                   const isBuy = (ord.side || '').toLowerCase() === 'buy';
                   const badge = getReadableSymbolBadge(ord.symbol);
-                  const timeFormatted = formatDateTimeWestern(ord.createdAt, {
-                    month: 'short',
-                    day: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit',
-                    hour12: false,
-                  });
+                  const timeFormatted = formatDateTimeWestern(ord.createdAt);
 
                   return (
                     <tr
@@ -1038,7 +1031,7 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
                       </td>
 
                       <td className="py-3 px-3 whitespace-nowrap font-mono text-[11px]">
-                        <div className="text-white">{timeFormatted}</div>
+                        <div dir="ltr" className="text-white inline-block whitespace-nowrap">{timeFormatted}</div>
                         <div className="text-[10px] text-[#8A99AD]">#{ord.orderId}</div>
                       </td>
                     </tr>

@@ -5,6 +5,7 @@ import type {
   TradeExecutionSettings,
   TraderOpenPosition,
   TraderLatestRecord,
+  TraderPositionHistoryItem,
   CopiedSyncLog,
   PendingReconnectTradeChoice,
   ActiveCopiedTrader,
@@ -25,6 +26,8 @@ import {
   calculatePositionQuantityDropPartialExitPct,
   buildTraderActionId,
   isTraderActionAlreadyProcessed,
+  isTraderTradePermanentlyClosed,
+  hasTraderEntryAlreadyBeenSynced,
 } from './tradeExecutionRules';
 
 const PAPER_STORAGE_KEY = 'whale_copy_paper_state_v3';
@@ -1548,6 +1551,7 @@ export class PaperEngine {
     source: 'COPY_TRADING' | 'SMART_MONEY';
     positions: TraderOpenPosition[];
     latestRecords: TraderLatestRecord[];
+    positionHistory?: TraderPositionHistoryItem[];
     marginPerTradeUsdt?: number;
     accountId?: string;
     currentPrices?: Record<string, number>;
@@ -2210,8 +2214,42 @@ export class PaperEngine {
     });
     this.savePendingChoices();
 
-    // 2. Copy Open Positions from `Positions` tab
+    // 2. Copy ONLY genuinely active open positions from `Positions` tab (never permanently closed or already-synced trades)
     for (const pos of params.positions) {
+      if (
+        isTraderTradePermanentlyClosed({
+          symbol: pos.symbol,
+          side: pos.side,
+          entryTime: pos.entryTime,
+          latestRecords: params.latestRecords,
+          positionHistory: params.positionHistory,
+        })
+      ) {
+        const staleChoiceId = `choice_${acc.id}_${params.traderId}_${pos.symbol.toUpperCase()}_${pos.side}`;
+        if (this.pendingReconnectChoices.some((c) => c.id === staleChoiceId)) {
+          this.pendingReconnectChoices = this.pendingReconnectChoices.filter(
+            (c) => c.id !== staleChoiceId
+          );
+          this.savePendingChoices();
+        }
+        continue;
+      }
+
+      if (
+        hasTraderEntryAlreadyBeenSynced({
+          traderId: params.traderId,
+          traderName: params.traderName,
+          symbol: pos.symbol,
+          side: pos.side,
+          rawPositionId: pos.id,
+          entryTime: pos.entryTime,
+          accountPositions: acc.positions,
+          checkpoint,
+        })
+      ) {
+        continue;
+      }
+
       if (this.getOpenPositionsCount(acc.id) >= acc.settings.maxConcurrentTrades) {
         logs.push({
           id: `log_limit_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -2232,256 +2270,141 @@ export class PaperEngine {
         break;
       }
 
-      const alreadyOpen = acc.positions.find(
-        (p) =>
-          p.status === 'OPEN' &&
-          p.symbol.toUpperCase() === pos.symbol.toUpperCase() &&
-          p.side === pos.side &&
-          (p.sourceTraderId === params.traderId || p.sourceTraderName === params.traderName)
+      // Resolve the LIVE current market price (السعر الحالي للسوق وليس رقماً ثابتاً)
+      const liveMarketPrice = resolveLiveMarketExecutionPrice(
+        pos.symbol,
+        liveMap,
+        pos.markPrice,
+        pos.entryPrice
       );
+      const traderEntryPrice = pos.entryPrice > 0 ? pos.entryPrice : liveMarketPrice;
 
-      if (!alreadyOpen) {
-        // Resolve the LIVE current market price (السعر الحالي للسوق وليس رقماً ثابتاً)
-        const liveMarketPrice = resolveLiveMarketExecutionPrice(
-          pos.symbol,
-          liveMap,
-          pos.markPrice,
-          pos.entryPrice
-        );
-        const traderEntryPrice = pos.entryPrice > 0 ? pos.entryPrice : liveMarketPrice;
+      // Check if this is a previous trade where we should compare current price vs trader entry price
+      const evalResult = evaluatePreviousTradePriceAdvantage({
+        side: pos.side,
+        traderEntryPrice,
+        currentMarketPrice: liveMarketPrice,
+        promptOnUnfavorableLateEntry: shouldCheckAdvantage,
+      });
 
-        // Check if this is a previous trade where we should compare current price vs trader entry price
-        const evalResult = evaluatePreviousTradePriceAdvantage({
-          side: pos.side,
-          traderEntryPrice,
-          currentMarketPrice: liveMarketPrice,
-          promptOnUnfavorableLateEntry: shouldCheckAdvantage,
-        });
+      const choiceId = `choice_${acc.id}_${params.traderId}_${pos.symbol.toUpperCase()}_${pos.side}`;
 
-        const choiceId = `choice_${acc.id}_${params.traderId}_${pos.symbol.toUpperCase()}_${pos.side}`;
-
-        if (shouldCheckAdvantage && evalResult.decision === 'PROMPT_USER_CHOICE') {
-          if (!this.dismissedReconnectChoiceIds.has(choiceId)) {
-            const existingChoice = this.pendingReconnectChoices.find((c) => c.id === choiceId);
-            const choiceObj: PendingReconnectTradeChoice = {
-              id: choiceId,
-              createdAt: existingChoice?.createdAt || Date.now(),
-              traderId: params.traderId,
-              traderName: params.traderName,
-              source: params.source,
-              accountId: acc.id,
-              accountName: acc.name,
-              symbol: pos.symbol.toUpperCase(),
-              side: pos.side,
-              traderEntryPrice,
-              currentMarketPrice: liveMarketPrice,
-              priceDiffPercent: evalResult.priceDiffPercent,
-              leverage: userLeverage,
-              marginUsdt: userMarginUsdt,
-              traderEntryTime: pos.entryTime,
-              traderScaleAdjustments: pos.scaleAdjustments,
-              currentScalePercent: pos.currentScalePercent,
-            };
-
-            if (!existingChoice) {
-              this.pendingReconnectChoices.unshift(choiceObj);
-              this.savePendingChoices();
-              mobileNotifications.notifyReconnectTradeChoice({
-                ...choiceObj,
-                choiceId: choiceObj.id,
-                sourceType: choiceObj.source,
-              });
-            } else {
-              Object.assign(existingChoice, choiceObj);
-              this.savePendingChoices();
-            }
-          }
-          continue;
-        }
-
-        // Price is in the user's favor OR user disabled late-entry confirmation -> Execute immediately at the CURRENT LIVE MARKET PRICE!
-        this.pendingReconnectChoices = this.pendingReconnectChoices.filter((c) => c.id !== choiceId);
-        this.savePendingChoices();
-
-        try {
-          const opened = this.openPositionWithUserSettings({
-            symbol: pos.symbol,
-            side: pos.side,
-            entryPrice: liveMarketPrice,
-            traderEntryPrice,
-            traderLeverage: pos.leverage,
-            customMarginUsdt: userMarginUsdt,
-            customLeverage: userLeverage,
-            sourceTraderId: params.traderId,
-            sourceTraderName: params.traderName,
-            sourceType: params.source,
-            traderEntryTime: pos.entryTime,
-            traderScaleAdjustments: pos.scaleAdjustments,
-            currentScalePercent: pos.currentScalePercent,
-            accountId: acc.id,
-          });
-          opened.lastSyncedTraderQty = pos.positionAmount;
-          opened.lastSyncedTraderUpdateTime = pos.lastUpdateTime || pos.entryTime;
-          this.saveState();
-
-          const entryActionId = buildTraderActionId({
-            traderId: params.traderId,
-            symbol: pos.symbol,
-            actionType: 'ENTRY',
-            rawId: pos.id,
-            timestamp: pos.entryTime,
-            volumePercent: opened.currentScalePercent || 100,
-            quantity: pos.positionAmount,
-          });
-          this.recordTraderSyncAction(checkpoint, {
-            actionId: entryActionId,
-            candidateKeys: [entryActionId],
-            symbol: pos.symbol,
-            actionType: 'ENTRY',
-            timestamp: pos.entryTime || opened.openTime,
-            explicitVersion: params.syncVersion,
-          });
-
-          const compDetails = formatLateEntryComparisonDetails({
-            traderEntryPrice,
-            traderEntryTime: pos.entryTime,
-            userEntryPrice: opened.entryPrice,
-            userEntryTime: opened.openTime,
-          });
-          logs.push({
-            id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-            timestamp: opened.openTime || Date.now(),
+      if (shouldCheckAdvantage && evalResult.decision === 'PROMPT_USER_CHOICE') {
+        if (!this.dismissedReconnectChoiceIds.has(choiceId)) {
+          const existingChoice = this.pendingReconnectChoices.find((c) => c.id === choiceId);
+          const choiceObj: PendingReconnectTradeChoice = {
+            id: choiceId,
+            createdAt: existingChoice?.createdAt || Date.now(),
             traderId: params.traderId,
             traderName: params.traderName,
             source: params.source,
-            action: 'POSITION_SYNC',
-            volumePercent: opened.currentScalePercent || 100,
-            symbol: opened.symbol,
-            side: opened.side,
-            price: opened.entryPrice,
-            traderEntryPrice,
-            traderEntryTime: pos.entryTime,
-            userEntryTime: opened.openTime,
-            quantity: opened.quantity,
-            leverage: opened.leverage,
             accountId: acc.id,
             accountName: acc.name,
-            messageAr: `[${acc.name}] دخول مباشر بقيمة الصفقة المتبقية (${opened.currentScalePercent || 100}% • ${opened.marginUsdt.toFixed(2)}$) على ${opened.symbol} ${opened.side} — ${compDetails.combinedSummaryAr}`,
-          });
-        } catch (err: any) {
-          console.warn('Could not open synced position:', err);
+            symbol: pos.symbol.toUpperCase(),
+            side: pos.side,
+            traderEntryPrice,
+            currentMarketPrice: liveMarketPrice,
+            priceDiffPercent: evalResult.priceDiffPercent,
+            leverage: userLeverage,
+            marginUsdt: userMarginUsdt,
+            traderEntryTime: pos.entryTime,
+            traderScaleAdjustments: pos.scaleAdjustments,
+            currentScalePercent: pos.currentScalePercent,
+          };
+
+          if (!existingChoice) {
+            this.pendingReconnectChoices.unshift(choiceObj);
+            this.savePendingChoices();
+            mobileNotifications.notifyReconnectTradeChoice({
+              ...choiceObj,
+              choiceId: choiceObj.id,
+              sourceType: choiceObj.source,
+            });
+          } else {
+            Object.assign(existingChoice, choiceObj);
+            this.savePendingChoices();
+          }
         }
+        continue;
       }
-    }
 
-    // 3. Only if trader had no open `Positions` AND it's a favorable (or auto-enter) execution, check `Latest records` ENTRY signals
-    if (params.positions.length === 0) {
-      for (const rec of recentRecords) {
-        if (rec.actionType === 'ENTRY' || rec.actionType === 'SCALE_IN') {
-          if (this.getOpenPositionsCount(acc.id) >= acc.settings.maxConcurrentTrades) {
-            break;
-          }
-          const targetSide: 'LONG' | 'SHORT' =
-            rec.positionSide === 'SHORT' || (rec.positionSide === 'BOTH' && rec.side === 'SELL')
-              ? 'SHORT'
-              : 'LONG';
+      // Price is in the user's favor OR user disabled late-entry confirmation -> Execute immediately at the CURRENT LIVE MARKET PRICE!
+      this.pendingReconnectChoices = this.pendingReconnectChoices.filter((c) => c.id !== choiceId);
+      this.savePendingChoices();
 
-          const existingOpen = acc.positions.find(
-            (p) =>
-              p.status === 'OPEN' &&
-              p.symbol.toUpperCase() === rec.symbol.toUpperCase() &&
-              (p.sourceTraderId === params.traderId || p.sourceTraderName === params.traderName)
-          );
-          if (!existingOpen && rec.avgPrice > 0) {
-            const entryActionId = buildTraderActionId({
-              traderId: params.traderId,
-              symbol: rec.symbol,
-              actionType: 'ENTRY',
-              rawId: rec.id,
-              timestamp: rec.orderTime,
-              volumePercent: rec.volumePercent || 100,
-              quantity: rec.executedQty,
-            });
-            if (
-              isTraderActionAlreadyProcessed({
-                checkpoint,
-                candidateActionIds: [entryActionId, `rec_id:${rec.id}`],
-              })
-            ) {
-              continue;
-            }
+      try {
+        const opened = this.openPositionWithUserSettings({
+          symbol: pos.symbol,
+          side: pos.side,
+          entryPrice: liveMarketPrice,
+          traderEntryPrice,
+          traderLeverage: pos.leverage,
+          customMarginUsdt: userMarginUsdt,
+          customLeverage: userLeverage,
+          sourceTraderId: params.traderId,
+          sourceTraderName: params.traderName,
+          sourceType: params.source,
+          traderEntryTime: pos.entryTime,
+          traderScaleAdjustments: pos.scaleAdjustments,
+          currentScalePercent: pos.currentScalePercent,
+          accountId: acc.id,
+        });
+        opened.lastSyncedTraderQty = pos.positionAmount;
+        opened.lastSyncedTraderUpdateTime = pos.lastUpdateTime || pos.entryTime;
+        this.saveState();
 
-            const liveMarketPrice = resolveLiveMarketExecutionPrice(
-              rec.symbol,
-              liveMap,
-              rec.avgPrice,
-              rec.avgPrice
-            );
-            const traderEntryPrice = rec.avgPrice;
-            const evalResult = evaluatePreviousTradePriceAdvantage({
-              side: targetSide,
-              traderEntryPrice,
-              currentMarketPrice: liveMarketPrice,
-              promptOnUnfavorableLateEntry: shouldCheckAdvantage,
-            });
+        const entryActionId = buildTraderActionId({
+          traderId: params.traderId,
+          symbol: pos.symbol,
+          actionType: 'ENTRY',
+          rawId: pos.id,
+          timestamp: pos.entryTime,
+          volumePercent: opened.currentScalePercent || 100,
+          quantity: pos.positionAmount,
+        });
+        const entryTimeActionId = buildTraderActionId({
+          traderId: params.traderId,
+          symbol: pos.symbol,
+          actionType: 'ENTRY',
+          timestamp: pos.entryTime,
+        });
+        this.recordTraderSyncAction(checkpoint, {
+          actionId: entryActionId,
+          candidateKeys: [entryActionId, entryTimeActionId],
+          symbol: pos.symbol,
+          actionType: 'ENTRY',
+          timestamp: pos.entryTime || opened.openTime,
+          explicitVersion: params.syncVersion,
+        });
 
-            if (shouldCheckAdvantage && evalResult.decision === 'PROMPT_USER_CHOICE') {
-              continue;
-            }
-
-            try {
-              const opened = this.openPositionWithUserSettings({
-                symbol: rec.symbol,
-                side: targetSide,
-                entryPrice: liveMarketPrice,
-                traderEntryPrice,
-                customMarginUsdt: userMarginUsdt,
-                customLeverage: userLeverage,
-                sourceTraderId: params.traderId,
-                sourceTraderName: params.traderName,
-                sourceType: params.source,
-                traderEntryTime: rec.entryTime || rec.orderTime,
-                accountId: acc.id,
-              });
-              this.recordTraderSyncAction(checkpoint, {
-                actionId: entryActionId,
-                candidateKeys: [entryActionId, `rec_id:${rec.id}`],
-                symbol: rec.symbol,
-                actionType: 'ENTRY',
-                timestamp: rec.orderTime || opened.openTime,
-                explicitVersion: params.syncVersion,
-              });
-              const compDetails = formatLateEntryComparisonDetails({
-                traderEntryPrice,
-                traderEntryTime: rec.entryTime || rec.orderTime,
-                userEntryPrice: opened.entryPrice,
-                userEntryTime: opened.openTime,
-              });
-              logs.push({
-                id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-                timestamp: opened.openTime || Date.now(),
-                traderId: params.traderId,
-                traderName: params.traderName,
-                source: params.source,
-                action: 'ENTRY',
-                volumePercent: rec.volumePercent || 100,
-                symbol: opened.symbol,
-                side: opened.side,
-                price: opened.entryPrice,
-                traderEntryPrice,
-                traderEntryTime: rec.entryTime || rec.orderTime,
-                userEntryTime: opened.openTime,
-                quantity: opened.quantity,
-                leverage: opened.leverage,
-                accountId: acc.id,
-                accountName: acc.name,
-                messageAr: `[${acc.name}] دخول بالسعر الحالي (${opened.symbol} ${opened.side}) بحجمك المحدد (${userMarginUsdt}$ × ${opened.leverage}x) — ${compDetails.combinedSummaryAr}`,
-              });
-            } catch (e) {
-              console.warn('Entry sync skipped:', e);
-            }
-          }
-        }
+        const compDetails = formatLateEntryComparisonDetails({
+          traderEntryPrice,
+          traderEntryTime: pos.entryTime,
+          userEntryPrice: opened.entryPrice,
+          userEntryTime: opened.openTime,
+        });
+        logs.push({
+          id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          timestamp: opened.openTime || Date.now(),
+          traderId: params.traderId,
+          traderName: params.traderName,
+          source: params.source,
+          action: 'POSITION_SYNC',
+          volumePercent: opened.currentScalePercent || 100,
+          symbol: opened.symbol,
+          side: opened.side,
+          price: opened.entryPrice,
+          traderEntryPrice,
+          traderEntryTime: pos.entryTime,
+          userEntryTime: opened.openTime,
+          quantity: opened.quantity,
+          leverage: opened.leverage,
+          accountId: acc.id,
+          accountName: acc.name,
+          messageAr: `[${acc.name}] دخول مباشر بقيمة الصفقة المتبقية (${opened.currentScalePercent || 100}% • ${opened.marginUsdt.toFixed(2)}$) على ${opened.symbol} ${opened.side} — ${compDetails.combinedSummaryAr}`,
+        });
+      } catch (err: any) {
+        console.warn('Could not open synced position:', err);
       }
     }
 

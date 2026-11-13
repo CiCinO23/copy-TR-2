@@ -22,6 +22,7 @@ import {
   TradeExecutionSettings,
   TraderOpenPosition,
   TraderLatestRecord,
+  TraderPositionHistoryItem,
   CopiedSyncLog,
   ActiveCopiedTrader,
   MobileTradeNotification,
@@ -409,6 +410,7 @@ export const App: React.FC = () => {
       source: 'COPY_TRADING' | 'SMART_MONEY';
       positions: TraderOpenPosition[];
       latestRecords: TraderLatestRecord[];
+      positionHistory?: TraderPositionHistoryItem[];
       marginPerTradeUsdt: number;
       accountId?: string;
       overridePrices?: Record<string, number>;
@@ -431,6 +433,7 @@ export const App: React.FC = () => {
         source: params.source,
         positions: params.positions,
         latestRecords: params.latestRecords,
+        positionHistory: params.positionHistory,
         marginPerTradeUsdt: userTradeValue,
         accountId: targetAcc.id,
         currentPrices: livePrices,
@@ -624,6 +627,7 @@ export const App: React.FC = () => {
             source: ct.source,
             positions: data.positions,
             latestRecords: data.latestRecords,
+            positionHistory: data.positionHistory,
             marginPerTradeUsdt: targetAcc.settings.tradeValueUsdt,
             accountId: targetAcc.id,
             overridePrices: mergedPrices,

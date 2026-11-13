@@ -14,11 +14,17 @@ import {
   calculatePositionQuantityDropPartialExitPct,
   buildTraderActionId,
   isTraderActionAlreadyProcessed,
+  formatTradeTimestampAr,
+  isTraderTradePermanentlyClosed,
+  hasTraderEntryAlreadyBeenSynced,
 } from '../tradeExecutionRules';
 import type {
   ActiveCopiedTrader,
+  PaperPosition,
   PendingReconnectTradeChoice,
   PositionScaleAdjustment,
+  TraderLatestRecord,
+  TraderPositionHistoryItem,
 } from '../../types';
 
 test('evaluatePreviousTradePriceAdvantage: SHORT with currentPrice > entryPrice executes immediately', () => {
@@ -422,5 +428,182 @@ test('buildTraderActionId and isTraderActionAlreadyProcessed validate version, l
     true
   );
 });
+
+test('formatTradeTimestampAr renders full date (YYYY-MM-DD) in front of time (HH:mm:ss) with Western digits', () => {
+  const ts = Date.UTC(2026, 4, 14, 9, 5, 30);
+  const formatted = formatTradeTimestampAr(ts);
+  assert.match(formatted, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  assert.equal(/[\u0660-\u0669\u06F0-\u06F9]/.test(formatted), false);
+});
+
+test('isTraderTradePermanentlyClosed detects exited trades and permits genuinely newer re-entries', () => {
+  const tEntryOld = 1700000000000;
+  const tExitOld = 1700003600000;
+  const tEntryNew = 1700007200000;
+
+  const closedRecords: TraderLatestRecord[] = [
+    {
+      id: 'rec_exit_1',
+      symbol: 'BTCUSDT',
+      baseAsset: 'BTC',
+      quoteAsset: 'USDT',
+      side: 'SELL',
+      type: 'MARKET',
+      positionSide: 'LONG',
+      actionType: 'EXIT',
+      actionLabelAr: 'خروج كامل',
+      volumePercent: -100,
+      remainingPercentAfter: 0,
+      executedQty: 1,
+      avgPrice: 92000,
+      totalPnl: 2000,
+      orderTime: tExitOld,
+      entryTime: tEntryOld,
+      exitTime: tExitOld,
+    },
+    {
+      id: 'rec_entry_1',
+      symbol: 'BTCUSDT',
+      baseAsset: 'BTC',
+      quoteAsset: 'USDT',
+      side: 'BUY',
+      type: 'MARKET',
+      positionSide: 'LONG',
+      actionType: 'ENTRY',
+      actionLabelAr: 'دخول',
+      volumePercent: 100,
+      remainingPercentAfter: 100,
+      executedQty: 1,
+      avgPrice: 90000,
+      totalPnl: 0,
+      orderTime: tEntryOld,
+      entryTime: tEntryOld,
+    },
+  ];
+
+  const history: TraderPositionHistoryItem[] = [
+    {
+      id: 'hist_1',
+      symbol: 'ETHUSDT',
+      side: 'SHORT',
+      opened: tEntryOld,
+      closed: tExitOld,
+      avgCost: 3000,
+      avgClosePrice: 2900,
+      closingPnl: 100,
+      maxOpenInterest: 1,
+      closedVolume: 1,
+      isolated: false,
+      scaleAdjustments: [],
+    },
+  ];
+
+  assert.equal(
+    isTraderTradePermanentlyClosed({
+      symbol: 'BTCUSDT',
+      side: 'LONG',
+      entryTime: tEntryOld,
+      latestRecords: closedRecords,
+      positionHistory: history,
+    }),
+    true
+  );
+
+  assert.equal(
+    isTraderTradePermanentlyClosed({
+      symbol: 'ETHUSDT',
+      side: 'SHORT',
+      entryTime: tEntryOld,
+      latestRecords: closedRecords,
+      positionHistory: history,
+    }),
+    true
+  );
+
+  // Newer ENTRY after the prior EXIT must NOT be marked closed
+  const recordsWithNewEntry: TraderLatestRecord[] = [
+    {
+      id: 'rec_entry_new',
+      symbol: 'BTCUSDT',
+      baseAsset: 'BTC',
+      quoteAsset: 'USDT',
+      side: 'BUY',
+      type: 'MARKET',
+      positionSide: 'LONG',
+      actionType: 'ENTRY',
+      actionLabelAr: 'دخول جديد',
+      volumePercent: 100,
+      remainingPercentAfter: 100,
+      executedQty: 1,
+      avgPrice: 93000,
+      totalPnl: 0,
+      orderTime: tEntryNew,
+      entryTime: tEntryNew,
+    },
+    ...closedRecords,
+  ];
+
+  assert.equal(
+    isTraderTradePermanentlyClosed({
+      symbol: 'BTCUSDT',
+      side: 'LONG',
+      entryTime: tEntryNew,
+      latestRecords: recordsWithNewEntry,
+      positionHistory: history,
+    }),
+    false
+  );
+});
+
+test('hasTraderEntryAlreadyBeenSynced blocks re-opening closed historical entries while allowing genuinely new entries', () => {
+  const tOldEntry = 1700000000000;
+  const tClosed = 1700001800000;
+  const tBrandNewEntry = 1700009000000;
+
+  const closedPos: PaperPosition = {
+    id: 'paper_closed_1',
+    accountId: 'acc_default',
+    symbol: 'SOLUSDT',
+    side: 'LONG',
+    entryPrice: 180,
+    exitPrice: 185,
+    quantity: 2,
+    marginUsdt: 25,
+    leverage: 5,
+    openTime: tOldEntry + 60_000,
+    closeTime: tClosed,
+    traderEntryTime: tOldEntry,
+    status: 'CLOSED',
+    sourceTraderId: 'trader_x',
+    sourceTraderName: 'TraderX',
+    sourceType: 'COPY_TRADING',
+    commissionUsdt: 0,
+  };
+
+  assert.equal(
+    hasTraderEntryAlreadyBeenSynced({
+      traderId: 'trader_x',
+      traderName: 'TraderX',
+      symbol: 'SOLUSDT',
+      side: 'LONG',
+      entryTime: tOldEntry,
+      accountPositions: [closedPos],
+    }),
+    true
+  );
+
+  assert.equal(
+    hasTraderEntryAlreadyBeenSynced({
+      traderId: 'trader_x',
+      traderName: 'TraderX',
+      symbol: 'SOLUSDT',
+      side: 'LONG',
+      entryTime: tBrandNewEntry,
+      accountPositions: [closedPos],
+    }),
+    false
+  );
+});
+
 
 
