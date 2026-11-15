@@ -60,6 +60,7 @@ import {
   saveKuCoinSecurityConfig,
   shouldRequireUnlock,
 } from './services/kucoinSecurityLock';
+import { APP_MAJOR_VERSION, APP_VERSION, APP_PROMPT_REVISION } from './constants/appVersion';
 
 function loadAllCopiedTradersFromStorage(): ActiveCopiedTrader[] {
   const result: ActiveCopiedTrader[] = [];
@@ -578,6 +579,7 @@ export const App: React.FC = () => {
 
   // Sync ALL currently copied traders across both Copy Trading & Whales in parallel at real-time speed
   const isSyncInFlightRef = useRef<boolean>(false);
+  const syncStartedAtRef = useRef<number>(0);
   const pendingResyncRef = useRef<boolean>(false);
   const handleSyncTraderToEngineRef = useRef(handleSyncTraderToEngine);
   handleSyncTraderToEngineRef.current = handleSyncTraderToEngine;
@@ -585,63 +587,86 @@ export const App: React.FC = () => {
   const handleSyncAllCopiedTraders = useCallback(async () => {
     if (mobileNotifications.isAppStoppedByFullExit()) return;
     const list = loadAllCopiedTradersFromStorage();
+
+    // Keep Service Worker updated with active copied traders so it can poll on lock-screen if OS suspends main thread
+    const currentSnap = paperEngine.getSnapshot(pricesMapRef.current);
+    const knownOpenKeys = currentSnap.positions
+      .filter((p) => p.status === 'OPEN' && p.sourceTraderId)
+      .map((p) => `${p.sourceTraderId}_${p.symbol.toUpperCase()}_${p.side}`);
+    mobileNotifications.syncCopiedTradersStateToServiceWorker(list, knownOpenKeys);
+
     if (list.length === 0) return;
 
-    if (isSyncInFlightRef.current) {
+    const now = Date.now();
+    // Anti-deadlock guard: if an earlier sync was stalled > 8.5s while the screen was locked or app minimized, force-release it
+    if (isSyncInFlightRef.current && now - syncStartedAtRef.current < 8500) {
       pendingResyncRef.current = true;
       return;
     }
 
     isSyncInFlightRef.current = true;
+    syncStartedAtRef.current = now;
     setIsSyncingAll(true);
 
+    let hardTimeoutId: ReturnType<typeof setTimeout> | null = null;
     try {
-      // Fetch fresh live market prices concurrently alongside all copied traders (no sequential blocking!)
-      const freshPricesPromise = fetchAllFuturesPrices(binanceConfigRef.current).catch(
-        () => pricesMapRef.current
-      );
+      const syncTaskPromise = (async () => {
+        // Fetch fresh live market prices concurrently alongside all copied traders (no sequential blocking!)
+        const freshPricesPromise = fetchAllFuturesPrices(binanceConfigRef.current).catch(
+          () => pricesMapRef.current
+        );
 
-      const traderDataPromises = list.map(async (ct) => {
-        const targetAcc = paperEngine.getAccount(ct.accountId);
-        if (ct.source === 'COPY_TRADING') {
-          const data = await fetchCopyTraderFullData(ct.traderId, null, tickersRef.current);
-          return { ct, targetAcc, data };
-        } else {
-          const data = await fetchSmartMoneyWhaleDetail(ct.traderId, null, tickersRef.current);
-          return { ct, targetAcc, data };
+        const traderDataPromises = list.map(async (ct) => {
+          const targetAcc = paperEngine.getAccount(ct.accountId);
+          if (ct.source === 'COPY_TRADING') {
+            const data = await fetchCopyTraderFullData(ct.traderId, null, tickersRef.current);
+            return { ct, targetAcc, data };
+          } else {
+            const data = await fetchSmartMoneyWhaleDetail(ct.traderId, null, tickersRef.current);
+            return { ct, targetAcc, data };
+          }
+        });
+
+        const [freshPrices, results] = await Promise.all([
+          freshPricesPromise,
+          Promise.allSettled(traderDataPromises),
+        ]);
+
+        const mergedPrices = { ...pricesMapRef.current, ...(freshPrices || {}) };
+        pricesMapRef.current = mergedPrices;
+
+        for (const res of results) {
+          if (res.status === 'fulfilled') {
+            const { ct, targetAcc, data } = res.value;
+            handleSyncTraderToEngineRef.current({
+              traderId: ct.traderId,
+              traderName: ct.nickname,
+              source: ct.source,
+              positions: data.positions,
+              latestRecords: data.latestRecords,
+              positionHistory: data.positionHistory,
+              marginPerTradeUsdt: targetAcc.settings.tradeValueUsdt,
+              accountId: targetAcc.id,
+              overridePrices: mergedPrices,
+              isPartialOrRateLimited: Boolean((data as any).isPartialOrRateLimited),
+            });
+          } else {
+            console.warn('Failed syncing trader:', res.reason);
+          }
         }
+
+        const updatedSnapshot = paperEngine.getSnapshot(mergedPrices);
+        setPaperSnapshot(updatedSnapshot);
+        mobileNotifications.checkAccountsDrawdown(updatedSnapshot.accounts);
+      })();
+
+      const timeoutGuardPromise = new Promise<void>((resolve) => {
+        hardTimeoutId = setTimeout(resolve, 8200);
       });
 
-      const [freshPrices, results] = await Promise.all([
-        freshPricesPromise,
-        Promise.allSettled(traderDataPromises),
-      ]);
-
-      const mergedPrices = { ...pricesMapRef.current, ...(freshPrices || {}) };
-      pricesMapRef.current = mergedPrices;
-
-      for (const res of results) {
-        if (res.status === 'fulfilled') {
-          const { ct, targetAcc, data } = res.value;
-          handleSyncTraderToEngineRef.current({
-            traderId: ct.traderId,
-            traderName: ct.nickname,
-            source: ct.source,
-            positions: data.positions,
-            latestRecords: data.latestRecords,
-            positionHistory: data.positionHistory,
-            marginPerTradeUsdt: targetAcc.settings.tradeValueUsdt,
-            accountId: targetAcc.id,
-            overridePrices: mergedPrices,
-            isPartialOrRateLimited: Boolean((data as any).isPartialOrRateLimited),
-          });
-        } else {
-          console.warn('Failed syncing trader:', res.reason);
-        }
-      }
-
-      setPaperSnapshot(paperEngine.getSnapshot(mergedPrices));
+      await Promise.race([syncTaskPromise, timeoutGuardPromise]);
     } finally {
+      if (hardTimeoutId) clearTimeout(hardTimeoutId);
       isSyncInFlightRef.current = false;
       setIsSyncingAll(false);
       if (pendingResyncRef.current) {
@@ -665,12 +690,21 @@ export const App: React.FC = () => {
   }, [connectionState.tickers.length, handleSyncAllCopiedTraders]);
 
   // Real-time continuous background synchronization:
-  // Uses an unthrottled Blob Web Worker ticker (every 2.5s) + Service Worker heartbeat + immediate foreground/network events
+  // Uses an unthrottled Blob Web Worker ticker (every 4.5s) + Service Worker heartbeat + Android Native Service heartbeat + immediate wakeup events
   useEffect(() => {
     const syncWorker = startRealtimeSyncTicker(() => {
       if (mobileNotifications.isAppStoppedByFullExit()) return;
       handleSyncAllCopiedTraders();
-    }, 8000);
+    }, 4500);
+
+    // Expose native heartbeat callback for Android APK WhaleBackgroundService when screen is locked or app is minimized
+    if (typeof window !== 'undefined') {
+      window.__copyTrNativeHeartbeat = () => {
+        if (!mobileNotifications.isAppStoppedByFullExit()) {
+          handleSyncAllCopiedTraders();
+        }
+      };
+    }
 
     // Refresh full 24h market metadata every 15s independently without ever blocking copied-trader sync
     const marketInfoInterval = setInterval(() => {
@@ -684,6 +718,7 @@ export const App: React.FC = () => {
 
     const handleImmediateSyncWakeup = () => {
       if (mobileNotifications.isAppStoppedByFullExit()) return;
+      isSyncInFlightRef.current = false;
       handleSyncAllCopiedTraders();
       if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
         testConnectionAndFetchData(binanceConfigRef.current)
@@ -697,7 +732,8 @@ export const App: React.FC = () => {
     const handleServiceWorkerMessage = (event: MessageEvent) => {
       const data = event.data;
       if (!data || typeof data !== 'object') return;
-      if (data.type === 'SW_BACKGROUND_HEARTBEAT') {
+      if (data.type === 'SW_BACKGROUND_HEARTBEAT' || data.type === 'SW_DETECTED_TRADE_UPDATE') {
+        mobileNotifications.acknowledgeServiceWorkerHeartbeat();
         if (!mobileNotifications.isAppStoppedByFullExit()) {
           handleSyncAllCopiedTraders();
         }
@@ -1313,6 +1349,30 @@ export const App: React.FC = () => {
             onOpenNotifications={handleOpenNotificationsCenter}
           />
         )}
+        {/* Global App Version Bar visible at the bottom of every screen */}
+        <div
+          data-testid="app_global_version_footer"
+          className="mt-6 pt-3 border-t border-[#1E2733]/70 flex items-center justify-between gap-2 text-[11px] text-[#8A99AD]"
+        >
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-[#F0F4F8] font-mono">Copy TR</span>
+            <span>•</span>
+            <span>منصة التداول والنسخ</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span>الإصدار الحالي:</span>
+            <span
+              dir="ltr"
+              data-testid="app-version-badge-footer"
+              className="px-2 py-0.5 rounded-md bg-[#12171D] border border-[#01BC8D]/40 text-[#01BC8D] font-mono font-bold tabular-nums"
+            >
+              v{APP_VERSION}
+            </span>
+            <span className="hidden sm:inline text-[10px] text-[#8A99AD]">
+              ({APP_PROMPT_REVISION} تحديثات من {APP_MAJOR_VERSION}.0)
+            </span>
+          </div>
+        </div>
       </main>
 
       {/* Bottom Navigation */}

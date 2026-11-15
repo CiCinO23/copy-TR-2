@@ -479,17 +479,52 @@ interface RawCopyTraderSubCache {
   fetchedAt: number;
 }
 
+async function fetchWithTimeout(
+  url: string,
+  options?: RequestInit,
+  timeoutMs: number = 6500
+): Promise<Response> {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      try {
+        controller?.abort();
+      } catch {
+        // ignore
+      }
+      reject(new Error(`Request timed out after ${timeoutMs}ms: ${url}`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([
+      fetch(url, {
+        ...options,
+        signal: controller ? controller.signal : options?.signal,
+      }),
+      timeoutPromise,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 const rawCopyTraderCache = new Map<string, RawCopyTraderSubCache>();
 const copyTraderInFlight = new Map<
   string,
-  Promise<{
-    detail: CopyTraderDetail;
-    positions: TraderOpenPosition[];
-    latestRecords: TraderLatestRecord[];
-    positionHistory: TraderPositionHistoryItem[];
-    positionsArePublic: boolean;
-    isPartialOrRateLimited?: boolean;
-  }>
+  {
+    startedAt: number;
+    promise: Promise<{
+      detail: CopyTraderDetail;
+      positions: TraderOpenPosition[];
+      latestRecords: TraderLatestRecord[];
+      positionHistory: TraderPositionHistoryItem[];
+      positionsArePublic: boolean;
+      isPartialOrRateLimited?: boolean;
+    }>;
+  }
 >();
 const copyTraderResultCache = new Map<
   string,
@@ -527,8 +562,8 @@ export async function fetchCopyTraderFullData(
   }
 
   const existingInFlight = copyTraderInFlight.get(portfolioId);
-  if (existingInFlight) {
-    return existingInFlight;
+  if (existingInFlight && Date.now() - existingInFlight.startedAt < 7_500) {
+    return existingInFlight.promise;
   }
 
   const promise = (async () => {
@@ -563,7 +598,7 @@ export async function fetchCopyTraderFullData(
       };
 
       const [detailRes, ordRes, posRes, histRes] = await Promise.all([
-        fetch(
+        fetchWithTimeout(
           `/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/detail?portfolioId=${encodeURIComponent(
             portfolioId
           )}`
@@ -571,7 +606,7 @@ export async function fetchCopyTraderFullData(
           console.warn('Error fetching copy trader detail:', e);
           return null;
         }),
-        fetch('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history', {
+        fetchWithTimeout('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -586,7 +621,7 @@ export async function fetchCopyTraderFullData(
           console.warn('Error fetching copy trader latest records:', e);
           return null;
         }),
-        fetch(
+        fetchWithTimeout(
           `/bapi/futures/v1/friendly/future/copy-trade/lead-data/positions?portfolioId=${encodeURIComponent(
             portfolioId
           )}`
@@ -594,7 +629,7 @@ export async function fetchCopyTraderFullData(
           console.warn('Error fetching copy trader open positions:', e);
           return null;
         }),
-        fetch('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-history', {
+        fetchWithTimeout('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-history', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1275,7 +1310,7 @@ export async function fetchCopyTraderFullData(
     }
   })();
 
-  copyTraderInFlight.set(portfolioId, promise);
+  copyTraderInFlight.set(portfolioId, { startedAt: Date.now(), promise });
   return promise;
 }
 
@@ -1424,7 +1459,7 @@ export async function fetchSmartMoneyWhaleDetail(
   };
 
   try {
-    const profRes = await fetch(
+    const profRes = await fetchWithTimeout(
       `/bapi/asset/v1/friendly/future/smart-money/profile?topTraderId=${encodeURIComponent(
         topTraderId
       )}`
@@ -1486,7 +1521,7 @@ export async function fetchSmartMoneyWhaleDetail(
   let positions: TraderOpenPosition[] = [];
   let hasAuthoritativeSmPositions = false;
   try {
-    const smPosRes = await fetch(
+    const smPosRes = await fetchWithTimeout(
       `/bapi/asset/v1/private/future/smart-money/profile/query-positions?topTraderId=${encodeURIComponent(
         topTraderId
       )}`

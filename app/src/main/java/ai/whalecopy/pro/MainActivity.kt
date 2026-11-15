@@ -15,6 +15,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -23,6 +24,8 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.MediaStore
+import android.provider.Settings
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -95,8 +98,25 @@ private const val KEY_LOCKSCREEN_NOTIF = "lockscreen_notif"
 private const val KEY_SHOW_SENSITIVE = "show_sensitive"
 
 private const val BG_CHANNEL_ID = "copytr_bg_service_channel"
-private const val ALERT_CHANNEL_ID = "copytr_lockscreen_alerts_channel"
+private const val ALERT_CHANNEL_ID = "copytr_lockscreen_alerts_v2"
 private const val BG_NOTIF_ID = 91001
+
+object WebViewHolder {
+    @SuppressLint("StaticFieldLeak")
+    @Volatile
+    var activeWebView: KeepAliveWebView? = null
+}
+
+class KeepAliveWebView(context: Context) : WebView(context) {
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        if (AppPreferencesHelper.isKeepAliveEnabled(context)) {
+            // Keep Chromium WebView in VISIBLE state even when screen is locked or user switches to another app
+            super.onWindowVisibilityChanged(View.VISIBLE)
+        } else {
+            super.onWindowVisibilityChanged(visibility)
+        }
+    }
+}
 
 object AppPreferencesHelper {
     fun isKeepAliveEnabled(context: Context): Boolean {
@@ -131,20 +151,46 @@ object AppPreferencesHelper {
 
 class WhaleBackgroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val heartbeatRunnable = object : Runnable {
+        override fun run() {
+            if (!AppPreferencesHelper.isKeepAliveEnabled(applicationContext)) return
+            try {
+                acquireWakeLock()
+                WebViewHolder.activeWebView?.let { wv ->
+                    wv.resumeTimers()
+                    wv.onResume()
+                    wv.evaluateJavascript(
+                        "window.__copyTrNativeHeartbeat && window.__copyTrNativeHeartbeat();",
+                        null
+                    )
+                }
+            } catch (_: Exception) {
+                // ignore
+            }
+            mainHandler.postDelayed(this, 4000L)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         ensureChannels(this)
         LocalWebProxyServer.ensureStarted(applicationContext)
         acquireWakeLock()
+        startHeartbeatLoop()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (!AppPreferencesHelper.isKeepAliveEnabled(this)) {
+            stopHeartbeatLoop()
             releaseWakeLock()
             stopSelf()
             return START_NOT_STICKY
         }
+
+        acquireWakeLock()
+        startHeartbeatLoop()
 
         val notification = buildForegroundNotification()
         try {
@@ -167,28 +213,50 @@ class WhaleBackgroundService : Service() {
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
         if (!AppPreferencesHelper.isKeepAliveEnabled(this)) {
+            stopHeartbeatLoop()
             releaseWakeLock()
             stopSelf()
         }
     }
 
     override fun onDestroy() {
+        stopHeartbeatLoop()
         releaseWakeLock()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun startHeartbeatLoop() {
+        mainHandler.removeCallbacks(heartbeatRunnable)
+        mainHandler.postDelayed(heartbeatRunnable, 3500L)
+    }
+
+    private fun stopHeartbeatLoop() {
+        mainHandler.removeCallbacks(heartbeatRunnable)
+    }
+
+    @Suppress("DEPRECATION")
     private fun acquireWakeLock() {
         try {
-            if (wakeLock == null) {
+            if (wakeLock == null || wakeLock?.isHeld == false) {
                 val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
                 wakeLock = pm.newWakeLock(
                     PowerManager.PARTIAL_WAKE_LOCK,
                     "CopyTR::BackgroundSyncWakeLock"
                 ).apply {
                     setReferenceCounted(false)
-                    acquire(12 * 60 * 60 * 1000L)
+                    acquire(24 * 60 * 60 * 1000L)
+                }
+            }
+            if (wifiLock == null || wifiLock?.isHeld == false) {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                wifiLock = wm?.createWifiLock(
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                    "CopyTR::BackgroundWifiLock"
+                )?.apply {
+                    setReferenceCounted(false)
+                    acquire()
                 }
             }
         } catch (_: Exception) {
@@ -202,6 +270,10 @@ class WhaleBackgroundService : Service() {
                 if (it.isHeld) it.release()
             }
             wakeLock = null
+            wifiLock?.let {
+                if (it.isHeld) it.release()
+            }
+            wifiLock = null
         } catch (_: Exception) {
             // ignore
         }
@@ -220,8 +292,8 @@ class WhaleBackgroundService : Service() {
 
         return NotificationCompat.Builder(this, BG_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
-            .setContentTitle("Copy TR يعمل في الخلفية")
-            .setContentText("مراقبة الصفقات المنسوخة ونسبة التراجع (Drawdown) نشطة")
+            .setContentTitle("Copy TR يعمل في الخلفية (v2.11)")
+            .setContentText("مراقبة الصفقات المنسوخة وإشعارات شاشة القفل نشطة بلا توقف")
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -250,7 +322,9 @@ class WhaleBackgroundService : Service() {
                 ).apply {
                     description = "إشعارات فتح الصفقات، التدعيم، الإغلاق، وتنبيهات التراجع على شاشة القفل"
                     enableVibration(true)
-                    vibrationPattern = longArrayOf(0, 220, 80, 220, 80, 300)
+                    enableLights(true)
+                    setBypassDnd(true)
+                    vibrationPattern = longArrayOf(0, 240, 80, 240, 80, 320)
                     lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                 }
 
@@ -299,6 +373,42 @@ class AndroidAppControl(private val activity: Activity) {
     }
 
     @JavascriptInterface
+    fun isIgnoringBatteryOptimizations(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
+                pm.isIgnoringBatteryOptimizations(activity.packageName)
+            } else {
+                true
+            }
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    @SuppressLint("BatteryLife")
+    @JavascriptInterface
+    fun requestIgnoreBatteryOptimizations() {
+        mainHandler.post {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
+                    if (!pm.isIgnoringBatteryOptimizations(activity.packageName)) {
+                        val intent = Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:${activity.packageName}")
+                        )
+                        activity.startActivity(intent)
+                    }
+                }
+            } catch (_: Exception) {
+                // ignore
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    @JavascriptInterface
     fun showNativeNotification(
         title: String,
         body: String,
@@ -310,6 +420,21 @@ class AndroidAppControl(private val activity: Activity) {
 
         WhaleBackgroundService.ensureChannels(ctx)
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        // Wake up screen briefly if device is locked so the lock-screen banner is immediately visible
+        try {
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!pm.isInteractive) {
+                val screenWake = pm.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                    "CopyTR::LockScreenAlertWakeLock"
+                )
+                screenWake.setReferenceCounted(false)
+                screenWake.acquire(4500L)
+            }
+        } catch (_: Exception) {
+            // ignore
+        }
 
         val openIntent = Intent(ctx, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -332,12 +457,14 @@ class AndroidAppControl(private val activity: Activity) {
             .setContentTitle(title)
             .setContentText(body.lines().firstOrNull() ?: body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setPriority(if (isUrgent) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(if (isUrgent) NotificationCompat.CATEGORY_ALARM else NotificationCompat.CATEGORY_MESSAGE)
             .setVisibility(visibility)
             .setAutoCancel(true)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setVibrate(longArrayOf(0, 240, 80, 240, 80, 320))
             .setContentIntent(pendingIntent)
+            .setFullScreenIntent(pendingIntent, isUrgent)
             .build()
 
         try {
@@ -381,6 +508,28 @@ class MainActivity : ComponentActivity() {
         setContent {
             CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
                 WhaleApp(activity = this)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        WebViewHolder.activeWebView?.let { wv ->
+            wv.resumeTimers()
+            wv.onResume()
+            wv.evaluateJavascript(
+                "window.__copyTrNativeHeartbeat && window.__copyTrNativeHeartbeat();",
+                null
+            )
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (AppPreferencesHelper.isKeepAliveEnabled(applicationContext)) {
+            WebViewHolder.activeWebView?.let { wv ->
+                wv.resumeTimers()
+                wv.onResume()
             }
         }
     }
@@ -775,6 +924,7 @@ fun WhaleApp(activity: Activity) {
     DisposableEffect(Unit) {
         onDispose {
             if (!AppPreferencesHelper.isKeepAliveEnabled(context)) {
+                WebViewHolder.activeWebView = null
                 webViewInstance?.destroy()
             }
         }
@@ -789,88 +939,100 @@ fun WhaleApp(activity: Activity) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                WebView(ctx).apply {
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    setBackgroundColor(0xFF0B0E11.toInt())
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.databaseEnabled = true
-                    settings.allowFileAccess = true
-                    settings.useWideViewPort = true
-                    settings.loadWithOverviewMode = true
-                    settings.setSupportZoom(false)
-                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                    settings.cacheMode = WebSettings.LOAD_DEFAULT
+                val existing = WebViewHolder.activeWebView
+                if (existing != null) {
+                    (existing.parent as? ViewGroup)?.removeView(existing)
+                    existing.resumeTimers()
+                    existing.onResume()
+                    isLoading = false
+                    webViewInstance = existing
+                    existing
+                } else {
+                    KeepAliveWebView(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        setBackgroundColor(0xFF0B0E11.toInt())
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.databaseEnabled = true
+                        settings.allowFileAccess = true
+                        settings.useWideViewPort = true
+                        settings.loadWithOverviewMode = true
+                        settings.setSupportZoom(false)
+                        settings.mediaPlaybackRequiresUserGesture = false
+                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                        settings.cacheMode = WebSettings.LOAD_DEFAULT
 
-                    addJavascriptInterface(AndroidFileDownloader(ctx), "AndroidDownloader")
-                    addJavascriptInterface(AndroidAppControl(activity), "AndroidAppControl")
+                        addJavascriptInterface(AndroidFileDownloader(ctx), "AndroidDownloader")
+                        addJavascriptInterface(AndroidAppControl(activity), "AndroidAppControl")
 
-                    CookieManager.getInstance().setAcceptCookie(true)
-                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                        CookieManager.getInstance().setAcceptCookie(true)
+                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
-                    webChromeClient = object : WebChromeClient() {
-                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                            if (newProgress >= 90) {
-                                isLoading = false
-                            }
-                        }
-                    }
-
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            isLoading = false
-                            hasError = false
-                        }
-
-                        @Deprecated("Deprecated in Java")
-                        override fun onReceivedError(
-                            view: WebView?,
-                            errorCode: Int,
-                            description: String?,
-                            failingUrl: String?
-                        ) {
-                            if (failingUrl == startUrl) {
-                                isLoading = false
-                                hasError = true
-                            }
-                        }
-                    }
-
-                    setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
-                        if (url.startsWith("blob:") || url.startsWith("data:")) {
-                            return@setDownloadListener
-                        }
-                        try {
-                            val request = DownloadManager.Request(Uri.parse(url)).apply {
-                                setMimeType(mimetype)
-                                val cookies = CookieManager.getInstance().getCookie(url)
-                                if (!cookies.isNullOrEmpty()) {
-                                    addRequestHeader("cookie", cookies)
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                if (newProgress >= 90) {
+                                    isLoading = false
                                 }
-                                addRequestHeader("User-Agent", userAgent)
-                                setDescription("جاري تنزيل الملف...")
-                                val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-                                setTitle(fileName)
-                                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-                            }
-                            val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-                            dm.enqueue(request)
-                            Toast.makeText(ctx, "بدأ تنزيل الملف...", Toast.LENGTH_SHORT).show()
-                        } catch (_: Exception) {
-                            try {
-                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                                ctx.startActivity(intent)
-                            } catch (_: Exception) {
                             }
                         }
-                    }
 
-                    loadUrl(startUrl)
-                    webViewInstance = this
+                        webViewClient = object : WebViewClient() {
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                isLoading = false
+                                hasError = false
+                            }
+
+                            @Deprecated("Deprecated in Java")
+                            override fun onReceivedError(
+                                view: WebView?,
+                                errorCode: Int,
+                                description: String?,
+                                failingUrl: String?
+                            ) {
+                                if (failingUrl == startUrl) {
+                                    isLoading = false
+                                    hasError = true
+                                }
+                            }
+                        }
+
+                        setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
+                            if (url.startsWith("blob:") || url.startsWith("data:")) {
+                                return@setDownloadListener
+                            }
+                            try {
+                                val request = DownloadManager.Request(Uri.parse(url)).apply {
+                                    setMimeType(mimetype)
+                                    val cookies = CookieManager.getInstance().getCookie(url)
+                                    if (!cookies.isNullOrEmpty()) {
+                                        addRequestHeader("cookie", cookies)
+                                    }
+                                    addRequestHeader("User-Agent", userAgent)
+                                    setDescription("جاري تنزيل الملف...")
+                                    val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                                    setTitle(fileName)
+                                    setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                    setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                                }
+                                val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                                dm.enqueue(request)
+                                Toast.makeText(ctx, "بدأ تنزيل الملف...", Toast.LENGTH_SHORT).show()
+                            } catch (_: Exception) {
+                                try {
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                    ctx.startActivity(intent)
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+
+                        loadUrl(startUrl)
+                        WebViewHolder.activeWebView = this
+                        webViewInstance = this
+                    }
                 }
             }
         )

@@ -46,18 +46,36 @@ interface AndroidAppControlBridge {
     isUrgent: boolean
   ) => void;
   exitAppCompletely?: () => void;
+  requestIgnoreBatteryOptimizations?: () => void;
+  isIgnoringBatteryOptimizations?: () => boolean;
 }
 
 declare global {
   interface Window {
     AndroidAppControl?: AndroidAppControlBridge;
+    __copyTrNativeHeartbeat?: () => void;
   }
 }
+
+// 1-second 8000Hz 8-bit mono silent PCM WAV data URI for mobile OS background keep-alive
+const SILENT_WAV_DATA_URI =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
 interface AccountDrawdownAlertRecord {
   alertedAtThreshold: number;
   peakAlertedDrawdown: number;
   lastAlertTimestamp: number;
+}
+
+export interface BackgroundKeepAliveDiagnostics {
+  keepAliveEnabled: boolean;
+  wakeLockActive: boolean;
+  webLockActive: boolean;
+  silentAudioActive: boolean;
+  serviceWorkerActive: boolean;
+  notificationPermission: NotificationPermission | 'unsupported';
+  isAndroidApk: boolean;
+  isBatteryOptimizationExempt: boolean;
 }
 
 type NotificationListener = (
@@ -71,7 +89,17 @@ class MobileNotificationService {
   private settings: MobileNotificationSettings = { ...DEFAULT_MOBILE_NOTIFICATION_SETTINGS };
   private listeners: Set<NotificationListener> = new Set();
   private drawdownAlertState: Record<string, AccountDrawdownAlertRecord> = {};
-  private wakeLockSentinel: { release: () => Promise<void> } | null = null;
+  private wakeLockSentinel: {
+    release: () => Promise<void>;
+    addEventListener?: (type: string, listener: () => void) => void;
+  } | null = null;
+  private webLockReleaseResolver: (() => void) | null = null;
+  private isWebLockHeld: boolean = false;
+  private keepAliveAudioCtx: AudioContext | null = null;
+  private keepAliveAudioElement: HTMLAudioElement | null = null;
+  private isSilentAudioRunning: boolean = false;
+  private isServiceWorkerActive: boolean = false;
+  private hasAutoPromptedPermission: boolean = false;
   private isFullExitTriggered: boolean = false;
 
   constructor() {
@@ -174,9 +202,54 @@ class MobileNotificationService {
 
     this.syncBackgroundAndLockScreenMode();
 
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && !this.isFullExitTriggered) {
+    const handleUserGestureActivation = () => {
+      if (this.isFullExitTriggered) return;
+      const shouldKeepAlive = this.settings.appExitBehavior === 'KEEP_ALIVE_BACKGROUND';
+      if (shouldKeepAlive) {
         this.applyWakeLock();
+        this.acquireWebLockKeepAlive();
+        this.startSilentAudioKeepAlive();
+      }
+      // Auto-request notification permission on first user tap if lock-screen or push notifications are enabled
+      if (
+        !this.hasAutoPromptedPermission &&
+        this.settings.enabled &&
+        (this.settings.lockScreenNotificationsEnabled || this.settings.browserPushEnabled) &&
+        'Notification' in window &&
+        Notification.permission === 'default'
+      ) {
+        this.hasAutoPromptedPermission = true;
+        this.requestBrowserPermission().catch(() => {});
+      }
+    };
+
+    window.addEventListener('pointerdown', handleUserGestureActivation, { passive: true });
+    window.addEventListener('touchstart', handleUserGestureActivation, { passive: true });
+    window.addEventListener('keydown', handleUserGestureActivation, { passive: true });
+
+    document.addEventListener('visibilitychange', () => {
+      if (this.isFullExitTriggered) return;
+      const shouldKeepAlive = this.settings.appExitBehavior === 'KEEP_ALIVE_BACKGROUND';
+      if (document.visibilityState === 'visible') {
+        this.applyWakeLock();
+      }
+      if (shouldKeepAlive) {
+        this.acquireWebLockKeepAlive();
+        this.startSilentAudioKeepAlive();
+        this.syncBackgroundAndLockScreenMode();
+      }
+    });
+
+    window.addEventListener('focus', () => {
+      if (!this.isFullExitTriggered) {
+        this.applyWakeLock();
+      }
+    });
+
+    window.addEventListener('blur', () => {
+      if (!this.isFullExitTriggered && this.settings.appExitBehavior === 'KEEP_ALIVE_BACKGROUND') {
+        this.acquireWebLockKeepAlive();
+        this.startSilentAudioKeepAlive();
       }
     });
 
@@ -185,6 +258,144 @@ class MobileNotificationService {
         this.stopBackgroundWorkers();
       }
     });
+  }
+
+  private acquireWebLockKeepAlive(): void {
+    if (typeof navigator === 'undefined' || !('locks' in navigator)) return;
+    const shouldKeepAwake =
+      !this.isFullExitTriggered && this.settings.appExitBehavior === 'KEEP_ALIVE_BACKGROUND';
+    if (!shouldKeepAwake) {
+      this.releaseWebLockKeepAlive();
+      return;
+    }
+    if (this.isWebLockHeld) return;
+
+    try {
+      const locksApi = (
+        navigator as unknown as {
+          locks?: {
+            request: (
+              name: string,
+              options: { mode: 'exclusive' | 'shared' },
+              callback: () => Promise<void>
+            ) => Promise<void>;
+          };
+        }
+      ).locks;
+      if (!locksApi) return;
+
+      this.isWebLockHeld = true;
+      locksApi
+        .request('copytr_background_keepalive_lock', { mode: 'shared' }, () => {
+          return new Promise<void>((resolve) => {
+            this.webLockReleaseResolver = () => {
+              this.isWebLockHeld = false;
+              this.webLockReleaseResolver = null;
+              resolve();
+            };
+          });
+        })
+        .catch(() => {
+          this.isWebLockHeld = false;
+        });
+    } catch {
+      this.isWebLockHeld = false;
+    }
+  }
+
+  private releaseWebLockKeepAlive(): void {
+    try {
+      if (this.webLockReleaseResolver) {
+        this.webLockReleaseResolver();
+      }
+      this.isWebLockHeld = false;
+    } catch {
+      // ignore
+    }
+  }
+
+  private startSilentAudioKeepAlive(): void {
+    if (typeof window === 'undefined') return;
+    const shouldKeepAwake =
+      !this.isFullExitTriggered &&
+      this.settings.appExitBehavior === 'KEEP_ALIVE_BACKGROUND' &&
+      (this.settings.wakeLockEnabled ?? true);
+
+    if (!shouldKeepAwake) {
+      this.stopSilentAudioKeepAlive();
+      return;
+    }
+
+    try {
+      // 1. Web Audio API silent oscillator keep-alive
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtx) {
+        if (!this.keepAliveAudioCtx || this.keepAliveAudioCtx.state === 'closed') {
+          const ctx = new AudioCtx();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(30, ctx.currentTime);
+          gain.gain.setValueAtTime(0.0001, ctx.currentTime); // Imperceptible silent gain
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start();
+          this.keepAliveAudioCtx = ctx;
+        }
+        if (this.keepAliveAudioCtx.state === 'suspended') {
+          this.keepAliveAudioCtx.resume().catch(() => {});
+        }
+        this.isSilentAudioRunning = this.keepAliveAudioCtx.state === 'running';
+      }
+
+      // 2. HTML5 Audio silent WAV loop + MediaSession metadata for Lock Screen & App-Switch persistence
+      if (!this.keepAliveAudioElement && typeof Audio !== 'undefined') {
+        const audio = new Audio(SILENT_WAV_DATA_URI);
+        audio.loop = true;
+        audio.volume = 0.01;
+        audio.setAttribute('playsinline', 'true');
+        audio.setAttribute('webkit-playsinline', 'true');
+        this.keepAliveAudioElement = audio;
+      }
+      if (this.keepAliveAudioElement && this.keepAliveAudioElement.paused) {
+        this.keepAliveAudioElement
+          .play()
+          .then(() => {
+            this.isSilentAudioRunning = true;
+          })
+          .catch(() => {});
+      }
+
+      // 3. Configure MediaSession so mobile OS recognizes active background session
+      if ('mediaSession' in navigator && typeof MediaMetadata !== 'undefined') {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: 'Copy TR — متابعة الصفقات والنسخ نشطة',
+          artist: 'العمل في الخلفية وإشعارات شاشة القفل مفعّلة',
+          album: 'Copy TR',
+        });
+        navigator.mediaSession.playbackState = 'playing';
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private stopSilentAudioKeepAlive(): void {
+    try {
+      if (this.keepAliveAudioElement) {
+        this.keepAliveAudioElement.pause();
+        this.keepAliveAudioElement = null;
+      }
+      if (this.keepAliveAudioCtx && this.keepAliveAudioCtx.state !== 'closed') {
+        this.keepAliveAudioCtx.close().catch(() => {});
+        this.keepAliveAudioCtx = null;
+      }
+      this.isSilentAudioRunning = false;
+    } catch {
+      // ignore
+    }
   }
 
   private async applyWakeLock(): Promise<void> {
@@ -199,9 +410,20 @@ class MobileNotificationService {
         if (!this.wakeLockSentinel) {
           const wl = await (
             navigator as unknown as {
-              wakeLock: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> };
+              wakeLock: {
+                request: (type: 'screen') => Promise<{
+                  release: () => Promise<void>;
+                  addEventListener?: (type: string, listener: () => void) => void;
+                }>;
+              };
             }
           ).wakeLock.request('screen');
+          // Clear sentinel reference when OS releases it on screen lock / app minimize so we always re-acquire it
+          wl.addEventListener?.('release', () => {
+            if (this.wakeLockSentinel === wl) {
+              this.wakeLockSentinel = null;
+            }
+          });
           this.wakeLockSentinel = wl;
         }
       } else if (this.wakeLockSentinel) {
@@ -209,7 +431,7 @@ class MobileNotificationService {
         this.wakeLockSentinel = null;
       }
     } catch {
-      // WakeLock requires active visible tab in some browsers
+      this.wakeLockSentinel = null;
     }
   }
 
@@ -219,6 +441,8 @@ class MobileNotificationService {
         this.wakeLockSentinel.release().catch(() => {});
         this.wakeLockSentinel = null;
       }
+      this.releaseWebLockKeepAlive();
+      this.stopSilentAudioKeepAlive();
       if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
         navigator.serviceWorker.getRegistration().then((reg) => {
           reg?.active?.postMessage({ type: 'STOP_ALL_BACKGROUND' });
@@ -251,18 +475,103 @@ class MobileNotificationService {
       if ('serviceWorker' in navigator) {
         const reg = await navigator.serviceWorker.register('/sw.js');
         const targetWorker = reg.active || reg.waiting || reg.installing;
-        targetWorker?.postMessage({
-          type: 'CONFIGURE_BACKGROUND_MODE',
-          keepAlive,
-          lockScreenNotificationsEnabled: lockScreenNotif,
-        });
+        if (targetWorker) {
+          this.isServiceWorkerActive = true;
+          targetWorker.postMessage({
+            type: 'CONFIGURE_BACKGROUND_MODE',
+            keepAlive,
+            lockScreenNotificationsEnabled: lockScreenNotif,
+            showSensitiveDetails: showSensitive,
+          });
+        }
       }
     } catch {
       // ignore
     }
 
-    // 3. Apply Screen Wake Lock preference
+    // 3. Apply Screen Wake Lock, Web Lock, and Silent Audio Keep-Alive
     await this.applyWakeLock();
+    if (keepAlive) {
+      this.acquireWebLockKeepAlive();
+      this.startSilentAudioKeepAlive();
+    } else {
+      this.releaseWebLockKeepAlive();
+      this.stopSilentAudioKeepAlive();
+    }
+  }
+
+  public acknowledgeServiceWorkerHeartbeat(): void {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+    try {
+      navigator.serviceWorker.controller?.postMessage({
+        type: 'SW_HEARTBEAT_ACK',
+        timestamp: Date.now(),
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  public syncCopiedTradersStateToServiceWorker(
+    copiedTraders: Array<{
+      traderId: string;
+      nickname: string;
+      source: 'COPY_TRADING' | 'SMART_MONEY';
+      accountId?: string;
+      accountName?: string;
+    }>,
+    knownPositionKeys: string[] = []
+  ): void {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+    try {
+      navigator.serviceWorker.getRegistration().then((reg) => {
+        const target = reg?.active || navigator.serviceWorker.controller;
+        target?.postMessage({
+          type: 'SYNC_COPIED_TRADERS_STATE',
+          copiedTraders,
+          knownPositionKeys,
+        });
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  public requestAndroidBatteryOptimizationExemption(): boolean {
+    if (typeof window === 'undefined' || !window.AndroidAppControl?.requestIgnoreBatteryOptimizations) {
+      return false;
+    }
+    try {
+      window.AndroidAppControl.requestIgnoreBatteryOptimizations();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public getBackgroundKeepAliveDiagnostics(): BackgroundKeepAliveDiagnostics {
+    const isAndroidApk = Boolean(typeof window !== 'undefined' && window.AndroidAppControl);
+    let isBatteryOptimizationExempt = true;
+    if (isAndroidApk && window.AndroidAppControl?.isIgnoringBatteryOptimizations) {
+      try {
+        isBatteryOptimizationExempt = Boolean(
+          window.AndroidAppControl.isIgnoringBatteryOptimizations()
+        );
+      } catch {
+        isBatteryOptimizationExempt = false;
+      }
+    }
+    return {
+      keepAliveEnabled:
+        !this.isFullExitTriggered && this.settings.appExitBehavior === 'KEEP_ALIVE_BACKGROUND',
+      wakeLockActive: Boolean(this.wakeLockSentinel),
+      webLockActive: this.isWebLockHeld,
+      silentAudioActive: this.isSilentAudioRunning,
+      serviceWorkerActive: this.isServiceWorkerActive,
+      notificationPermission: this.getBrowserPermissionStatus(),
+      isAndroidApk,
+      isBatteryOptimizationExempt,
+    };
   }
 
   /**
@@ -373,14 +682,20 @@ class MobileNotificationService {
   }
 
   /**
-   * Play distinct mobile sound chime using Web Audio API
+   * Play distinct mobile sound chime using Web Audio API (reuses unlocked background AudioContext when screen is locked)
    */
   private playChime(actionType: MobileNotificationActionType, isProfit: boolean = true): void {
     if (!this.settings.soundEnabled || typeof window === 'undefined') return;
     try {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return;
-      const ctx = new AudioCtx();
+      const ctx =
+        this.keepAliveAudioCtx && this.keepAliveAudioCtx.state !== 'closed'
+          ? this.keepAliveAudioCtx
+          : new AudioCtx();
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
 
       const playTone = (freq: number, startOffset: number, duration: number, type: OscillatorType = 'sine', gainVal = 0.14) => {
         const osc = ctx.createOscillator();
@@ -550,7 +865,7 @@ class MobileNotificationService {
     const isUrgent =
       item.actionType === 'DRAWDOWN_ALERT' || Boolean(this.settings.lockScreenNotificationsEnabled);
 
-    // 1. Dispatch to Native Android APK NotificationManager (shows directly on Android Lock Screen)
+    // 1. Dispatch to Native Android APK NotificationManager (shows directly on Android Lock Screen & wakes screen)
     try {
       if (window.AndroidAppControl?.showNativeNotification) {
         window.AndroidAppControl.showNativeNotification(title, body, item.id, isUrgent);
@@ -560,29 +875,74 @@ class MobileNotificationService {
     }
 
     // 2. Dispatch to Web Notification / Service Worker with Lock Screen persistence
-    if (!('Notification' in window) || Notification.permission !== 'granted') {
+    if (!('Notification' in window)) {
+      return;
+    }
+
+    if (Notification.permission === 'default') {
+      try {
+        await this.requestBrowserPermission();
+      } catch {
+        // ignore
+      }
+    }
+
+    if (Notification.permission !== 'granted') {
       return;
     }
 
     const vibratePattern =
-      item.actionType === 'DRAWDOWN_ALERT' ? [250, 80, 250, 80, 320] : [180, 70, 200];
+      item.actionType === 'DRAWDOWN_ALERT' ? [250, 80, 250, 80, 320] : [220, 80, 220, 80, 300];
+    const requireLockScreenInteraction = Boolean(this.settings.lockScreenNotificationsEnabled ?? true);
 
     try {
       if ('serviceWorker' in navigator) {
-        const reg = await navigator.serviceWorker.getRegistration();
-        if (reg && 'showNotification' in reg) {
-          await reg.showNotification(title, {
-            body,
-            icon: '/assets/aistudio/icone_c1401ade.png',
-            badge: '/assets/aistudio/icone_c1401ade.png',
-            dir: 'rtl',
-            lang: 'ar',
-            tag: item.id,
-            requireInteraction: Boolean(this.settings.lockScreenNotificationsEnabled ?? true),
-            silent: !this.settings.soundEnabled,
-            vibrate: this.settings.vibrationEnabled ? vibratePattern : undefined,
-          } as NotificationOptions);
-          return;
+        const reg =
+          (await navigator.serviceWorker.getRegistration()) ||
+          (await navigator.serviceWorker.register('/sw.js').catch(() => undefined));
+
+        if (reg) {
+          const workerTarget = reg.active || reg.waiting || navigator.serviceWorker.controller;
+          if (workerTarget) {
+            workerTarget.postMessage({
+              type: 'DISPATCH_LOCKSCREEN_NOTIFICATION',
+              payload: {
+                title,
+                body,
+                icon: '/assets/aistudio/icone_c1401ade.png',
+                badge: '/assets/aistudio/icone_c1401ade.png',
+                tag: item.id,
+                requireInteraction: requireLockScreenInteraction,
+                silent: false,
+                timestamp: item.timestamp || Date.now(),
+                vibrate: this.settings.vibrationEnabled ? vibratePattern : undefined,
+                url: '/',
+                accountId: item.accountId || null,
+              },
+            });
+            return;
+          }
+
+          if ('showNotification' in reg) {
+            await reg.showNotification(title, {
+              body,
+              icon: '/assets/aistudio/icone_c1401ade.png',
+              badge: '/assets/aistudio/icone_c1401ade.png',
+              dir: 'rtl',
+              lang: 'ar',
+              tag: item.id,
+              renotify: true,
+              requireInteraction: requireLockScreenInteraction,
+              silent: false,
+              timestamp: item.timestamp || Date.now(),
+              vibrate: this.settings.vibrationEnabled ? vibratePattern : undefined,
+              data: {
+                url: '/',
+                accountId: item.accountId || null,
+              },
+            } as NotificationOptions);
+            return;
+          }
         }
       }
       new Notification(title, {
@@ -591,8 +951,8 @@ class MobileNotificationService {
         dir: 'rtl',
         lang: 'ar',
         tag: item.id,
-        requireInteraction: Boolean(this.settings.lockScreenNotificationsEnabled ?? true),
-        silent: !this.settings.soundEnabled,
+        requireInteraction: requireLockScreenInteraction,
+        silent: false,
       });
     } catch {
       // Fallback handled by in-app mobile banner
@@ -1232,6 +1592,9 @@ class MobileNotificationService {
     }
     this.saveNotifications();
     this.playChime('OPEN_TRADE', true);
+    this.triggerVibration('OPEN_TRADE');
+    this.sendBrowserSystemNotification(notification);
+    this.sendTelegramPushNotification(notification);
     this.emitChange(notification);
     return notification;
   }

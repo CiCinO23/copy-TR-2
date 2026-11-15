@@ -10,6 +10,13 @@ import {
   formatSignedCurrency,
   formatSignedPercent,
 } from './formatters';
+import {
+  APP_MAJOR_VERSION,
+  APP_PROMPT_REVISION,
+  APP_VERSION,
+  PROMPT_VERSION_HISTORY,
+  formatAppVersion,
+} from '../constants/appVersion';
 
 const HINDI_RE = /[\u0660-\u0669\u06F0-\u06F9]/;
 
@@ -45,3 +52,13 @@ test('signed currency and percent helpers produce clean LTR sign placement', () 
   assert.equal(formatSignedPercent(-12.345, 2), '-12.35%');
   assert.equal(formatNumberWestern(12345.678), '12,345.68');
 });
+
+test('APP_VERSION reflects 2.<prompt_count> and increments per modification prompt', () => {
+  assert.equal(APP_MAJOR_VERSION, 2);
+  assert.equal(APP_PROMPT_REVISION, 11);
+  assert.equal(APP_VERSION, '2.11');
+  assert.equal(PROMPT_VERSION_HISTORY.length, APP_PROMPT_REVISION);
+  assert.equal(PROMPT_VERSION_HISTORY[PROMPT_VERSION_HISTORY.length - 1]?.version, APP_VERSION);
+  assert.equal(formatAppVersion(12), '2.12');
+});
+

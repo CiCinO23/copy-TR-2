@@ -1,6 +1,7 @@
 import React from 'react';
 import { Settings, BellRing } from 'lucide-react';
 import { BinanceConnectionState, KuCoinConnectionState } from '../types';
+import { APP_VERSION } from '../constants/appVersion';
 
 interface HeaderProps {
   connectionState: BinanceConnectionState;
@@ -42,42 +43,51 @@ export const Header: React.FC<HeaderProps> = ({
       : '-- ms';
 
   return (
-    <header className="w-full bg-[#12171D]/95 backdrop-blur-md border-b border-[#1E2733] px-3 sm:px-4 py-2 sm:py-2.5 sticky top-0 z-40 header-safe pl-safe pr-safe">
-      <div className="max-w-4xl mx-auto flex items-center justify-between gap-2 sm:gap-3">
-        {/* أقصى اليمين: رمز التطبيق بتصميم احترافي هادئ */}
+    <header className="w-full bg-[#12171D]/95 backdrop-blur-md border-b border-[#1E2733] px-2.5 sm:px-4 py-2 sm:py-2.5 sticky top-0 z-40 header-safe pl-safe pr-safe">
+      <div className="max-w-4xl mx-auto flex items-center justify-between gap-1.5 sm:gap-3">
+        {/* أقصى اليمين: رمز التطبيق مع رقم الإصدار التراكمي ظاهر في كل التطبيق */}
         <button
           type="button"
           onClick={onOpenHomeTab}
           data-testid="header_app_logo"
-          title="Copy TR - الرئيسية"
-          className="group flex items-center gap-2.5 cursor-pointer focus:outline-none shrink-0 select-none active:scale-95 transition-transform"
+          title={`Copy TR v${APP_VERSION} - الرئيسية`}
+          className="group flex items-center gap-1.5 sm:gap-2.5 cursor-pointer focus:outline-none shrink-0 select-none active:scale-95 transition-transform"
         >
-          <div className="w-9 h-9 rounded-xl bg-[#0B0E11] border border-[#232E3A] group-hover:border-[#01BC8D]/60 overflow-hidden flex items-center justify-center shrink-0 transition-colors">
+          <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-[#0B0E11] border border-[#232E3A] group-hover:border-[#01BC8D]/60 overflow-hidden flex items-center justify-center shrink-0 transition-colors">
             <img
               src="/assets/aistudio/icone_c1401ade.png"
               alt="Copy TR"
               className="w-full h-full object-cover pointer-events-none"
             />
           </div>
-          <div className="hidden sm:flex flex-col text-right leading-tight">
-            <span className="text-xs font-extrabold text-white tracking-tight font-mono">
-              Copy TR
-            </span>
-            <span className="text-[10px] text-[#8A99AD] font-medium">
-              منصة التداول والنسخ
+          <div className="flex flex-col text-right leading-tight">
+            <div className="flex items-center gap-1 sm:gap-1.5">
+              <span className="text-[11px] sm:text-xs font-extrabold text-white tracking-tight font-mono">
+                Copy TR
+              </span>
+              <span
+                dir="ltr"
+                data-testid="header_app_version_badge"
+                className="px-1.5 py-0.5 rounded-md bg-[#0D2B24] border border-[#01BC8D]/40 text-[#01BC8D] text-[9px] sm:text-[10px] font-mono font-extrabold tabular-nums leading-none"
+              >
+                v{APP_VERSION}
+              </span>
+            </div>
+            <span className="hidden sm:inline text-[10px] text-[#8A99AD] font-medium mt-0.5">
+              منصة التداول والنسخ • الإصدار {APP_VERSION}
             </span>
           </div>
         </button>
 
         {/* خانات الهيدر: بتنسيق متناسق ومريح للمس */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
           {/* 1. خانة باينانس (بيانات السوق والمتداولين) */}
           <button
             type="button"
             onClick={onOpenApiTab}
             data-testid="header_status_badge"
             title="ربط المنصات - باينانس للمعلومات"
-            className={`h-9 px-2.5 rounded-xl border flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 select-none ${
+            className={`h-8 sm:h-9 px-1.5 sm:px-2.5 rounded-xl border flex items-center gap-1 sm:gap-1.5 transition-colors cursor-pointer shrink-0 select-none ${
               activeApiSubTab === 'BINANCE'
                 ? 'bg-[#161D26] border-[#01BC8D] text-white'
                 : 'bg-[#161D26] hover:bg-[#1A222B] border-[#1E2733] hover:border-[#2C394A]'
@@ -101,7 +111,7 @@ export const Header: React.FC<HeaderProps> = ({
 
             <span
               dir="ltr"
-              className="text-[11px] font-mono font-semibold text-[#F0F4F8] tabular-nums"
+              className="text-[10px] sm:text-[11px] font-mono font-semibold text-[#F0F4F8] tabular-nums"
             >
               {binanceLatency}
             </span>
@@ -113,7 +123,7 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={onOpenKucoinTab}
             data-testid="header_kucoin_badge"
             title="ربط المنصات - كوكوين للتنفيذ"
-            className={`h-9 px-2.5 rounded-xl border flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 select-none ${
+            className={`h-8 sm:h-9 px-1.5 sm:px-2.5 rounded-xl border flex items-center gap-1 sm:gap-1.5 transition-colors cursor-pointer shrink-0 select-none ${
               activeApiSubTab === 'KUCOIN'
                 ? 'bg-[#161D26] border-[#01BC8D] text-white'
                 : 'bg-[#161D26] hover:bg-[#1A222B] border-[#1E2733] hover:border-[#2C394A]'
@@ -143,7 +153,7 @@ export const Header: React.FC<HeaderProps> = ({
 
             <span
               dir="ltr"
-              className="text-[11px] font-mono font-semibold text-[#F0F4F8] tabular-nums"
+              className="text-[10px] sm:text-[11px] font-mono font-semibold text-[#F0F4F8] tabular-nums"
             >
               {kucoinLatency}
             </span>
@@ -155,7 +165,7 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={onOpenNotifications}
             data-testid="header_notifications_button"
             title="تنبيهات الموبايل"
-            className={`relative w-9 h-9 rounded-xl border flex items-center justify-center transition-colors cursor-pointer shrink-0 select-none ${
+            className={`relative w-8 h-8 sm:w-9 sm:h-9 rounded-xl border flex items-center justify-center transition-colors cursor-pointer shrink-0 select-none ${
               unreadNotificationsCount > 0
                 ? 'bg-[#0D2B24] border-[#01BC8D]/60 text-[#01BC8D]'
                 : 'bg-[#161D26] hover:bg-[#1A222B] border-[#1E2733] hover:border-[#2C394A] text-[#8A99AD] hover:text-white'
@@ -182,7 +192,7 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={onOpenSettingsTab}
             data-testid="header_settings_button"
             title="الإعدادات وإدارة المخاطر"
-            className={`w-9 h-9 rounded-xl border flex items-center justify-center transition-colors cursor-pointer shrink-0 select-none ${
+            className={`w-8 h-8 sm:w-9 sm:h-9 rounded-xl border flex items-center justify-center transition-colors cursor-pointer shrink-0 select-none ${
               isSettingsActive
                 ? 'bg-[#01BC8D]/15 border-[#01BC8D] text-[#01BC8D]'
                 : 'bg-[#161D26] hover:bg-[#1A222B] border-[#1E2733] hover:border-[#2C394A] text-[#8A99AD] hover:text-white'

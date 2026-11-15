@@ -27,6 +27,12 @@ import {
   normalizePinDigits,
   validatePinChange,
 } from '../services/kucoinSecurityLock';
+import {
+  APP_MAJOR_VERSION,
+  APP_VERSION,
+  APP_PROMPT_REVISION,
+  PROMPT_VERSION_HISTORY,
+} from '../constants/appVersion';
 
 interface SettingsTabProps {
   config: BinanceConfig;
@@ -117,6 +123,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       const perm = await mobileNotifications.requestBrowserPermission();
       setBrowserPerm(perm);
     }
+    await mobileNotifications.syncBackgroundAndLockScreenMode();
     handleUpdate({
       enabled: true,
       lockScreenNotificationsEnabled: true,
@@ -124,7 +131,28 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     });
     mobileNotifications.triggerTestNotification('OPEN_TRADE');
     setStatusFeedback(
-      'تم إرسال إشعار فوري مخصص لشاشة القفل بنجاح.'
+      'تم إرسال إشعار فوري مخصص لشاشة القفل وتنشيط محرك الخلفية بنجاح.'
+    );
+  };
+
+  const handleActivateBackgroundProtection = async () => {
+    if (browserPerm !== 'granted' && browserPerm !== 'unsupported') {
+      const perm = await mobileNotifications.requestBrowserPermission();
+      setBrowserPerm(perm);
+    }
+    mobileNotifications.resumeFromFullExit();
+    setIsStoppedByFullExit(false);
+    mobileNotifications.requestAndroidBatteryOptimizationExemption();
+    await mobileNotifications.syncBackgroundAndLockScreenMode();
+    handleUpdate(
+      {
+        enabled: true,
+        appExitBehavior: 'KEEP_ALIVE_BACKGROUND',
+        wakeLockEnabled: true,
+        lockScreenNotificationsEnabled: true,
+        browserPushEnabled: true,
+      },
+      'تم تنشيط جميع طبقات العمل المستمر (عند قفل الشاشة وعند تصغير التطبيق وفتح تطبيق آخر) وتفعيل إشعارات شاشة القفل.'
     );
   };
 
@@ -168,14 +196,25 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
   return (
     <div className="space-y-5 animate-in fade-in duration-200">
-      {/* Title */}
-      <div>
-        <h2 className="text-xl sm:text-2xl font-bold text-white tracking-wide">
-          الإعدادات وإدارة المخاطر
-        </h2>
-        <p className="text-xs text-[#8A99AD] mt-0.5">
-          ضبط سلوك إغلاق التطبيق أو عمله في الخلفية، إشعارات شاشة القفل، ومعايير الأمان والربط المباشر
-        </p>
+      {/* Title + Version Badge */}
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <h2 className="text-xl sm:text-2xl font-bold text-white tracking-wide">
+              الإعدادات وإدارة المخاطر
+            </h2>
+            <span
+              dir="ltr"
+              data-testid="settings_version_badge"
+              className="px-2.5 py-0.5 rounded-lg bg-[#0D2B24] border border-[#01BC8D]/50 text-[#01BC8D] text-xs font-mono font-extrabold tabular-nums"
+            >
+              v{APP_VERSION}
+            </span>
+          </div>
+          <p className="text-xs text-[#8A99AD] mt-0.5">
+            ضبط سلوك إغلاق التطبيق أو عمله في الخلفية، إشعارات شاشة القفل، ومعايير الأمان والربط المباشر
+          </p>
+        </div>
       </div>
 
       {statusFeedback && (
@@ -364,15 +403,26 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               <span>إعادة تشغيل خدمات التطبيق</span>
             </button>
           ) : (
-            <button
-              type="button"
-              data-testid="immediate_full_exit_btn"
-              onClick={handleExecuteImmediateFullExit}
-              className="bg-[#3A1219] hover:bg-[#F6465D] text-[#F6465D] hover:text-white border border-[#F6465D]/50 font-bold px-3.5 py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shrink-0"
-            >
-              <Power className="w-3.5 h-3.5" />
-              <span>إغلاق التطبيق كلياً الآن</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                data-testid="activate_bg_protection_btn"
+                onClick={handleActivateBackgroundProtection}
+                className="bg-[#0D2B24] hover:bg-[#01BC8D] text-[#01BC8D] hover:text-[#0B0E11] border border-[#01BC8D]/50 font-bold px-3.5 py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>تثبيت العمل عند قفل الشاشة وتصغير التطبيق</span>
+              </button>
+              <button
+                type="button"
+                data-testid="immediate_full_exit_btn"
+                onClick={handleExecuteImmediateFullExit}
+                className="bg-[#3A1219] hover:bg-[#F6465D] text-[#F6465D] hover:text-white border border-[#F6465D]/50 font-bold px-3.5 py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <Power className="w-3.5 h-3.5" />
+                <span>إغلاق التطبيق كلياً الآن</span>
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -753,6 +803,65 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           <div>• تنبيهات فورية على الموبايل وشاشة القفل عند فتح الصفقات، التدعيم، السحب الجزئي، الإغلاق، وتجاوز حد التراجع</div>
           <div>• إمكانية الاختيار بين العمل المستمر في الخلفية أو الإغلاق الكلي للتطبيق</div>
           <div>• عدم حفظ المفاتيح في خوادم سحابية خارجية (تخزين محلي آمن في المتصفح فقط)</div>
+        </div>
+      </div>
+
+      {/* 5. App Version & Cumulative Prompt History Card */}
+      <div
+        data-testid="settings_version_history_card"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-3.5"
+      >
+        <div className="flex items-center justify-between gap-2 flex-wrap border-b border-[#1E2733] pb-3">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-[#01BC8D]" />
+            <div>
+              <h3 className="text-xs sm:text-sm font-bold text-white">
+                سجل إصدار التطبيق وأوامر التعديل التراكمية
+              </h3>
+              <p className="text-[11px] text-[#8A99AD] mt-0.5">
+                البداية من الإصدار{' '}
+                <span dir="ltr" className="font-mono text-white">
+                  {APP_MAJOR_VERSION}.0
+                </span>{' '}
+                +{' '}
+                <span dir="ltr" className="font-mono text-[#01BC8D] font-bold">
+                  {APP_PROMPT_REVISION}
+                </span>{' '}
+                أوامر تعديل (برومبت) = الإصدار الحالي{' '}
+                <span dir="ltr" className="font-mono text-[#01BC8D] font-bold">
+                  {APP_VERSION}
+                </span>
+              </p>
+            </div>
+          </div>
+          <span
+            dir="ltr"
+            className="px-3 py-1 rounded-xl bg-[#0D2B24] border border-[#01BC8D] text-[#01BC8D] font-mono text-xs font-extrabold tabular-nums"
+          >
+            Version {APP_VERSION}
+          </span>
+        </div>
+
+        <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
+          {PROMPT_VERSION_HISTORY.slice()
+            .reverse()
+            .map((item) => (
+              <div
+                key={item.version}
+                className="flex items-start justify-between gap-2 bg-[#0B0E11] border border-[#1E2733] rounded-xl px-3 py-2 text-xs"
+              >
+                <div className="text-[#F0F4F8] leading-relaxed">
+                  <span className="text-[#8A99AD] ml-1.5">أمر #{item.promptNumber}:</span>
+                  <span>{item.summaryAr}</span>
+                </div>
+                <span
+                  dir="ltr"
+                  className="px-2 py-0.5 rounded bg-[#161D26] border border-[#232E3A] text-[#01BC8D] font-mono text-[11px] font-bold shrink-0 tabular-nums"
+                >
+                  v{item.version}
+                </span>
+              </div>
+            ))}
         </div>
       </div>
     </div>

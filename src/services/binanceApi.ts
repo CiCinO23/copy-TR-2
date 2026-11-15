@@ -137,7 +137,20 @@ export async function fetchAllFuturesPrices(config?: BinanceConfig): Promise<Rec
   try {
     const cfg = config || loadBinanceConfig();
     const url = resolveApiUrl(cfg, '/v1/ticker/price');
-    const res = await fetch(url);
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = setTimeout(() => {
+      try {
+        controller?.abort();
+      } catch {
+        // ignore
+      }
+    }, 5500);
+    let res: Response;
+    try {
+      res = await fetch(url, { signal: controller?.signal });
+    } finally {
+      clearTimeout(timer);
+    }
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data)) {
