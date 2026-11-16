@@ -181,6 +181,49 @@ export function getCachedPrice(symbol: string): number | null {
   return cachedLivePrices[s] || null;
 }
 
+export function getBinancePriceCacheStats(): {
+  symbolCount: number;
+  estimatedKb: number;
+} {
+  const symbolCount = Object.keys(cachedLivePrices).length;
+  return {
+    symbolCount,
+    estimatedKb: Math.max(1, Math.round(symbolCount * 0.08)),
+  };
+}
+
+export function cleanupBinancePriceCache(options?: {
+  keepSymbols?: string[];
+  forceClearAll?: boolean;
+}): number {
+  const keys = Object.keys(cachedLivePrices);
+  if (keys.length === 0) return 0;
+
+  if (options?.forceClearAll) {
+    const count = keys.length;
+    cachedLivePrices = {};
+    lastPricesFetchTime = 0;
+    return count;
+  }
+
+  const watched = new Set<string>([
+    ...getWatchedFuturesSymbols().map((s) => s.toUpperCase()),
+    ...(options?.keepSymbols || []).map((s) => s.toUpperCase()),
+  ]);
+
+  let removed = 0;
+  const nextMap: Record<string, number> = {};
+  for (const sym of keys) {
+    if (watched.has(sym.toUpperCase())) {
+      nextMap[sym] = cachedLivePrices[sym];
+    } else {
+      removed += 1;
+    }
+  }
+  cachedLivePrices = nextMap;
+  return removed;
+}
+
 const POPULAR_FUTURES_CATALOG: Record<string, number> = {
   BTCUSDT: 96450.2,
   ETHUSDT: 2780.5,

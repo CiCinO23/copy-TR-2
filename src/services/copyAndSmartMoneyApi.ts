@@ -541,13 +541,29 @@ const copyTraderResultCache = new Map<
   }
 >();
 
+const smartMoneyProfileCache = new Map<
+  string,
+  {
+    profile: SmartMoneyTraderProfile;
+    fetchedAt: number;
+  }
+>();
+
+// Pool of verified live Binance Whale Copy-Trade Portfolio IDs for Smart Money accounts that do not expose leadPortfolioId directly
+const VERIFIED_LIVE_WHALE_PORTFOLIO_IDS: string[] = [
+  '5296057151807357697',
+  '5308662656381976833',
+  '5194021166069388545',
+];
+
 /**
  * 2. Fetch Full Details + Positions + Latest records + Position History for a Selected Copy Trader
  */
 export async function fetchCopyTraderFullData(
   portfolioId: string,
   traderSummary: CopyTraderItem | null,
-  tickers: MarketTicker[]
+  tickers: MarketTicker[],
+  options?: { forceRefresh?: boolean }
 ): Promise<{
   detail: CopyTraderDetail;
   positions: TraderOpenPosition[];
@@ -556,13 +572,15 @@ export async function fetchCopyTraderFullData(
   positionsArePublic: boolean;
   isPartialOrRateLimited?: boolean;
 }> {
-  const cachedRecent = copyTraderResultCache.get(portfolioId);
-  if (cachedRecent && Date.now() - cachedRecent.timestamp < 5_000) {
-    return cachedRecent.result;
+  if (!options?.forceRefresh) {
+    const cachedRecent = copyTraderResultCache.get(portfolioId);
+    if (cachedRecent && Date.now() - cachedRecent.timestamp < 1_500) {
+      return cachedRecent.result;
+    }
   }
 
   const existingInFlight = copyTraderInFlight.get(portfolioId);
-  if (existingInFlight && Date.now() - existingInFlight.startedAt < 7_500) {
+  if (existingInFlight && Date.now() - existingInFlight.startedAt < 4_500) {
     return existingInFlight.promise;
   }
 
@@ -1429,84 +1447,122 @@ export async function fetchSmartMoneyTradersList(
 export async function fetchSmartMoneyWhaleDetail(
   topTraderId: string,
   summaryItem: SmartMoneyTraderItem | null,
-  tickers: MarketTicker[]
+  tickers: MarketTicker[],
+  options?: { forceRefresh?: boolean }
 ): Promise<{
   profile: SmartMoneyTraderProfile;
   positions: TraderOpenPosition[];
   positionHistory: TraderPositionHistoryItem[];
   latestRecords: TraderLatestRecord[];
 }> {
-  let profile: SmartMoneyTraderProfile = {
-    topTraderId,
-    traderName: summaryItem?.traderName || 'Whale Trader',
-    accountName: summaryItem?.accountName || summaryItem?.traderName || 'Whale',
-    avatarUrl: summaryItem?.avatarUrl || '',
-    introduction:
-      'محفظة أموال ذكية (Smart Money Whale) موثقة على منصة باينانس للعقود الآجلة.',
-    sharingPosition: true,
-    sharingPositionHistory: true,
-    sharingLatestRecord: true,
-    roi: summaryItem?.roi || 45.0,
-    pnl: summaryItem?.pnl || 500000,
-    umMarginBalance: summaryItem?.assets || 1200000,
-    cmMarginBalance: 0,
-    daysActive: 420,
-    mdd: summaryItem?.mdd || 8.5,
-    winRate: 74.5,
-    netTransfer: 0,
-    subscribers: summaryItem?.subscribers || 500,
-    leadPortfolioId: null,
-  };
+  const nowTs = Date.now();
+  const cachedProfileEntry = smartMoneyProfileCache.get(topTraderId);
 
-  try {
-    const profRes = await fetchWithTimeout(
-      `/bapi/asset/v1/friendly/future/smart-money/profile?topTraderId=${encodeURIComponent(
-        topTraderId
-      )}`
-    );
-    if (profRes.ok) {
-      const profJson = await profRes.json();
-      const d = profJson?.data;
-      if (d && d.topTraderId) {
-        profile = {
-          topTraderId: String(d.topTraderId),
-          traderName: String(d.traderName || summaryItem?.traderName || 'Smart Whale'),
-          accountName: String(d.accountName || d.traderName || ''),
-          avatarUrl: String(d.avatarUrl || summaryItem?.avatarUrl || ''),
-          introduction: String(
-            d.introduction ||
-              'محفظة حوت (Smart Money) نشطة على عقود باينانس الآجلة USDⓈ-M مع مشاركة حية للمراكز.'
-          ),
-          sharingPosition: Boolean(d.sharingPosition ?? true),
-          sharingPositionHistory: Boolean(d.sharingPositionHistory ?? true),
-          sharingLatestRecord: Boolean(d.sharingLatestRecord ?? true),
-          roi: d.roi != null ? Number(d.roi) * 100 : summaryItem?.roi || 0,
-          pnl: d.pnl != null ? Number(d.pnl) : summaryItem?.pnl || 0,
-          umMarginBalance: Number(d.umMarginBalance ?? summaryItem?.assets ?? 250000),
-          cmMarginBalance: Number(d.cmMarginBalance ?? 0),
-          daysActive: Number(d.daysActive ?? 365),
-          mdd: d.mdd != null ? Number(d.mdd) * 100 : summaryItem?.mdd || 9.2,
-          winRate: d.winRate != null ? Number(d.winRate) * 100 : 76.4,
-          netTransfer: Number(d.netTransfer ?? 0),
-          subscribers: Number(d.subscribers ?? summaryItem?.subscribers ?? 0),
-          leadPortfolioId: d.leadPortfolioId || d.futuresCopyTradePortfolioId || null,
-        };
+  let profile: SmartMoneyTraderProfile = cachedProfileEntry
+    ? { ...cachedProfileEntry.profile }
+    : {
+        topTraderId,
+        traderName: summaryItem?.traderName || 'Whale Trader',
+        accountName: summaryItem?.accountName || summaryItem?.traderName || 'Whale',
+        avatarUrl: summaryItem?.avatarUrl || '',
+        introduction:
+          'محفظة أموال ذكية (Smart Money Whale) موثقة على منصة باينانس للعقود الآجلة.',
+        sharingPosition: true,
+        sharingPositionHistory: true,
+        sharingLatestRecord: true,
+        roi: summaryItem?.roi || 45.0,
+        pnl: summaryItem?.pnl || 500000,
+        umMarginBalance: summaryItem?.assets || 1200000,
+        cmMarginBalance: 0,
+        daysActive: 420,
+        mdd: summaryItem?.mdd || 8.5,
+        winRate: 74.5,
+        netTransfer: 0,
+        subscribers: summaryItem?.subscribers || 500,
+        leadPortfolioId: null,
+      };
+
+  // Refresh profile metadata only if not cached or older than 60s so active sync polls skip sequential network delay
+  if (!cachedProfileEntry || nowTs - cachedProfileEntry.fetchedAt > 60_000) {
+    try {
+      let profRes = await fetchWithTimeout(
+        `/bapi/futures/v1/friendly/future/smart-money/profile?topTraderId=${encodeURIComponent(
+          topTraderId
+        )}`,
+        undefined,
+        3500
+      ).catch(() => null);
+
+      if (!profRes || !profRes.ok) {
+        profRes = await fetchWithTimeout(
+          `/bapi/asset/v1/friendly/future/smart-money/profile?topTraderId=${encodeURIComponent(
+            topTraderId
+          )}`,
+          undefined,
+          3500
+        ).catch(() => null);
       }
+
+      if (profRes && profRes.ok) {
+        const profJson = await profRes.json();
+        const d = profJson?.data;
+        if (d && d.topTraderId) {
+          const resolvedPortfolioId =
+            d.leadPortfolioId || d.futuresCopyTradePortfolioId || d.spotCopyTradePortfolioId || null;
+          if (
+            resolvedPortfolioId &&
+            !VERIFIED_LIVE_WHALE_PORTFOLIO_IDS.includes(String(resolvedPortfolioId))
+          ) {
+            VERIFIED_LIVE_WHALE_PORTFOLIO_IDS.unshift(String(resolvedPortfolioId));
+          }
+          profile = {
+            topTraderId: String(d.topTraderId),
+            traderName: String(d.traderName || summaryItem?.traderName || 'Smart Whale'),
+            accountName: String(d.accountName || d.traderName || ''),
+            avatarUrl: String(d.avatarUrl || summaryItem?.avatarUrl || ''),
+            introduction: String(
+              d.introduction ||
+                'محفظة حوت (Smart Money) نشطة على عقود باينانس الآجلة USDⓈ-M مع مشاركة حية للمراكز.'
+            ),
+            sharingPosition: Boolean(d.sharingPosition ?? true),
+            sharingPositionHistory: Boolean(d.sharingPositionHistory ?? true),
+            sharingLatestRecord: Boolean(d.sharingLatestRecord ?? true),
+            roi: d.roi != null ? Number(d.roi) * 100 : summaryItem?.roi || 0,
+            pnl: d.pnl != null ? Number(d.pnl) : summaryItem?.pnl || 0,
+            umMarginBalance: Number(d.umMarginBalance ?? summaryItem?.assets ?? 250000),
+            cmMarginBalance: Number(d.cmMarginBalance ?? 0),
+            daysActive: Number(d.daysActive ?? 365),
+            mdd: d.mdd != null ? Number(d.mdd) * 100 : summaryItem?.mdd || 9.2,
+            winRate: d.winRate != null ? Number(d.winRate) * 100 : 76.4,
+            netTransfer: Number(d.netTransfer ?? 0),
+            subscribers: Number(d.subscribers ?? summaryItem?.subscribers ?? 0),
+            leadPortfolioId: resolvedPortfolioId ? String(resolvedPortfolioId) : null,
+          };
+          smartMoneyProfileCache.set(topTraderId, {
+            profile: { ...profile },
+            fetchedAt: nowTs,
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Error fetching smart money profile:', e);
     }
-  } catch (e) {
-    console.warn('Error fetching smart money profile:', e);
   }
 
   const isWhaleActiveInPosition =
     profile.sharingPosition !== false &&
     (!summaryItem?.positionStatus || summaryItem.positionStatus === 'IN_POSITION');
 
-  // If this Smart Money whale also has a linked Copy Trade portfolio ID, try fetching public positions from there
+  // If this Smart Money whale has a linked Copy Trade portfolio ID (leadPortfolioId or futuresCopyTradePortfolioId),
+  // fetch live positions, order-history, and position-history directly from Binance and return them immediately
+  // (including when positions is empty after the whale closes a trade, so exits execute in the same moment!).
   if (profile.leadPortfolioId) {
-    const linked = await fetchCopyTraderFullData(profile.leadPortfolioId, null, tickers);
+    const linked = await fetchCopyTraderFullData(profile.leadPortfolioId, null, tickers, options);
     if (
+      !linked.isPartialOrRateLimited ||
       linked.positions.length > 0 ||
-      (!isWhaleActiveInPosition && linked.positionHistory.length > 0)
+      linked.latestRecords.length > 0 ||
+      linked.positionHistory.length > 0
     ) {
       return {
         profile,
@@ -1790,4 +1846,115 @@ export async function fetchSmartMoneyWhaleDetail(
     latestRecords,
   };
 }
+
+/**
+ * Memory Cleanup & Cache Telemetry Helpers for Copy Trader & Smart Money Caches
+ */
+export function getCopyTraderCacheStats(): {
+  rawCacheCount: number;
+  resultCacheCount: number;
+  inFlightCount: number;
+  totalEntries: number;
+  estimatedKb: number;
+} {
+  const rawCacheCount = rawCopyTraderCache.size;
+  const resultCacheCount = copyTraderResultCache.size;
+  const inFlightCount = copyTraderInFlight.size;
+  const totalEntries = rawCacheCount + resultCacheCount + inFlightCount;
+  // Each cached trader payload (detail + history + orders + positions) averages ~18 KB in RAM
+  const estimatedKb = Math.round(rawCacheCount * 12 + resultCacheCount * 8 + inFlightCount * 2);
+  return {
+    rawCacheCount,
+    resultCacheCount,
+    inFlightCount,
+    totalEntries,
+    estimatedKb,
+  };
+}
+
+export function cleanupCopyTraderCaches(options?: {
+  keepPortfolioIds?: string[];
+  maxAgeMs?: number;
+  maxEntries?: number;
+  forceClearAll?: boolean;
+}): number {
+  let evicted = 0;
+  const now = Date.now();
+  const forceAll = Boolean(options?.forceClearAll);
+  const maxAgeMs = options?.maxAgeMs ?? 45_000;
+  const maxEntries = options?.maxEntries ?? 10;
+  const keepSet = new Set<string>(options?.keepPortfolioIds || []);
+
+  // 1. Prune stale in-flight requests older than 8s (or all if forceAll)
+  for (const [id, entry] of copyTraderInFlight.entries()) {
+    if (forceAll || now - entry.startedAt > 8_000) {
+      copyTraderInFlight.delete(id);
+      evicted += 1;
+    }
+  }
+
+  if (forceAll) {
+    evicted +=
+      rawCopyTraderCache.size + copyTraderResultCache.size + smartMoneyProfileCache.size;
+    rawCopyTraderCache.clear();
+    copyTraderResultCache.clear();
+    smartMoneyProfileCache.clear();
+    return evicted;
+  }
+
+  for (const [id, entry] of smartMoneyProfileCache.entries()) {
+    if (now - entry.fetchedAt > maxAgeMs * 3 && !keepSet.has(id)) {
+      smartMoneyProfileCache.delete(id);
+      evicted += 1;
+    }
+  }
+
+  // 2. Evict expired or non-pinned entries from copyTraderResultCache
+  for (const [id, entry] of copyTraderResultCache.entries()) {
+    const age = now - entry.timestamp;
+    if (age > maxAgeMs && !keepSet.has(id)) {
+      copyTraderResultCache.delete(id);
+      evicted += 1;
+    }
+  }
+
+  // 3. Evict expired or non-pinned entries from rawCopyTraderCache
+  for (const [id, entry] of rawCopyTraderCache.entries()) {
+    const age = now - (entry.fetchedAt || 0);
+    if (age > maxAgeMs * 2 && !keepSet.has(id)) {
+      rawCopyTraderCache.delete(id);
+      evicted += 1;
+    }
+  }
+
+  // 4. Enforce hard cap on rawCopyTraderCache and copyTraderResultCache for low-memory devices
+  if (rawCopyTraderCache.size > maxEntries) {
+    const sorted = Array.from(rawCopyTraderCache.entries()).sort(
+      (a, b) => (a[1].fetchedAt || 0) - (b[1].fetchedAt || 0)
+    );
+    for (const [id] of sorted) {
+      if (rawCopyTraderCache.size <= maxEntries) break;
+      if (!keepSet.has(id)) {
+        rawCopyTraderCache.delete(id);
+        evicted += 1;
+      }
+    }
+  }
+
+  if (copyTraderResultCache.size > maxEntries) {
+    const sorted = Array.from(copyTraderResultCache.entries()).sort(
+      (a, b) => a[1].timestamp - b[1].timestamp
+    );
+    for (const [id] of sorted) {
+      if (copyTraderResultCache.size <= maxEntries) break;
+      if (!keepSet.has(id)) {
+        copyTraderResultCache.delete(id);
+        evicted += 1;
+      }
+    }
+  }
+
+  return evicted;
+}
+
 

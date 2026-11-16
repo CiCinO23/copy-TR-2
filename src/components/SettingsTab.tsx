@@ -28,6 +28,11 @@ import {
   validatePinChange,
 } from '../services/kucoinSecurityLock';
 import {
+  memoryCleanupService,
+  MemoryTelemetrySnapshot,
+} from '../services/memoryCleanup';
+import { formatDateTimeWestern } from '../utils/formatters';
+import {
   APP_MAJOR_VERSION,
   APP_VERSION,
   APP_PROMPT_REVISION,
@@ -74,6 +79,32 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [isStoppedByFullExit, setIsStoppedByFullExit] = useState<boolean>(() =>
     mobileNotifications.isAppStoppedByFullExit()
   );
+  const [memorySnapshot, setMemorySnapshot] = useState<MemoryTelemetrySnapshot>(() =>
+    memoryCleanupService.getSnapshot()
+  );
+
+  React.useEffect(() => {
+    setMemorySnapshot(memoryCleanupService.getSnapshot());
+    const unsub = memoryCleanupService.subscribe((snap) => {
+      setMemorySnapshot(snap);
+    });
+    const refreshId = setInterval(() => {
+      setMemorySnapshot(memoryCleanupService.getSnapshot());
+    }, 5000);
+    return () => {
+      unsub();
+      clearInterval(refreshId);
+    };
+  }, []);
+
+  const handleManualMemoryCleanup = () => {
+    const res = memoryCleanupService.performCleanup('MANUAL');
+    setMemorySnapshot(memoryCleanupService.getSnapshot());
+    setStatusFeedback(
+      `تم تنفيذ تنظيف الذاكرة بنجاح: تم تفريغ ${res.freedItemsCount} سجل مؤقت (${res.freedEstimatedKb} KB) مع الحفاظ الكامل على الصفقات المفتوحة والحسابات.`
+    );
+    setTimeout(() => setStatusFeedback(null), 5000);
+  };
 
   const handleUpdate = (partial: Partial<MobileNotificationSettings>, messageAr?: string) => {
     if (onUpdateNotificationSettings) {
@@ -535,6 +566,184 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               <span>تجربة إشعار شاشة القفل الآن</span>
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* 2.5. Memory Cleanup & Low-End Device Protection Card */}
+      <div
+        data-testid="settings_memory_cleanup_card"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4"
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-[#1E2733] pb-3">
+          <div className="flex items-center gap-2.5">
+            <div
+              className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
+                memorySnapshot.config.enabled
+                  ? 'bg-[#0D2B24] border-[#01BC8D]/40 text-[#01BC8D]'
+                  : 'bg-[#161D26] border-[#1E2733] text-[#8A99AD]'
+              }`}
+            >
+              <Cpu className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2 flex-wrap">
+                <span>تنظيف الذاكرة التلقائي (Memory Cleanup)</span>
+                <span
+                  className={`text-[11px] font-semibold ${
+                    memorySnapshot.config.enabled ? 'text-[#01BC8D]' : 'text-[#F6465D]'
+                  }`}
+                >
+                  · {memorySnapshot.config.enabled ? 'مفعّل لحماية الذاكرة' : 'متوقف'}
+                </span>
+              </h3>
+              <p className="text-xs text-[#8A99AD] mt-0.5">
+                مسح البيانات المخزنة مؤقتاً (Cache) دورياً وعند وصول استهلاك الذاكرة لحدود معينة لمنع الانهيارات في الأجهزة محدودة الإمكانيات
+              </p>
+            </div>
+          </div>
+
+          <input
+            type="checkbox"
+            data-testid="toggle_memory_cleanup_enabled"
+            checked={memorySnapshot.config.enabled}
+            onChange={(e) => {
+              memoryCleanupService.updateConfig({ enabled: e.target.checked });
+              setStatusFeedback(
+                e.target.checked
+                  ? 'تم تفعيل التنظيف الدوري التلقائي للذاكرة والكاش.'
+                  : 'تم إيقاف التنظيف التلقائي للذاكرة.'
+              );
+              setTimeout(() => setStatusFeedback(null), 4000);
+            }}
+            className="w-5 h-5 accent-[#01BC8D] cursor-pointer shrink-0 mt-1"
+          />
+        </div>
+
+        {/* Live Memory & Cache Footprint Telemetry Strip */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+          <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-2.5">
+            <span className="text-[10px] text-[#8A99AD] block">حجم الكاش المؤقت حالياً</span>
+            <span dir="ltr" className="text-sm font-bold font-mono text-white tabular-nums">
+              {memorySnapshot.totalEstimatedCacheKb} KB{' '}
+              <span className="text-[10px] text-[#8A99AD]">
+                / {memorySnapshot.effectiveMaxCacheKb} KB
+              </span>
+            </span>
+          </div>
+
+          <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-2.5">
+            <span className="text-[10px] text-[#8A99AD] block">نسبة امتلاء الكاش والذاكرة</span>
+            <span
+              dir="ltr"
+              className={`text-sm font-bold font-mono tabular-nums ${
+                memorySnapshot.utilizationPercent >= memorySnapshot.config.heapThresholdPercent
+                  ? 'text-[#F59E0B]'
+                  : 'text-[#01BC8D]'
+              }`}
+            >
+              {memorySnapshot.utilizationPercent}%{' '}
+              <span className="text-[10px] text-[#8A99AD]">
+                (الحد: {memorySnapshot.config.heapThresholdPercent}%)
+              </span>
+            </span>
+          </div>
+
+          <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-2.5">
+            <span className="text-[10px] text-[#8A99AD] block">السجلات المؤقتة في الذاكرة</span>
+            <span dir="ltr" className="text-sm font-bold font-mono text-white tabular-nums">
+              {memorySnapshot.totalCachedItems}{' '}
+              <span className="text-[10px] text-[#8A99AD]">سجل</span>
+            </span>
+          </div>
+
+          <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-2.5">
+            <span className="text-[10px] text-[#8A99AD] block">عمليات التنظيف المنفذة</span>
+            <span dir="ltr" className="text-sm font-bold font-mono text-[#01BC8D] tabular-nums">
+              {memorySnapshot.cleanupRunCount}{' '}
+              <span className="text-[10px] text-[#8A99AD]">
+                ({memorySnapshot.totalItemsFreed} مفرّغ)
+              </span>
+            </span>
+          </div>
+        </div>
+
+        {/* Threshold & Low-End Device Controls */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 space-y-2">
+            <label className="text-xs font-bold text-white block">
+              حد استهلاك الذاكرة لبدء المسح التلقائي (Threshold)
+            </label>
+            <select
+              data-testid="select_memory_threshold"
+              value={memorySnapshot.config.heapThresholdPercent}
+              onChange={(e) => {
+                const nextPct = Number(e.target.value) || 70;
+                memoryCleanupService.updateConfig({ heapThresholdPercent: nextPct });
+                setStatusFeedback(`تم ضبط حد التنظيف التلقائي للذاكرة عند ${nextPct}%.`);
+                setTimeout(() => setStatusFeedback(null), 3500);
+              }}
+              className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-xs text-white focus:outline-none"
+            >
+              <option value={60}>60% — تنظيف مبكر ومكثف (للأجهزة الضعيفة جداً)</option>
+              <option value={70}>70% — توازن مثالي للأداء والذاكرة (موصى به)</option>
+              <option value={80}>80% — تنظيف عند الاقتراب من امتلاء الذاكرة</option>
+            </select>
+          </div>
+
+          <label className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 flex items-start justify-between gap-2.5 cursor-pointer">
+            <div>
+              <div className="text-xs font-bold text-white">
+                وضع الأجهزة محدودة الموارد (Low-RAM Mode)
+              </div>
+              <div className="text-[11px] text-[#8A99AD] mt-0.5">
+                يقلل سقف الكاش الأقصى بنسبة 35% ويمسح بيانات المتداولين غير المنسوخين كل 25 ثانية
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              data-testid="toggle_low_end_device_mode"
+              checked={memorySnapshot.config.lowEndDeviceMode}
+              onChange={(e) => {
+                memoryCleanupService.updateConfig({ lowEndDeviceMode: e.target.checked });
+                setStatusFeedback(
+                  e.target.checked
+                    ? 'تم تفعيل وضع الأجهزة محدودة الموارد لتقليل استهلاك الذاكرة.'
+                    : 'تم إيقاف وضع الأجهزة محدودة الموارد.'
+                );
+                setTimeout(() => setStatusFeedback(null), 3500);
+              }}
+              className="w-4 h-4 accent-[#01BC8D] cursor-pointer shrink-0 mt-0.5"
+            />
+          </label>
+        </div>
+
+        {/* Manual Memory Cleanup Action Row */}
+        <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="text-[11px] text-[#8A99AD] space-y-0.5">
+            <div>
+              آخر عملية تنظيف:{' '}
+              <strong dir="ltr" className="text-white font-mono tabular-nums">
+                {memorySnapshot.lastCleanupAt
+                  ? formatDateTimeWestern(memorySnapshot.lastCleanupAt)
+                  : 'لم يتم بعد'}
+              </strong>
+            </div>
+            {memorySnapshot.lastCleanupReasonAr && (
+              <div className="text-[10px] text-[#01BC8D]">
+                {memorySnapshot.lastCleanupReasonAr}
+              </div>
+            )}
+          </div>
+
+          <button
+            type="button"
+            data-testid="trigger_memory_cleanup_btn"
+            onClick={handleManualMemoryCleanup}
+            className="bg-[#0D2B24] hover:bg-[#01BC8D] text-[#01BC8D] hover:text-[#0B0E11] border border-[#01BC8D]/50 font-bold px-3.5 py-2 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shrink-0"
+          >
+            <Cpu className="w-3.5 h-3.5" />
+            <span>مسح البيانات المؤقتة (Cache) وتفريغ الذاكرة الآن</span>
+          </button>
         </div>
       </div>
 

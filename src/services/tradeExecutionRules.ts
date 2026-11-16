@@ -520,6 +520,67 @@ export function calculatePositionQuantityDropPartialExitPct(params: {
 }
 
 /**
+ * Computes the scale-in percentage when a whale or trader increases their live open position quantity
+ * between polls (ignoring noise under 5%). Returns 0 if no genuine increase occurred.
+ */
+export function calculatePositionQuantityIncreaseScaleInPct(params: {
+  previousQty?: number;
+  currentQty?: number;
+}): number {
+  const prev = Number(params.previousQty || 0);
+  const curr = Number(params.currentQty || 0);
+  if (prev <= 0 || curr <= 0 || curr <= prev) {
+    return 0;
+  }
+  const increaseRatio = (curr - prev) / prev;
+  if (increaseRatio < 0.05) {
+    return 0;
+  }
+  return Math.min(300, Math.max(5, Math.round(increaseRatio * 100)));
+}
+
+/**
+ * Determines whether an incoming whale or trader position should be executed IMMEDIATELY
+ * in the exact same moment (في نفس اللحظة) at the live market price without waiting for manual confirmation:
+ * 1) Whale trades (`source === 'SMART_MONEY'`) always execute immediately unless `forcePromptOnWhale` is true.
+ * 2) Explicit immediate execution (`forceImmediateExecution === true`).
+ * 3) User disabled `promptOnUnfavorableLateEntry`.
+ * 4) Newly opened live trades (opened within the last 3 minutes or after `copiedStartedAt`).
+ */
+export function shouldExecuteWhaleOrLiveTradeImmediately(params: {
+  source: 'COPY_TRADING' | 'SMART_MONEY';
+  entryTime?: number;
+  copiedStartedAt?: number;
+  now?: number;
+  promptOnUnfavorableLateEntry?: boolean;
+  forceImmediateExecution?: boolean;
+  forcePromptOnWhale?: boolean;
+}): boolean {
+  if (params.forceImmediateExecution) {
+    return true;
+  }
+  if (params.promptOnUnfavorableLateEntry === false) {
+    return true;
+  }
+  if (params.source === 'SMART_MONEY' && !params.forcePromptOnWhale) {
+    return true;
+  }
+  const now = params.now && params.now > 0 ? params.now : Date.now();
+  const entryTs = Number(params.entryTime || 0);
+  if (entryTs > 0) {
+    // Any live trade opened within the last 3 minutes is a fresh signal, not an old reconnect trade
+    if (now - entryTs <= 180_000) {
+      return true;
+    }
+    // Any trade opened at or after the moment the user started copying this trader/whale
+    if (params.copiedStartedAt && params.copiedStartedAt > 0 && entryTs >= params.copiedStartedAt - 15_000) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Builds a deterministic, trader-scoped action ID for versioning and lastProcessedActionId checkpointing.
  */
 export function buildTraderActionId(params: {

@@ -54,6 +54,8 @@ declare global {
   interface Window {
     AndroidAppControl?: AndroidAppControlBridge;
     __copyTrNativeHeartbeat?: () => void;
+    __copyTrHandleBackPress?: () => boolean;
+    __copyTrSubViewBackHandler?: (() => boolean) | null;
   }
 }
 
@@ -98,6 +100,9 @@ class MobileNotificationService {
   private keepAliveAudioCtx: AudioContext | null = null;
   private keepAliveAudioElement: HTMLAudioElement | null = null;
   private isSilentAudioRunning: boolean = false;
+  private isMediaSessionConfigured: boolean = false;
+  private lastGestureCheckAt: number = 0;
+  private swRegistrationPromise: Promise<ServiceWorkerRegistration | undefined> | null = null;
   private isServiceWorkerActive: boolean = false;
   private hasAutoPromptedPermission: boolean = false;
   private isFullExitTriggered: boolean = false;
@@ -204,6 +209,13 @@ class MobileNotificationService {
 
     const handleUserGestureActivation = () => {
       if (this.isFullExitTriggered) return;
+      const now = Date.now();
+      // Throttle gesture activation checks to once every 15s to prevent flooding WebView / MediaSession IPC during scrolling & typing
+      if (now - this.lastGestureCheckAt < 15000 && this.isSilentAudioRunning && this.isWebLockHeld) {
+        return;
+      }
+      this.lastGestureCheckAt = now;
+
       const shouldKeepAlive = this.settings.appExitBehavior === 'KEEP_ALIVE_BACKGROUND';
       if (shouldKeepAlive) {
         this.applyWakeLock();
@@ -224,7 +236,6 @@ class MobileNotificationService {
     };
 
     window.addEventListener('pointerdown', handleUserGestureActivation, { passive: true });
-    window.addEventListener('touchstart', handleUserGestureActivation, { passive: true });
     window.addEventListener('keydown', handleUserGestureActivation, { passive: true });
 
     document.addEventListener('visibilitychange', () => {
@@ -236,7 +247,6 @@ class MobileNotificationService {
       if (shouldKeepAlive) {
         this.acquireWebLockKeepAlive();
         this.startSilentAudioKeepAlive();
-        this.syncBackgroundAndLockScreenMode();
       }
     });
 
@@ -368,8 +378,13 @@ class MobileNotificationService {
           .catch(() => {});
       }
 
-      // 3. Configure MediaSession so mobile OS recognizes active background session
-      if ('mediaSession' in navigator && typeof MediaMetadata !== 'undefined') {
+      // 3. Configure MediaSession ONCE so mobile OS recognizes active background session without IPC churn
+      if (
+        !this.isMediaSessionConfigured &&
+        'mediaSession' in navigator &&
+        typeof MediaMetadata !== 'undefined'
+      ) {
+        this.isMediaSessionConfigured = true;
         navigator.mediaSession.metadata = new MediaMetadata({
           title: 'Copy TR — متابعة الصفقات والنسخ نشطة',
           artist: 'العمل في الخلفية وإشعارات شاشة القفل مفعّلة',
@@ -393,6 +408,7 @@ class MobileNotificationService {
         this.keepAliveAudioCtx = null;
       }
       this.isSilentAudioRunning = false;
+      this.isMediaSessionConfigured = false;
     } catch {
       // ignore
     }
@@ -470,11 +486,18 @@ class MobileNotificationService {
       // ignore
     }
 
-    // 2. Register and configure Web Service Worker (/sw.js)
+    // 2. Register and configure Web Service Worker (/sw.js) using cached registration promise
     try {
       if ('serviceWorker' in navigator) {
-        const reg = await navigator.serviceWorker.register('/sw.js');
-        const targetWorker = reg.active || reg.waiting || reg.installing;
+        if (!this.swRegistrationPromise) {
+          this.swRegistrationPromise = navigator.serviceWorker
+            .register('/sw.js')
+            .catch(() => undefined);
+        }
+        const reg =
+          (await navigator.serviceWorker.getRegistration().catch(() => undefined)) ||
+          (await this.swRegistrationPromise);
+        const targetWorker = reg?.active || reg?.waiting || reg?.installing;
         if (targetWorker) {
           this.isServiceWorkerActive = true;
           targetWorker.postMessage({
@@ -689,15 +712,21 @@ class MobileNotificationService {
     try {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return;
-      const ctx =
-        this.keepAliveAudioCtx && this.keepAliveAudioCtx.state !== 'closed'
-          ? this.keepAliveAudioCtx
-          : new AudioCtx();
+      if (!this.keepAliveAudioCtx || this.keepAliveAudioCtx.state === 'closed') {
+        this.keepAliveAudioCtx = new AudioCtx();
+      }
+      const ctx = this.keepAliveAudioCtx;
       if (ctx.state === 'suspended') {
         ctx.resume().catch(() => {});
       }
 
-      const playTone = (freq: number, startOffset: number, duration: number, type: OscillatorType = 'sine', gainVal = 0.14) => {
+      const playTone = (
+        freq: number,
+        startOffset: number,
+        duration: number,
+        type: OscillatorType = 'sine',
+        gainVal = 0.14
+      ) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = type;
@@ -707,6 +736,14 @@ class MobileNotificationService {
         gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startOffset + duration);
         osc.connect(gain);
         gain.connect(ctx.destination);
+        osc.onended = () => {
+          try {
+            osc.disconnect();
+            gain.disconnect();
+          } catch {
+            // ignore
+          }
+        };
         osc.start(ctx.currentTime + startOffset);
         osc.stop(ctx.currentTime + startOffset + duration);
       };
@@ -1597,6 +1634,27 @@ class MobileNotificationService {
     this.sendTelegramPushNotification(notification);
     this.emitChange(notification);
     return notification;
+  }
+
+  /**
+   * Trims older read notifications to free memory when Memory Cleanup runs
+   */
+  public trimNotificationsCache(maxKeep: number = 35): number {
+    const safeCap = Math.max(10, maxKeep);
+    if (this.notifications.length <= safeCap) {
+      return 0;
+    }
+    const before = this.notifications.length;
+    const unread = this.notifications.filter((n) => !n.read);
+    const read = this.notifications.filter((n) => n.read);
+    const remainingSlots = Math.max(0, safeCap - unread.length);
+    this.notifications = [...unread.slice(0, safeCap), ...read.slice(0, remainingSlots)];
+    const removed = Math.max(0, before - this.notifications.length);
+    if (removed > 0) {
+      this.saveNotifications();
+      this.emitChange(null);
+    }
+    return removed;
   }
 }
 

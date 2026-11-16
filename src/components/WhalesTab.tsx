@@ -67,6 +67,8 @@ interface WhalesTabProps {
     positionHistory?: TraderPositionHistoryItem[];
     marginPerTradeUsdt: number;
     accountId?: string;
+    forceImmediateExecution?: boolean;
+    copiedStartedAt?: number;
   }) => CopiedSyncLog[];
   onCopySinglePosition: (
     pos: TraderOpenPosition,
@@ -154,6 +156,32 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
   const [syncLogs, setSyncLogs] = useState<CopiedSyncLog[]>([]);
   const [feedbackBanner, setFeedbackBanner] = useState<string | null>(null);
 
+  // Intercept Back button / swipe gesture when a copy modal or whale detail view is open
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (pendingCopyTarget || selectedWhaleId) {
+      window.__copyTrSubViewBackHandler = () => {
+        if (pendingCopyTarget) {
+          setPendingCopyTarget(null);
+          return true;
+        }
+        if (selectedWhaleId) {
+          setSelectedWhaleId(null);
+          setWhaleProfile(null);
+          return true;
+        }
+        return false;
+      };
+    } else {
+      window.__copyTrSubViewBackHandler = null;
+    }
+    return () => {
+      if (window.__copyTrSubViewBackHandler) {
+        window.__copyTrSubViewBackHandler = null;
+      }
+    };
+  }, [pendingCopyTarget, selectedWhaleId]);
+
   const saveCopiedWhales = (list: ActiveCopiedTrader[]) => {
     setCopiedWhales(list);
     try {
@@ -196,7 +224,8 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
       const fullData = await fetchSmartMoneyWhaleDetail(
         whale.topTraderId,
         whale,
-        connectionState.tickers
+        connectionState.tickers,
+        { forceRefresh: true }
       );
       setWhaleProfile(fullData.profile);
       setWhalePositions(fullData.positions);
@@ -206,6 +235,64 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
     },
     [connectionState.tickers]
   );
+
+  // Live real-time refresh while viewing a Whale detail (2.5s interval) so new trades/scale-ins/exits apply immediately
+  useEffect(() => {
+    if (!selectedWhaleId || !selectedSummary) return;
+    let isCancelled = false;
+
+    const timer = window.setInterval(async () => {
+      try {
+        const fullData = await fetchSmartMoneyWhaleDetail(
+          selectedWhaleId,
+          selectedSummary,
+          connectionState.tickers,
+          { forceRefresh: true }
+        );
+        if (isCancelled) return;
+        setWhaleProfile(fullData.profile);
+        setWhalePositions(fullData.positions);
+        setWhalePositionHistory(fullData.positionHistory);
+        setWhaleRecords(fullData.latestRecords);
+
+        // If this whale is actively copied in any virtual account, immediately apply any trade changes in the same moment
+        const matchingCopiedEntries = copiedWhales.filter(
+          (c) => c.traderId === selectedWhaleId
+        );
+        for (const entry of matchingCopiedEntries) {
+          const logs = onSyncTraderToEngine({
+            traderId: selectedWhaleId,
+            traderName: selectedSummary.traderName,
+            source: 'SMART_MONEY',
+            positions: fullData.positions,
+            latestRecords: fullData.latestRecords,
+            positionHistory: fullData.positionHistory,
+            marginPerTradeUsdt: entry.copyBudgetUsdt || marginPerTrade,
+            accountId: entry.accountId || 'acc_default',
+            forceImmediateExecution: true,
+            copiedStartedAt: entry.startedAt,
+          });
+          if (logs.length > 0) {
+            setSyncLogs((prev) => [...logs, ...prev].slice(0, 30));
+          }
+        }
+      } catch {
+        // ignore transient refresh failure
+      }
+    }, 2500);
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    selectedWhaleId,
+    selectedSummary,
+    connectionState.tickers,
+    copiedWhales,
+    marginPerTrade,
+    onSyncTraderToEngine,
+  ]);
 
   // Auto-select whale if requested from SimulationTab or elsewhere
   useEffect(() => {
@@ -238,15 +325,17 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
       const targetAcc = accounts.find((a) => a.id === targetAccountId);
       const targetAccName = targetAcc?.name || 'الحساب الافتراضي';
       const accMarginPerTrade = targetAcc?.settings.tradeValueUsdt || marginPerTrade;
+      const nowMs = Date.now();
 
       setFeedbackBanner(
-        `جاري جلب معلومات الصفقات من نافذتي Positions و Position للحوت ${whale.traderName} ونسخه إلى «${targetAccName}»...`
+        `جاري جلب وتطبيق صفقات الحوت ${whale.traderName} في نفس اللحظة على «${targetAccName}»...`
       );
 
       const fullData = await fetchSmartMoneyWhaleDetail(
         whale.topTraderId,
         whale,
-        connectionState.tickers
+        connectionState.tickers,
+        { forceRefresh: true }
       );
 
       if (selectedWhaleId === whale.topTraderId) {
@@ -284,7 +373,7 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
             source: 'SMART_MONEY',
             copyBudgetUsdt: accMarginPerTrade,
             leverageOverride: null,
-            startedAt: Date.now(),
+            startedAt: nowMs,
             syncedPositionsCount: fullData.positions.length,
             syncedRecordsCount: fullData.positionHistory.length,
             autoFollowRecords: true,
@@ -305,12 +394,14 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
         positionHistory: fullData.positionHistory,
         marginPerTradeUsdt: accMarginPerTrade,
         accountId: targetAccountId,
+        forceImmediateExecution: true,
+        copiedStartedAt: existsInAccount?.startedAt || nowMs,
       });
 
       setSyncLogs((prev) => [...logs, ...prev].slice(0, 30));
 
       setFeedbackBanner(
-        `تم تفعيل نسخ الحوت "${whale.traderName}" في حساب «${targetAccName}» بنجاح! تم جلب (${fullData.positions.length}) صفقات من نافذة Positions و (${fullData.positionHistory.length}) تفاصيل مراكز.`
+        `تم تفعيل نسخ الحوت "${whale.traderName}" في حساب «${targetAccName}» فوراً! تم تطبيق (${fullData.positions.length}) صفقات مفتوحة في نفس اللحظة بالسعر الحالي للسوق.`
       );
     },
     [

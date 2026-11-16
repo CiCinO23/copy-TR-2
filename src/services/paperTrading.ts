@@ -24,6 +24,8 @@ import {
   buildStableTraderEventKey,
   hasSyncEventBeenApplied,
   calculatePositionQuantityDropPartialExitPct,
+  calculatePositionQuantityIncreaseScaleInPct,
+  shouldExecuteWhaleOrLiveTradeImmediately,
   buildTraderActionId,
   isTraderActionAlreadyProcessed,
   isTraderTradePermanentlyClosed,
@@ -1571,6 +1573,8 @@ export class PaperEngine {
     accountId?: string;
     currentPrices?: Record<string, number>;
     checkReconnectAdvantage?: boolean;
+    forceImmediateExecution?: boolean;
+    copiedStartedAt?: number;
     syncVersion?: number;
     actionId?: string;
     isPartialOrRateLimited?: boolean;
@@ -1600,6 +1604,14 @@ export class PaperEngine {
     const shouldCheckAdvantage =
       params.checkReconnectAdvantage !== false &&
       acc.settings.promptOnUnfavorableLateEntry !== false;
+
+    const storedCopied = this.loadStoredCopiedTraders();
+    const matchedCopiedEntry = storedCopied.find(
+      (ct) =>
+        (ct.accountId || 'acc_default') === acc.id &&
+        (ct.traderId === params.traderId || ct.nickname === params.traderName)
+    );
+    const effectiveCopiedStartedAt = params.copiedStartedAt || matchedCopiedEntry?.startedAt || 0;
 
     const userMarginUsdt =
       acc.settings.enforceUserSizeOnCopy
@@ -2100,12 +2112,103 @@ export class PaperEngine {
                   console.warn('Auto partial exit from position adjustments skipped:', e);
                 }
               }
+            } else if (adj.actionType === 'SCALE_IN' && !scaleInAppliedThisTick.has(userOpenPos.id)) {
+              const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
+                recordTimestamp: adj.timestamp,
+                userPositionOpenTime: userOpenPos.openTime,
+              });
+              const addPct = Math.max(5, Math.abs(adj.volumePercent || 30));
+              const adjKey = buildStableTraderEventKey({
+                kind: 'ADJ',
+                symbol: stillOpenByTrader.symbol,
+                actionType: 'SCALE_IN',
+                timestamp: adj.timestamp,
+                volumePercent: addPct,
+                quantity: adj.executedQty,
+                rawId: adj.id,
+              });
+              const traderActionId = buildTraderActionId({
+                traderId: params.traderId,
+                symbol: stillOpenByTrader.symbol,
+                actionType: 'SCALE_IN',
+                rawId: adj.id,
+                timestamp: adj.timestamp,
+                volumePercent: addPct,
+                quantity: adj.executedQty,
+              });
+              const candidateKeys = [traderActionId, adjKey, adj.id, `adj:${adj.id}`];
+              const alreadyApplied =
+                hasSyncEventBeenApplied({
+                  appliedSyncEventIds: userOpenPos.appliedSyncEventIds,
+                  scaleAdjustments: userOpenPos.scaleAdjustments,
+                  candidateKeys,
+                  actionType: 'SCALE_IN',
+                  eventTimestamp: adj.timestamp,
+                }) ||
+                isTraderActionAlreadyProcessed({
+                  checkpoint,
+                  candidateActionIds: candidateKeys,
+                  symbol: stillOpenByTrader.symbol,
+                  actionType: 'SCALE_IN',
+                  eventTimestamp: adj.timestamp,
+                });
+
+              if (isAfterOurEntry && !alreadyApplied) {
+                try {
+                  const updated = this.scaleInFromTraderSignal(
+                    userOpenPos.id,
+                    addPct,
+                    liveExecPrice,
+                    adj.timestamp,
+                    acc.id,
+                    {
+                      sourceEventId: adjKey,
+                      appliedEventKeys: candidateKeys,
+                      eventKey: `${acc.id}_${userOpenPos.id}_${adjKey}`,
+                    }
+                  );
+                  scaleInAppliedThisTick.add(userOpenPos.id);
+                  this.recordTraderSyncAction(checkpoint, {
+                    actionId: traderActionId,
+                    candidateKeys,
+                    symbol: stillOpenByTrader.symbol,
+                    actionType: 'SCALE_IN',
+                    timestamp: adj.timestamp,
+                    explicitVersion: params.syncVersion,
+                  });
+                  updated.lastSyncedTraderQty = stillOpenByTrader.positionAmount;
+                  updated.lastSyncedTraderUpdateTime =
+                    stillOpenByTrader.lastUpdateTime || adj.timestamp;
+                  this.saveState();
+                  const lastAdj = updated.scaleAdjustments?.[updated.scaleAdjustments.length - 1];
+                  logs.push({
+                    id: `log_auto_scale_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                    timestamp: adj.timestamp || Date.now(),
+                    traderId: params.traderId,
+                    traderName: params.traderName,
+                    source: params.source,
+                    action: 'SCALE_IN',
+                    volumePercent: lastAdj?.volumePercent || addPct,
+                    symbol: updated.symbol,
+                    side: updated.side,
+                    price: liveExecPrice,
+                    quantity: updated.quantity,
+                    leverage: updated.leverage,
+                    accountId: acc.id,
+                    accountName: acc.name,
+                    messageAr: `[${acc.name}] تدعيم فوري آلي (+${addPct}%) على ${updated.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT تزامناً مع الحوت/المتداول`,
+                  });
+                } catch (e) {
+                  console.warn('Auto scale-in from position adjustments skipped:', e);
+                }
+              }
             }
           }
         }
 
-        // Live Delta Detection: If the trader genuinely reduced their live `positionAmount` (>= 5%)
-        // since the last poll (e.g. order-history didn't reflect it yet), execute partial exit ONCE and update baseline qty!
+        // Live Delta Detection:
+        // 1) If the trader/whale genuinely reduced their live `positionAmount` (>= 5%) since last poll -> execute PARTIAL_EXIT ONCE
+        // 2) If the trader/whale genuinely increased their live `positionAmount` (>= 5%) since last poll -> execute SCALE_IN ONCE
         if (
           !partialExitAppliedThisTick.has(userOpenPos.id) &&
           userOpenPos.lastSyncedTraderQty &&
@@ -2199,7 +2302,102 @@ export class PaperEngine {
           }
         }
 
-        // Keep baseline trader qty synchronized when trader increases/maintains position
+        if (
+          !scaleInAppliedThisTick.has(userOpenPos.id) &&
+          !partialExitAppliedThisTick.has(userOpenPos.id) &&
+          userOpenPos.lastSyncedTraderQty &&
+          stillOpenByTrader.positionAmount > 0
+        ) {
+          const addPct = calculatePositionQuantityIncreaseScaleInPct({
+            previousQty: userOpenPos.lastSyncedTraderQty,
+            currentQty: stillOpenByTrader.positionAmount,
+          });
+          if (addPct >= 5) {
+            const eventTs = stillOpenByTrader.lastUpdateTime || Date.now();
+            const qtyScaleKey = buildStableTraderEventKey({
+              kind: 'QTY_SCALE',
+              symbol: stillOpenByTrader.symbol,
+              actionType: 'SCALE_IN',
+              timestamp: eventTs,
+              volumePercent: addPct,
+              quantity: stillOpenByTrader.positionAmount,
+            });
+            const traderActionId = buildTraderActionId({
+              traderId: params.traderId,
+              symbol: stillOpenByTrader.symbol,
+              actionType: 'SCALE_IN',
+              timestamp: eventTs,
+              volumePercent: addPct,
+              quantity: stillOpenByTrader.positionAmount,
+            });
+            const candidateKeys = [traderActionId, qtyScaleKey];
+            const alreadyApplied =
+              hasSyncEventBeenApplied({
+                appliedSyncEventIds: userOpenPos.appliedSyncEventIds,
+                scaleAdjustments: userOpenPos.scaleAdjustments,
+                candidateKeys,
+                actionType: 'SCALE_IN',
+                eventTimestamp: stillOpenByTrader.lastUpdateTime,
+              }) ||
+              isTraderActionAlreadyProcessed({
+                checkpoint,
+                candidateActionIds: candidateKeys,
+                symbol: stillOpenByTrader.symbol,
+                actionType: 'SCALE_IN',
+                eventTimestamp: stillOpenByTrader.lastUpdateTime,
+              });
+            if (!alreadyApplied) {
+              try {
+                const updated = this.scaleInFromTraderSignal(
+                  userOpenPos.id,
+                  addPct,
+                  liveExecPrice,
+                  eventTs,
+                  acc.id,
+                  {
+                    sourceEventId: qtyScaleKey,
+                    appliedEventKeys: candidateKeys,
+                    eventKey: `${acc.id}_${userOpenPos.id}_${qtyScaleKey}`,
+                  }
+                );
+                scaleInAppliedThisTick.add(userOpenPos.id);
+                this.recordTraderSyncAction(checkpoint, {
+                  actionId: traderActionId,
+                  candidateKeys,
+                  symbol: stillOpenByTrader.symbol,
+                  actionType: 'SCALE_IN',
+                  timestamp: eventTs,
+                  explicitVersion: params.syncVersion,
+                });
+                updated.lastSyncedTraderQty = stillOpenByTrader.positionAmount;
+                updated.lastSyncedTraderUpdateTime = eventTs;
+                this.saveState();
+                const lastAdj = updated.scaleAdjustments?.[updated.scaleAdjustments.length - 1];
+                logs.push({
+                  id: `log_qty_scale_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                  timestamp: Date.now(),
+                  traderId: params.traderId,
+                  traderName: params.traderName,
+                  source: params.source,
+                  action: 'SCALE_IN',
+                  volumePercent: lastAdj?.volumePercent || addPct,
+                  symbol: updated.symbol,
+                  side: updated.side,
+                  price: liveExecPrice,
+                  quantity: updated.quantity,
+                  leverage: updated.leverage,
+                  accountId: acc.id,
+                  accountName: acc.name,
+                  messageAr: `[${acc.name}] تدعيم فوري (+${addPct}%) على ${updated.symbol} بالسعر الحالي ${liveExecPrice.toFixed(2)} USDT تزامناً مع زيادة الحوت/المتداول لحجم مركزه`,
+                });
+              } catch (e) {
+                console.warn('Live qty increase scale-in skipped:', e);
+              }
+            }
+          }
+        }
+
+        // Keep baseline trader qty synchronized when trader maintains position within < 5% noise
         if (
           !scaleInAppliedThisTick.has(userOpenPos.id) &&
           !partialExitAppliedThisTick.has(userOpenPos.id) &&
@@ -2215,11 +2413,14 @@ export class PaperEngine {
     }
 
     // Remove any pending choices for this trader in this account that are no longer open in `params.positions`,
-    // are already open in `acc.positions`, or when the user disabled the prompt option
+    // are already open in `acc.positions`, belong to `SMART_MONEY` whales (which execute immediately),
+    // or when the user disabled the prompt option
     this.pendingReconnectChoices = this.pendingReconnectChoices.filter((c) => {
       if ((c.accountId || 'acc_default') !== acc.id) return true;
       if (c.traderId !== params.traderId && c.traderName !== params.traderName) return true;
-      if (!shouldCheckAdvantage) return false;
+      if (params.source === 'SMART_MONEY' || params.forceImmediateExecution || !shouldCheckAdvantage) {
+        return false;
+      }
       const stillOpenInTrader = params.positions.some(
         (tp) => tp.symbol.toUpperCase() === c.symbol.toUpperCase() && tp.side === c.side
       );
@@ -2299,17 +2500,26 @@ export class PaperEngine {
       );
       const traderEntryPrice = pos.entryPrice > 0 ? pos.entryPrice : liveMarketPrice;
 
-      // Check if this is a previous trade where we should compare current price vs trader entry price
+      // Whale trades (SMART_MONEY), explicit copy actions, and newly opened live trades (< 3m or after copiedStartedAt)
+      // execute IMMEDIATELY in the exact same moment without waiting for manual confirmation
+      const executeImmediately = shouldExecuteWhaleOrLiveTradeImmediately({
+        source: params.source,
+        entryTime: pos.entryTime,
+        copiedStartedAt: effectiveCopiedStartedAt,
+        promptOnUnfavorableLateEntry: shouldCheckAdvantage,
+        forceImmediateExecution: params.forceImmediateExecution,
+      });
+
       const evalResult = evaluatePreviousTradePriceAdvantage({
         side: pos.side,
         traderEntryPrice,
         currentMarketPrice: liveMarketPrice,
-        promptOnUnfavorableLateEntry: shouldCheckAdvantage,
+        promptOnUnfavorableLateEntry: !executeImmediately,
       });
 
       const choiceId = `choice_${acc.id}_${params.traderId}_${pos.symbol.toUpperCase()}_${pos.side}`;
 
-      if (shouldCheckAdvantage && evalResult.decision === 'PROMPT_USER_CHOICE') {
+      if (!executeImmediately && evalResult.decision === 'PROMPT_USER_CHOICE') {
         if (!this.dismissedReconnectChoiceIds.has(choiceId)) {
           const existingChoice = this.pendingReconnectChoices.find((c) => c.id === choiceId);
           const choiceObj: PendingReconnectTradeChoice = {
@@ -2348,7 +2558,7 @@ export class PaperEngine {
         continue;
       }
 
-      // Price is in the user's favor OR user disabled late-entry confirmation -> Execute immediately at the CURRENT LIVE MARKET PRICE!
+      // Price is in the user's favor OR whale/live trade executes immediately -> Execute at the CURRENT LIVE MARKET PRICE!
       this.pendingReconnectChoices = this.pendingReconnectChoices.filter((c) => c.id !== choiceId);
       this.savePendingChoices();
 
@@ -2508,6 +2718,99 @@ export class PaperEngine {
       settings: { ...acc.settings },
       pendingReconnectChoices: activeAccountPendingChoices,
     };
+  }
+
+  /**
+   * Returns current historical memory cache stats for PaperEngine
+   */
+  public getMemoryCacheStats(): {
+    closedPositionsCount: number;
+    checkpointEntriesCount: number;
+    dismissedChoicesCount: number;
+    estimatedKb: number;
+  } {
+    let closedPositionsCount = 0;
+    for (const acc of this.accounts) {
+      for (const p of acc.positions) {
+        if (p.status === 'CLOSED') closedPositionsCount += 1;
+      }
+    }
+    let checkpointEntriesCount = 0;
+    for (const cp of Object.values(this.traderSyncCheckpoints)) {
+      checkpointEntriesCount +=
+        (cp.processedActionIds?.length || 0) + Object.keys(cp.lastActionsBySymbol || {}).length;
+    }
+    const dismissedChoicesCount = this.dismissedReconnectChoiceIds.size;
+    const estimatedKb = Math.round(
+      closedPositionsCount * 0.9 + checkpointEntriesCount * 0.12 + dismissedChoicesCount * 0.08
+    );
+    return {
+      closedPositionsCount,
+      checkpointEntriesCount,
+      dismissedChoicesCount,
+      estimatedKb,
+    };
+  }
+
+  /**
+   * Trims excess historical closed positions and old sync checkpoint IDs to free memory
+   * on low-end devices without touching OPEN positions or virtual account balances.
+   */
+  public trimHistoricalMemoryCache(options?: {
+    maxClosedPerAccount?: number;
+    maxCheckpointItems?: number;
+    maxDismissedChoices?: number;
+  }): number {
+    const maxClosed = Math.max(10, options?.maxClosedPerAccount ?? 50);
+    const maxCpItems = Math.max(30, options?.maxCheckpointItems ?? 120);
+    const maxDismissed = Math.max(20, options?.maxDismissedChoices ?? 100);
+    let trimmedCount = 0;
+
+    let accountsChanged = false;
+    for (const acc of this.accounts) {
+      const openPos = acc.positions.filter((p) => p.status === 'OPEN');
+      const closedPos = acc.positions.filter((p) => p.status === 'CLOSED');
+      if (closedPos.length > maxClosed) {
+        closedPos.sort((a, b) => (b.closeTime || b.openTime) - (a.closeTime || a.openTime));
+        const keptClosed = closedPos.slice(0, maxClosed);
+        trimmedCount += closedPos.length - keptClosed.length;
+        acc.positions = [...openPos, ...keptClosed];
+        accountsChanged = true;
+      }
+      // Also trim excess appliedSyncEventIds on open positions beyond 60
+      for (const p of openPos) {
+        if (p.appliedSyncEventIds && p.appliedSyncEventIds.length > 60) {
+          trimmedCount += p.appliedSyncEventIds.length - 60;
+          p.appliedSyncEventIds = p.appliedSyncEventIds.slice(-60);
+          accountsChanged = true;
+        }
+      }
+    }
+    if (accountsChanged) {
+      this.saveState();
+    }
+
+    let checkpointsChanged = false;
+    for (const cp of Object.values(this.traderSyncCheckpoints)) {
+      if (cp.processedActionIds && cp.processedActionIds.length > maxCpItems) {
+        trimmedCount += cp.processedActionIds.length - maxCpItems;
+        cp.processedActionIds = cp.processedActionIds.slice(-maxCpItems);
+        checkpointsChanged = true;
+      }
+    }
+    if (checkpointsChanged) {
+      this.saveTraderSyncCheckpoints();
+    }
+
+    if (this.dismissedReconnectChoiceIds.size > maxDismissed) {
+      const arr = Array.from(this.dismissedReconnectChoiceIds);
+      const excess = arr.length - maxDismissed;
+      trimmedCount += excess;
+      this.dismissedReconnectChoiceIds = new Set(arr.slice(-maxDismissed));
+      this.savePendingChoices();
+    }
+
+    return trimmedCount;
   }
 }
 

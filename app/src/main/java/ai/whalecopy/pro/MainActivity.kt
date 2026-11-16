@@ -29,6 +29,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.URLUtil
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -85,6 +86,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 private val Ink = Color(0xFF0B0E11)
@@ -105,6 +107,13 @@ object WebViewHolder {
     @SuppressLint("StaticFieldLeak")
     @Volatile
     var activeWebView: KeepAliveWebView? = null
+
+    @SuppressLint("StaticFieldLeak")
+    @Volatile
+    var currentActivity: Activity? = null
+
+    @Volatile
+    var isActivityInForeground: Boolean = false
 }
 
 class KeepAliveWebView(context: Context) : WebView(context) {
@@ -158,18 +167,21 @@ class WhaleBackgroundService : Service() {
             if (!AppPreferencesHelper.isKeepAliveEnabled(applicationContext)) return
             try {
                 acquireWakeLock()
-                WebViewHolder.activeWebView?.let { wv ->
-                    wv.resumeTimers()
-                    wv.onResume()
-                    wv.evaluateJavascript(
-                        "window.__copyTrNativeHeartbeat && window.__copyTrNativeHeartbeat();",
-                        null
-                    )
+                // Only pulse WebView timers from the service when Activity is in background / screen locked
+                // so foreground user interaction and scrolling are never interrupted
+                if (!WebViewHolder.isActivityInForeground) {
+                    WebViewHolder.activeWebView?.let { wv ->
+                        wv.resumeTimers()
+                        wv.evaluateJavascript(
+                            "window.__copyTrNativeHeartbeat && window.__copyTrNativeHeartbeat();",
+                            null
+                        )
+                    }
                 }
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
                 // ignore
             }
-            mainHandler.postDelayed(this, 4000L)
+            mainHandler.postDelayed(this, 4500L)
         }
     }
 
@@ -216,6 +228,26 @@ class WhaleBackgroundService : Service() {
             stopHeartbeatLoop()
             releaseWakeLock()
             stopSelf()
+        }
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            LocalWebProxyServer.clearStaticAssetCache()
+            mainHandler.post {
+                try {
+                    WebViewHolder.activeWebView?.let { wv ->
+                        wv.clearCache(false)
+                        wv.evaluateJavascript(
+                            "window.__copyTrPerformMemoryCleanup && window.__copyTrPerformMemoryCleanup('OS_LOW_MEMORY');",
+                            null
+                        )
+                    }
+                    System.gc()
+                } catch (_: Throwable) {
+                }
+            }
         }
     }
 
@@ -292,7 +324,7 @@ class WhaleBackgroundService : Service() {
 
         return NotificationCompat.Builder(this, BG_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
-            .setContentTitle("Copy TR يعمل في الخلفية (v2.11)")
+            .setContentTitle("Copy TR يعمل في الخلفية (v2.15)")
             .setContentText("مراقبة الصفقات المنسوخة وإشعارات شاشة القفل نشطة بلا توقف")
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -475,6 +507,18 @@ class AndroidAppControl(private val activity: Activity) {
     }
 
     @JavascriptInterface
+    fun performNativeMemoryCleanup() {
+        LocalWebProxyServer.clearStaticAssetCache()
+        mainHandler.post {
+            try {
+                WebViewHolder.activeWebView?.clearCache(false)
+                System.gc()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    @JavascriptInterface
     fun exitAppCompletely() {
         AppPreferencesHelper.saveBackgroundConfig(
             activity.applicationContext,
@@ -498,6 +542,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
+        WebViewHolder.currentActivity = this
+        installBackgroundCrashGuard()
+
         WhaleBackgroundService.ensureChannels(applicationContext)
         requestNotificationPermissionIfNeeded()
 
@@ -512,8 +559,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun installBackgroundCrashGuard() {
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            // Prevent non-main-thread exceptions (proxy sockets, JavaBridge, etc.) from force-closing the app
+            if (thread.id != Looper.getMainLooper().thread.id) {
+                return@setDefaultUncaughtExceptionHandler
+            }
+            previousHandler?.uncaughtException(thread, throwable)
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        WebViewHolder.currentActivity = this
+        WebViewHolder.isActivityInForeground = true
         WebViewHolder.activeWebView?.let { wv ->
             wv.resumeTimers()
             wv.onResume()
@@ -525,16 +585,38 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        WebViewHolder.isActivityInForeground = false
         super.onPause()
         if (AppPreferencesHelper.isKeepAliveEnabled(applicationContext)) {
             WebViewHolder.activeWebView?.let { wv ->
                 wv.resumeTimers()
-                wv.onResume()
+            }
+        }
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            LocalWebProxyServer.clearStaticAssetCache()
+            try {
+                WebViewHolder.activeWebView?.let { wv ->
+                    wv.clearCache(false)
+                    wv.evaluateJavascript(
+                        "window.__copyTrPerformMemoryCleanup && window.__copyTrPerformMemoryCleanup('OS_LOW_MEMORY');",
+                        null
+                    )
+                }
+                System.gc()
+            } catch (_: Throwable) {
             }
         }
     }
 
     override fun onDestroy() {
+        if (WebViewHolder.currentActivity === this) {
+            WebViewHolder.currentActivity = null
+        }
+        WebViewHolder.isActivityInForeground = false
         if (!AppPreferencesHelper.isKeepAliveEnabled(applicationContext)) {
             WhaleBackgroundService.updateServiceState(applicationContext, false)
         }
@@ -616,7 +698,14 @@ class AndroidFileDownloader(private val context: Context) {
 object LocalWebProxyServer {
     @Volatile
     private var serverSocket: ServerSocket? = null
-    private val executor = Executors.newCachedThreadPool()
+    // Bounded thread pools prevent OutOfMemoryError (pthread_create failed) during rapid real-time polling
+    private val acceptExecutor = Executors.newSingleThreadExecutor()
+    private val clientExecutor = Executors.newFixedThreadPool(16)
+    private val staticAssetCache = ConcurrentHashMap<String, Pair<ByteArray, String>>()
+
+    fun clearStaticAssetCache() {
+        staticAssetCache.clear()
+    }
 
     @Synchronized
     fun ensureStarted(context: Context): Int {
@@ -633,15 +722,22 @@ object LocalWebProxyServer {
         }
         serverSocket = socket
 
-        executor.execute {
+        acceptExecutor.execute {
             while (!socket.isClosed) {
                 try {
                     val client = socket.accept()
-                    executor.execute {
-                        handleClient(appContext, client)
+                    clientExecutor.execute {
+                        try {
+                            handleClient(appContext, client)
+                        } catch (_: Throwable) {
+                            try {
+                                client.close()
+                            } catch (_: Throwable) {
+                            }
+                        }
                     }
-                } catch (_: Exception) {
-                    break
+                } catch (_: Throwable) {
+                    if (socket.isClosed) break
                 }
             }
         }
@@ -807,15 +903,18 @@ object LocalWebProxyServer {
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val respBytes = stream?.use { it.readBytes() } ?: ByteArray(0)
             writeResponse(output, code, "OK", contentType, respBytes)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             val errJson = """{"error":"${(e.localizedMessage ?: "Proxy error").replace("\"", "'")}"}"""
-            writeResponse(
-                output,
-                502,
-                "Bad Gateway",
-                "application/json; charset=utf-8",
-                errJson.toByteArray(Charsets.UTF_8)
-            )
+            try {
+                writeResponse(
+                    output,
+                    502,
+                    "Bad Gateway",
+                    "application/json; charset=utf-8",
+                    errJson.toByteArray(Charsets.UTF_8)
+                )
+            } catch (_: Throwable) {
+            }
         } finally {
             conn?.disconnect()
         }
@@ -837,10 +936,15 @@ object LocalWebProxyServer {
     }
 
     private fun tryOpenAsset(context: Context, path: String): Pair<ByteArray, String>? {
+        staticAssetCache[path]?.let { return it }
         return try {
             val bytes = context.assets.open(path).use { it.readBytes() }
-            bytes to guessMimeType(path)
-        } catch (_: Exception) {
+            val pair = bytes to guessMimeType(path)
+            if (bytes.size <= 2 * 1024 * 1024) {
+                staticAssetCache[path] = pair
+            }
+            pair
+        } catch (_: Throwable) {
             null
         }
     }
@@ -891,6 +995,7 @@ object LocalWebProxyServer {
 fun WhaleApp(activity: Activity) {
     val context = LocalContext.current
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
+    var webViewRecoveryKey by remember { mutableStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
     var hasError by remember { mutableStateOf(false) }
 
@@ -905,19 +1010,24 @@ fun WhaleApp(activity: Activity) {
 
     BackHandler(enabled = true) {
         val wv = webViewInstance
-        if (wv != null && wv.canGoBack()) {
-            wv.goBack()
-        } else {
-            if (AppPreferencesHelper.isKeepAliveEnabled(context)) {
-                activity.moveTaskToBack(true)
-            } else {
-                WhaleBackgroundService.updateServiceState(context, false)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    activity.finishAndRemoveTask()
+        if (wv != null) {
+            // Ask React SPA first to close open modals, trader/whale details, or navigate back to Dashboard
+            // and require double-press confirmation before minimizing
+            wv.evaluateJavascript(
+                "(function(){ try { return window.__copyTrHandleBackPress ? Boolean(window.__copyTrHandleBackPress()) : false; } catch(e){ return false; } })()"
+            ) { result ->
+                if (result == "true") {
+                    return@evaluateJavascript
+                }
+                if (wv.canGoBack()) {
+                    wv.goBack()
                 } else {
-                    activity.finishAffinity()
+                    // Never kill the task on Back press; move gracefully to background
+                    activity.moveTaskToBack(true)
                 }
             }
+        } else {
+            activity.moveTaskToBack(true)
         }
     }
 
@@ -936,106 +1046,125 @@ fun WhaleApp(activity: Activity) {
             .background(Ink)
             .windowInsetsPadding(WindowInsets.safeDrawing)
     ) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                val existing = WebViewHolder.activeWebView
-                if (existing != null) {
-                    (existing.parent as? ViewGroup)?.removeView(existing)
-                    existing.resumeTimers()
-                    existing.onResume()
-                    isLoading = false
-                    webViewInstance = existing
-                    existing
-                } else {
-                    KeepAliveWebView(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                        setBackgroundColor(0xFF0B0E11.toInt())
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.databaseEnabled = true
-                        settings.allowFileAccess = true
-                        settings.useWideViewPort = true
-                        settings.loadWithOverviewMode = true
-                        settings.setSupportZoom(false)
-                        settings.mediaPlaybackRequiresUserGesture = false
-                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                        settings.cacheMode = WebSettings.LOAD_DEFAULT
+        androidx.compose.runtime.key(webViewRecoveryKey) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    val existing = WebViewHolder.activeWebView
+                    if (existing != null) {
+                        (existing.parent as? ViewGroup)?.removeView(existing)
+                        existing.resumeTimers()
+                        existing.onResume()
+                        isLoading = false
+                        webViewInstance = existing
+                        existing
+                    } else {
+                        KeepAliveWebView(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            setBackgroundColor(0xFF0B0E11.toInt())
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.databaseEnabled = true
+                            settings.allowFileAccess = true
+                            settings.useWideViewPort = true
+                            settings.loadWithOverviewMode = true
+                            settings.setSupportZoom(false)
+                            settings.mediaPlaybackRequiresUserGesture = false
+                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                            settings.cacheMode = WebSettings.LOAD_DEFAULT
 
-                        addJavascriptInterface(AndroidFileDownloader(ctx), "AndroidDownloader")
-                        addJavascriptInterface(AndroidAppControl(activity), "AndroidAppControl")
+                            addJavascriptInterface(AndroidFileDownloader(ctx), "AndroidDownloader")
+                            addJavascriptInterface(AndroidAppControl(activity), "AndroidAppControl")
 
-                        CookieManager.getInstance().setAcceptCookie(true)
-                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            CookieManager.getInstance().setAcceptCookie(true)
+                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
-                        webChromeClient = object : WebChromeClient() {
-                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                if (newProgress >= 90) {
-                                    isLoading = false
-                                }
-                            }
-                        }
-
-                        webViewClient = object : WebViewClient() {
-                            override fun onPageFinished(view: WebView?, url: String?) {
-                                isLoading = false
-                                hasError = false
-                            }
-
-                            @Deprecated("Deprecated in Java")
-                            override fun onReceivedError(
-                                view: WebView?,
-                                errorCode: Int,
-                                description: String?,
-                                failingUrl: String?
-                            ) {
-                                if (failingUrl == startUrl) {
-                                    isLoading = false
-                                    hasError = true
-                                }
-                            }
-                        }
-
-                        setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
-                            if (url.startsWith("blob:") || url.startsWith("data:")) {
-                                return@setDownloadListener
-                            }
-                            try {
-                                val request = DownloadManager.Request(Uri.parse(url)).apply {
-                                    setMimeType(mimetype)
-                                    val cookies = CookieManager.getInstance().getCookie(url)
-                                    if (!cookies.isNullOrEmpty()) {
-                                        addRequestHeader("cookie", cookies)
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                    if (newProgress >= 90) {
+                                        isLoading = false
                                     }
-                                    addRequestHeader("User-Agent", userAgent)
-                                    setDescription("جاري تنزيل الملف...")
-                                    val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-                                    setTitle(fileName)
-                                    setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                    setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-                                }
-                                val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-                                dm.enqueue(request)
-                                Toast.makeText(ctx, "بدأ تنزيل الملف...", Toast.LENGTH_SHORT).show()
-                            } catch (_: Exception) {
-                                try {
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                                    ctx.startActivity(intent)
-                                } catch (_: Exception) {
                                 }
                             }
-                        }
 
-                        loadUrl(startUrl)
-                        WebViewHolder.activeWebView = this
-                        webViewInstance = this
+                            webViewClient = object : WebViewClient() {
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    isLoading = false
+                                    hasError = false
+                                }
+
+                                @Deprecated("Deprecated in Java")
+                                override fun onReceivedError(
+                                    view: WebView?,
+                                    errorCode: Int,
+                                    description: String?,
+                                    failingUrl: String?
+                                ) {
+                                    if (failingUrl == startUrl) {
+                                        isLoading = false
+                                        hasError = true
+                                    }
+                                }
+
+                                override fun onRenderProcessGone(
+                                    view: WebView?,
+                                    detail: RenderProcessGoneDetail?
+                                ): Boolean {
+                                    // Return true so Android NEVER kills the app if Chromium WebView renderer restarts;
+                                    // instead, smoothly recreate the WebView in-place.
+                                    try {
+                                        (view?.parent as? ViewGroup)?.removeView(view)
+                                        view?.destroy()
+                                    } catch (_: Throwable) {
+                                    }
+                                    WebViewHolder.activeWebView = null
+                                    webViewInstance = null
+                                    webViewRecoveryKey += 1
+                                    return true
+                                }
+                            }
+
+                            setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
+                                if (url.startsWith("blob:") || url.startsWith("data:")) {
+                                    return@setDownloadListener
+                                }
+                                try {
+                                    val request = DownloadManager.Request(Uri.parse(url)).apply {
+                                        setMimeType(mimetype)
+                                        val cookies = CookieManager.getInstance().getCookie(url)
+                                        if (!cookies.isNullOrEmpty()) {
+                                            addRequestHeader("cookie", cookies)
+                                        }
+                                        addRequestHeader("User-Agent", userAgent)
+                                        setDescription("جاري تنزيل الملف...")
+                                        val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                                        setTitle(fileName)
+                                        setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                        setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                                    }
+                                    val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                                    dm.enqueue(request)
+                                    Toast.makeText(ctx, "بدأ تنزيل الملف...", Toast.LENGTH_SHORT).show()
+                                } catch (_: Exception) {
+                                    try {
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                        ctx.startActivity(intent)
+                                    } catch (_: Exception) {
+                                    }
+                                }
+                            }
+
+                            loadUrl(startUrl)
+                            WebViewHolder.activeWebView = this
+                            webViewInstance = this
+                        }
                     }
                 }
-            }
-        )
+            )
+        }
 
         if (isLoading) {
             Box(

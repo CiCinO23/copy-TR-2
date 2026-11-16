@@ -12,6 +12,8 @@ import {
   buildStableTraderEventKey,
   hasSyncEventBeenApplied,
   calculatePositionQuantityDropPartialExitPct,
+  calculatePositionQuantityIncreaseScaleInPct,
+  shouldExecuteWhaleOrLiveTradeImmediately,
   buildTraderActionId,
   isTraderActionAlreadyProcessed,
   formatTradeTimestampAr,
@@ -675,5 +677,50 @@ test('isTraderTradePermanentlyClosed ignores Partially Closed rows and hasTrader
   );
 });
 
+test('calculatePositionQuantityIncreaseScaleInPct and shouldExecuteWhaleOrLiveTradeImmediately support instant whale trade execution', () => {
+  assert.equal(calculatePositionQuantityIncreaseScaleInPct({ previousQty: 10, currentQty: 10.2 }), 0);
+  assert.equal(calculatePositionQuantityIncreaseScaleInPct({ previousQty: 10, currentQty: 8 }), 0);
+  assert.equal(calculatePositionQuantityIncreaseScaleInPct({ previousQty: 10, currentQty: 15 }), 50);
 
+  // SMART_MONEY whale trades ALWAYS execute immediately regardless of age
+  assert.equal(
+    shouldExecuteWhaleOrLiveTradeImmediately({
+      source: 'SMART_MONEY',
+      entryTime: 1700000000000,
+      now: 1700009999999,
+    }),
+    true
+  );
 
+  // Fresh COPY_TRADING trade opened within 3 minutes executes immediately
+  assert.equal(
+    shouldExecuteWhaleOrLiveTradeImmediately({
+      source: 'COPY_TRADING',
+      entryTime: 1700000000000 - 30_000,
+      now: 1700000000000,
+    }),
+    true
+  );
+
+  // Trade opened after copiedStartedAt executes immediately
+  assert.equal(
+    shouldExecuteWhaleOrLiveTradeImmediately({
+      source: 'COPY_TRADING',
+      entryTime: 1700005000000,
+      copiedStartedAt: 1700004000000,
+      now: 1700009000000,
+    }),
+    true
+  );
+
+  // Older COPY_TRADING trade opened hours before copiedStartedAt without forceImmediateExecution returns false
+  assert.equal(
+    shouldExecuteWhaleOrLiveTradeImmediately({
+      source: 'COPY_TRADING',
+      entryTime: 1700000000000,
+      copiedStartedAt: 1700005000000,
+      now: 1700006000000,
+    }),
+    false
+  );
+});

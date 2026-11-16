@@ -55,10 +55,10 @@ test('signed currency and percent helpers produce clean LTR sign placement', () 
 
 test('APP_VERSION reflects 2.<prompt_count> and increments per modification prompt', () => {
   assert.equal(APP_MAJOR_VERSION, 2);
-  assert.equal(APP_PROMPT_REVISION, 11);
-  assert.equal(APP_VERSION, '2.11');
+  assert.equal(APP_PROMPT_REVISION, 15);
+  assert.equal(APP_VERSION, '2.15');
   assert.equal(PROMPT_VERSION_HISTORY.length, APP_PROMPT_REVISION);
   assert.equal(PROMPT_VERSION_HISTORY[PROMPT_VERSION_HISTORY.length - 1]?.version, APP_VERSION);
-  assert.equal(formatAppVersion(12), '2.12');
+  assert.equal(formatAppVersion(16), '2.16');
 });
 

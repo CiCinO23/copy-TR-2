@@ -628,4 +628,102 @@ test('PaperEngine NEVER opens permanently closed or historical latestRecords tra
   }
 });
 
+test('PaperEngine executes SMART_MONEY whale trades and live SCALE_IN immediately in the exact same moment even when price is higher than whale entry', () => {
+  memoryStorage.clear();
+  mobileNotifications.clearAllNotifications();
+  const engine = new PaperEngine();
+  engine.clearAllDataAndReset({ scope: 'ALL_ACCOUNTS' });
+  // Even with promptOnUnfavorableLateEntry = true, SMART_MONEY whale trades must execute immediately!
+  engine.updateSettings({ promptOnUnfavorableLateEntry: true });
 
+  const whaleEntryTime = Date.now() - 1800_000; // 30 minutes ago
+  const whalePos: TraderOpenPosition = {
+    id: 'whale_pos_btc_1',
+    symbol: 'BTCUSDT',
+    collateral: 'USDT',
+    positionAmount: 2.0,
+    initialPositionAmount: 2.0,
+    side: 'LONG',
+    entryPrice: 88000,
+    markPrice: 91500, // Profitable LONG (+3.97%), which previously got blocked by PROMPT_USER_CHOICE
+    breakEvenPrice: 88000,
+    unrealizedProfit: 7000,
+    cumRealized: 0,
+    notionalValue: 183000,
+    leverage: 10,
+    isolated: false,
+    roePercent: 39.7,
+    entryTime: whaleEntryTime,
+    lastUpdateTime: whaleEntryTime,
+    currentScalePercent: 100,
+    scaleAdjustments: [
+      {
+        id: 'whale_pos_btc_1_init',
+        actionType: 'INITIAL_ENTRY',
+        actionLabelAr: 'فتح',
+        timestamp: whaleEntryTime,
+        volumePercent: 100,
+        remainingPercentAfter: 100,
+        executedQty: 2.0,
+        price: 88000,
+      },
+    ],
+  };
+
+  const syncLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'whale_smart_1',
+    traderName: 'SmartWhaleAlpha',
+    source: 'SMART_MONEY',
+    positions: [whalePos],
+    latestRecords: [],
+    currentPrices: { BTCUSDT: 91500 },
+  });
+
+  // Must open immediately in the exact same moment without waiting in pendingReconnectChoices
+  assert.equal(syncLogs.filter((l) => l.action === 'POSITION_SYNC').length, 1);
+  const openPositions = engine.getAccount().positions.filter((p) => p.status === 'OPEN');
+  assert.equal(openPositions.length, 1);
+  assert.equal(openPositions[0].symbol, 'BTCUSDT');
+  assert.equal(openPositions[0].entryPrice, 91500);
+  assert.equal(openPositions[0].sourceType, 'SMART_MONEY');
+  assert.equal((engine.getSnapshot({ BTCUSDT: 91500 }).pendingReconnectChoices || []).length, 0);
+
+  // Now whale scales in +50% (positionAmount increases from 2.0 to 3.0) live in Positions
+  const scaleInTs = Date.now() + 3000;
+  const scaledWhalePos: TraderOpenPosition = {
+    ...whalePos,
+    positionAmount: 3.0,
+    markPrice: 91800,
+    lastUpdateTime: scaleInTs,
+    currentScalePercent: 150,
+  };
+
+  const scaleInLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'whale_smart_1',
+    traderName: 'SmartWhaleAlpha',
+    source: 'SMART_MONEY',
+    positions: [scaledWhalePos],
+    latestRecords: [],
+    currentPrices: { BTCUSDT: 91800 },
+  });
+
+  assert.equal(
+    scaleInLogs.filter((l) => l.action === 'SCALE_IN').length,
+    1,
+    'Live whale positionAmount increase (+50%) must execute SCALE_IN immediately'
+  );
+  const updatedPos = engine.getAccount().positions.find((p) => p.status === 'OPEN');
+  assert.ok(updatedPos);
+  assert.equal(updatedPos.currentScalePercent, 150);
+
+  // Subsequent poll with same 3.0 quantity must NOT re-trigger SCALE_IN
+  const repeatScaleLogs = engine.syncTraderPositionsAndRecords({
+    traderId: 'whale_smart_1',
+    traderName: 'SmartWhaleAlpha',
+    source: 'SMART_MONEY',
+    positions: [scaledWhalePos],
+    latestRecords: [],
+    currentPrices: { BTCUSDT: 91800 },
+  });
+  assert.equal(repeatScaleLogs.filter((l) => l.action === 'SCALE_IN').length, 0);
+});

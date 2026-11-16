@@ -9,6 +9,7 @@ import { CopyTradingTab } from './components/CopyTradingTab';
 import { SimulationTab } from './components/SimulationTab';
 import { SettingsTab } from './components/SettingsTab';
 import { LiveSecurityModal } from './components/LiveSecurityModal';
+import { AppErrorBoundary } from './components/AppErrorBoundary';
 import {
   MobilePushToastBanner,
   MobileNotificationsCenterModal,
@@ -54,7 +55,8 @@ import {
 } from './services/copyAndSmartMoneyApi';
 import { paperEngine } from './services/paperTrading';
 import { mobileNotifications } from './services/mobileNotifications';
-import { startRealtimeSyncTicker } from './services/realtimeSyncWorker';
+import { createCentralizedSyncScheduler } from './services/realtimeSyncWorker';
+import { memoryCleanupService } from './services/memoryCleanup';
 import {
   loadKuCoinSecurityConfig,
   saveKuCoinSecurityConfig,
@@ -416,6 +418,8 @@ export const App: React.FC = () => {
       accountId?: string;
       overridePrices?: Record<string, number>;
       isPartialOrRateLimited?: boolean;
+      forceImmediateExecution?: boolean;
+      copiedStartedAt?: number;
     }): CopiedSyncLog[] => {
       const targetAcc = paperEngine.getAccount(params.accountId);
       const currentSettings = targetAcc.settings;
@@ -423,12 +427,27 @@ export const App: React.FC = () => {
         ? currentSettings.tradeValueUsdt
         : params.marginPerTradeUsdt || currentSettings.tradeValueUsdt;
       const userLeverage = currentSettings.leverage;
-      const livePrices =
-        params.overridePrices && Object.keys(params.overridePrices).length > 0
-          ? { ...pricesMapRef.current, ...params.overridePrices }
-          : pricesMapRef.current;
 
-      // 1. Sync to target virtual account with live market prices, auto exits/partial exits & reconnect price advantage evaluation
+      // Ensure all symbols from whale/trader open positions are watched and have their live markPrice in the price map
+      const positionMarkPrices: Record<string, number> = {};
+      for (const pos of params.positions) {
+        if (pos?.symbol) {
+          const sym = pos.symbol.toUpperCase().trim();
+          addWatchedFuturesSymbol(sym);
+          if (pos.markPrice && pos.markPrice > 0) {
+            positionMarkPrices[sym] = pos.markPrice;
+          }
+        }
+      }
+
+      const livePrices: Record<string, number> = {
+        ...positionMarkPrices,
+        ...pricesMapRef.current,
+        ...(params.overridePrices || {}),
+      };
+      pricesMapRef.current = livePrices;
+
+      // 1. Sync to target virtual account with live market prices, auto exits/partial exits & immediate whale trade execution
       const logs = paperEngine.syncTraderPositionsAndRecords({
         traderId: params.traderId,
         traderName: params.traderName,
@@ -440,6 +459,9 @@ export const App: React.FC = () => {
         accountId: targetAcc.id,
         currentPrices: livePrices,
         checkReconnectAdvantage: currentSettings.promptOnUnfavorableLateEntry !== false,
+        forceImmediateExecution:
+          params.forceImmediateExecution || params.source === 'SMART_MONEY',
+        copiedStartedAt: params.copiedStartedAt,
         isPartialOrRateLimited: params.isPartialOrRateLimited,
       });
       setPaperSnapshot(paperEngine.getSnapshot(livePrices));
@@ -619,10 +641,14 @@ export const App: React.FC = () => {
         const traderDataPromises = list.map(async (ct) => {
           const targetAcc = paperEngine.getAccount(ct.accountId);
           if (ct.source === 'COPY_TRADING') {
-            const data = await fetchCopyTraderFullData(ct.traderId, null, tickersRef.current);
+            const data = await fetchCopyTraderFullData(ct.traderId, null, tickersRef.current, {
+              forceRefresh: true,
+            });
             return { ct, targetAcc, data };
           } else {
-            const data = await fetchSmartMoneyWhaleDetail(ct.traderId, null, tickersRef.current);
+            const data = await fetchSmartMoneyWhaleDetail(ct.traderId, null, tickersRef.current, {
+              forceRefresh: true,
+            });
             return { ct, targetAcc, data };
           }
         });
@@ -649,6 +675,8 @@ export const App: React.FC = () => {
               accountId: targetAcc.id,
               overridePrices: mergedPrices,
               isPartialOrRateLimited: Boolean((data as any).isPartialOrRateLimited),
+              forceImmediateExecution: ct.source === 'SMART_MONEY',
+              copiedStartedAt: ct.startedAt,
             });
           } else {
             console.warn('Failed syncing trader:', res.reason);
@@ -689,88 +717,70 @@ export const App: React.FC = () => {
     }
   }, [connectionState.tickers.length, handleSyncAllCopiedTraders]);
 
-  // Real-time continuous background synchronization:
-  // Uses an unthrottled Blob Web Worker ticker (every 4.5s) + Service Worker heartbeat + Android Native Service heartbeat + immediate wakeup events
+  // Centralized Background Scheduler:
+  // Coordinates copied-traders sync (4.5s visible / 5s hidden) and 24h market metadata refresh (15s visible-only),
+  // automatically cleaning up and reconfiguring all interval handles and listeners on visibility state changes.
   useEffect(() => {
-    const syncWorker = startRealtimeSyncTicker(() => {
-      if (mobileNotifications.isAppStoppedByFullExit()) return;
-      handleSyncAllCopiedTraders();
-    }, 4500);
-
-    // Expose native heartbeat callback for Android APK WhaleBackgroundService when screen is locked or app is minimized
-    if (typeof window !== 'undefined') {
-      window.__copyTrNativeHeartbeat = () => {
-        if (!mobileNotifications.isAppStoppedByFullExit()) {
-          handleSyncAllCopiedTraders();
+    const scheduler = createCentralizedSyncScheduler({
+      shouldPauseAll: () => mobileNotifications.isAppStoppedByFullExit(),
+      onServiceWorkerHeartbeatAck: () => {
+        mobileNotifications.acknowledgeServiceWorkerHeartbeat();
+      },
+      onServiceWorkerNotificationClick: (data) => {
+        if (data?.accountId) {
+          handleSelectVirtualAccountRef.current(data.accountId);
         }
-      };
-    }
+        setSelectedTab('Simulation');
+      },
+      wakeupDebounceMs: 1200,
+    });
 
-    // Refresh full 24h market metadata every 15s independently without ever blocking copied-trader sync
-    const marketInfoInterval = setInterval(() => {
-      if (mobileNotifications.isAppStoppedByFullExit()) return;
-      testConnectionAndFetchData(binanceConfigRef.current)
-        .then((res) => {
-          setConnectionState(res);
-        })
-        .catch(() => {});
-    }, 15000);
+    // Task 1: Real-time copied traders & whales synchronization (runs every 2.0s when visible and 3.0s when hidden)
+    scheduler.registerTask({
+      id: 'copied-traders-sync',
+      intervalMs: 2000,
+      hiddenIntervalMs: 3000,
+      runWhenHidden: true,
+      runOnWakeup: true,
+      minDedupGapMs: 400,
+      onTick: () => {
+        handleSyncAllCopiedTraders();
+      },
+    });
 
-    const handleImmediateSyncWakeup = () => {
-      if (mobileNotifications.isAppStoppedByFullExit()) return;
-      isSyncInFlightRef.current = false;
-      handleSyncAllCopiedTraders();
-      if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
+    // Task 2: Full 24h market metadata refresh (runs ONLY when app is visible; interval handle is cleaned up when hidden)
+    scheduler.registerTask({
+      id: 'market-metadata-sync',
+      intervalMs: 15000,
+      runWhenHidden: false,
+      runOnWakeup: true,
+      minDedupGapMs: 2500,
+      onTick: () => {
         testConnectionAndFetchData(binanceConfigRef.current)
           .then((res) => {
             setConnectionState(res);
           })
           .catch(() => {});
-      }
-    };
+      },
+    });
 
-    const handleServiceWorkerMessage = (event: MessageEvent) => {
-      const data = event.data;
-      if (!data || typeof data !== 'object') return;
-      if (data.type === 'SW_BACKGROUND_HEARTBEAT' || data.type === 'SW_DETECTED_TRADE_UPDATE') {
-        mobileNotifications.acknowledgeServiceWorkerHeartbeat();
-        if (!mobileNotifications.isAppStoppedByFullExit()) {
-          handleSyncAllCopiedTraders();
-        }
-      } else if (data.type === 'NOTIFICATION_CLICKED_FROM_LOCKSCREEN') {
-        if (data.data?.accountId) {
-          handleSelectVirtualAccountRef.current(data.data.accountId);
-        }
-        setSelectedTab('Simulation');
-      }
-    };
+    // Task 3: Periodic Memory Cleanup & Cache Eviction Guard (prevents OOM crashes on low-end devices)
+    scheduler.registerTask({
+      id: 'memory-cleanup-guard',
+      intervalMs: 30000,
+      hiddenIntervalMs: 45000,
+      runWhenHidden: true,
+      runOnWakeup: false,
+      minDedupGapMs: 5000,
+      onTick: () => {
+        memoryCleanupService.checkAndCleanupIfNeeded('PERIODIC');
+      },
+    });
 
-    if (typeof window !== 'undefined') {
-      window.addEventListener('online', handleImmediateSyncWakeup);
-      window.addEventListener('focus', handleImmediateSyncWakeup);
-      window.addEventListener('pageshow', handleImmediateSyncWakeup);
-    }
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', handleImmediateSyncWakeup);
-    }
-    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
-      navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
-    }
+    scheduler.start();
 
     return () => {
-      syncWorker.stop();
-      clearInterval(marketInfoInterval);
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('online', handleImmediateSyncWakeup);
-        window.removeEventListener('focus', handleImmediateSyncWakeup);
-        window.removeEventListener('pageshow', handleImmediateSyncWakeup);
-      }
-      if (typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', handleImmediateSyncWakeup);
-      }
-      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
-        navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage);
-      }
+      scheduler.stop();
     };
   }, [handleSyncAllCopiedTraders]);
 
@@ -1003,6 +1013,30 @@ export const App: React.FC = () => {
     isUnlocked: true,
     lastUnlockedAt: Date.now(),
   });
+  const lastActivityTouchRef = useRef<number>(Date.now());
+
+  // Keep security session alive while the user is actively interacting with the app so it never auto-locks mid-use
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const extendSessionOnActivity = () => {
+      const now = Date.now();
+      if (now - lastActivityTouchRef.current < 15000) return;
+      lastActivityTouchRef.current = now;
+      setKucoinUnlockState((prev) => {
+        if (!prev.isUnlocked) return prev;
+        return {
+          isUnlocked: true,
+          lastUnlockedAt: now,
+        };
+      });
+    };
+    window.addEventListener('pointerdown', extendSessionOnActivity, { passive: true });
+    window.addEventListener('keydown', extendSessionOnActivity, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', extendSessionOnActivity);
+      window.removeEventListener('keydown', extendSessionOnActivity);
+    };
+  }, []);
 
   const isKucoinSecurityUnlocked = useMemo(() => {
     return !shouldRequireUnlock(kucoinSecurityConfig, {
@@ -1018,9 +1052,11 @@ export const App: React.FC = () => {
         const nextCfg = saveKuCoinSecurityConfig({ biometricCredentialId: updatedCredentialId });
         setKucoinSecurityConfig(nextCfg);
       }
+      const now = Date.now();
+      lastActivityTouchRef.current = now;
       setKucoinUnlockState({
         isUnlocked: true,
-        lastUnlockedAt: Date.now(),
+        lastUnlockedAt: now,
       });
     },
     [kucoinSecurityConfig.biometricCredentialId]
@@ -1113,8 +1149,114 @@ export const App: React.FC = () => {
     mobileNotifications.markAllAsRead();
   }, []);
 
+  // Anti-Accidental Exit & In-App Back Navigation Guard (prevents Android/Browser Back button or edge-swipe from closing the app while in use)
+  const [backExitPromptVisible, setBackExitPromptVisible] = useState<boolean>(false);
+  const lastBackPressTimeRef = useRef<number>(0);
+  const backToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tabHistoryRef = useRef<TabId[]>([]);
+  const selectedTabRef = useRef<TabId>(selectedTab);
+  selectedTabRef.current = selectedTab;
+  const showNotificationsRef = useRef<boolean>(showNotificationsCenter);
+  showNotificationsRef.current = showNotificationsCenter;
+  const showLiveDialogRef = useRef<boolean>(showLiveDialog);
+  showLiveDialogRef.current = showLiveDialog;
+
+  useEffect(() => {
+    const history = tabHistoryRef.current;
+    if (history[history.length - 1] !== selectedTab) {
+      history.push(selectedTab);
+      if (history.length > 15) history.shift();
+    }
+  }, [selectedTab]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleInAppBackNavigation = (): boolean => {
+      // 1. Close open global modals first
+      if (showNotificationsRef.current) {
+        setShowNotificationsCenter(false);
+        return true;
+      }
+      if (showLiveDialogRef.current) {
+        setShowLiveDialog(false);
+        return true;
+      }
+
+      // 2. Close open sub-views (e.g. Trader detail, Whale detail, or Copy modal)
+      if (window.__copyTrSubViewBackHandler && window.__copyTrSubViewBackHandler()) {
+        return true;
+      }
+
+      // 3. Navigate back to previous tab or Dashboard if not already on Dashboard
+      if (selectedTabRef.current !== 'Dashboard') {
+        const history = tabHistoryRef.current;
+        if (history.length > 1) {
+          history.pop(); // remove current
+          const prevTab = history.pop() || 'Dashboard';
+          setSelectedTab(prevTab);
+        } else {
+          setSelectedTab('Dashboard');
+        }
+        return true;
+      }
+
+      // 4. On root Dashboard tab: require double-press within 2.5s before minimizing/exiting
+      const now = Date.now();
+      if (now - lastBackPressTimeRef.current < 2500) {
+        setBackExitPromptVisible(false);
+        return false; // Allow native BackHandler to move task to background
+      }
+
+      lastBackPressTimeRef.current = now;
+      setBackExitPromptVisible(true);
+      if (backToastTimerRef.current) clearTimeout(backToastTimerRef.current);
+      backToastTimerRef.current = setTimeout(() => {
+        setBackExitPromptVisible(false);
+      }, 2500);
+      return true;
+    };
+
+    window.__copyTrHandleBackPress = handleInAppBackNavigation;
+
+    // Push a guard state in mobile browser / PWA so edge-swipe Back triggers popstate instead of closing the tab
+    try {
+      window.history.pushState({ copyTrGuard: true }, '', window.location.href);
+    } catch {
+      // ignore
+    }
+
+    const handlePopState = () => {
+      const consumed = handleInAppBackNavigation();
+      if (consumed) {
+        try {
+          window.history.pushState({ copyTrGuard: true }, '', window.location.href);
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+      if (backToastTimerRef.current) clearTimeout(backToastTimerRef.current);
+    };
+  }, []);
+
   return (
     <div className="min-h-screen bg-[#0B0E11] text-white flex flex-col font-sans selection:bg-[#01BC8D]/30 content-safe pl-safe pr-safe">
+      {/* Double-Back Exit Protection Toast */}
+      {backExitPromptVisible && (
+        <div
+          data-testid="back_exit_protection_toast"
+          className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl bg-[#161D26] border border-[#01BC8D]/60 text-white text-xs font-bold shadow-2xl flex items-center gap-2 animate-in fade-in duration-150"
+        >
+          <span className="w-2 h-2 rounded-full bg-[#01BC8D] animate-pulse" />
+          <span>اضغط زر الرجوع مرة أخرى خلال ثانيتين لتصغير التطبيق (حماية من الإغلاق بالخطأ)</span>
+        </div>
+      )}
+
       {/* Top In-App Mobile Push Notification Banner */}
       <MobilePushToastBanner
         notification={activePushBanner}
@@ -1147,6 +1289,7 @@ export const App: React.FC = () => {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-4xl w-full mx-auto px-4 py-4 sm:py-6">
+        <AppErrorBoundary key={selectedTab}>
         {selectedTab === 'Dashboard' && (
           <DashboardTab
             connectionState={connectionState}
@@ -1349,6 +1492,7 @@ export const App: React.FC = () => {
             onOpenNotifications={handleOpenNotificationsCenter}
           />
         )}
+        </AppErrorBoundary>
         {/* Global App Version Bar visible at the bottom of every screen */}
         <div
           data-testid="app_global_version_footer"

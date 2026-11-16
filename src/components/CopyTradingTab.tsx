@@ -72,6 +72,8 @@ interface CopyTradingTabProps {
     positionHistory?: TraderPositionHistoryItem[];
     marginPerTradeUsdt: number;
     accountId?: string;
+    forceImmediateExecution?: boolean;
+    copiedStartedAt?: number;
   }) => CopiedSyncLog[];
   onCopySinglePosition: (
     pos: TraderOpenPosition,
@@ -167,6 +169,32 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
   const [syncLogs, setSyncLogs] = useState<CopiedSyncLog[]>([]);
   const [feedbackBanner, setFeedbackBanner] = useState<string | null>(null);
 
+  // Intercept Back button / swipe gesture when a copy modal or trader detail view is open
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (pendingCopyTarget || selectedTraderId) {
+      window.__copyTrSubViewBackHandler = () => {
+        if (pendingCopyTarget) {
+          setPendingCopyTarget(null);
+          return true;
+        }
+        if (selectedTraderId) {
+          setSelectedTraderId(null);
+          setTraderDetail(null);
+          return true;
+        }
+        return false;
+      };
+    } else {
+      window.__copyTrSubViewBackHandler = null;
+    }
+    return () => {
+      if (window.__copyTrSubViewBackHandler) {
+        window.__copyTrSubViewBackHandler = null;
+      }
+    };
+  }, [pendingCopyTarget, selectedTraderId]);
+
   const saveCopiedTraders = (list: ActiveCopiedTrader[]) => {
     setCopiedTraders(list);
     try {
@@ -209,7 +237,8 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
       const fullData = await fetchCopyTraderFullData(
         trader.leadPortfolioId,
         trader,
-        connectionState.tickers
+        connectionState.tickers,
+        { forceRefresh: true }
       );
       setTraderDetail(fullData.detail);
       setOpenPositions(fullData.positions);
@@ -253,15 +282,17 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
       const targetAcc = accounts.find((a) => a.id === targetAccountId);
       const targetAccName = targetAcc?.name || 'الحساب الافتراضي';
       const accMarginPerTrade = targetAcc?.settings.tradeValueUsdt || marginPerTrade;
+      const nowMs = Date.now();
 
       setFeedbackBanner(
-        `جاري جلب Positions وسجل الدخول والخروج Latest records للمتداول ${trader.nickname} ونسخه إلى «${targetAccName}»...`
+        `جاري جلب Positions وسجل الدخول والخروج Latest records للمتداول ${trader.nickname} ونسخه فوراً إلى «${targetAccName}»...`
       );
 
       const fullData = await fetchCopyTraderFullData(
         trader.leadPortfolioId,
         trader,
-        connectionState.tickers
+        connectionState.tickers,
+        { forceRefresh: true }
       );
 
       if (selectedTraderId === trader.leadPortfolioId) {
@@ -299,7 +330,7 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
             source: 'COPY_TRADING',
             copyBudgetUsdt: accMarginPerTrade,
             leverageOverride: null,
-            startedAt: Date.now(),
+            startedAt: nowMs,
             syncedPositionsCount: fullData.positions.length,
             syncedRecordsCount: fullData.latestRecords.length,
             autoFollowRecords: true,
@@ -320,6 +351,8 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
         positionHistory: fullData.positionHistory,
         marginPerTradeUsdt: accMarginPerTrade,
         accountId: targetAccountId,
+        forceImmediateExecution: true,
+        copiedStartedAt: existsInAccount?.startedAt || nowMs,
       });
 
       setSyncLogs((prev) => [...logs, ...prev].slice(0, 30));
