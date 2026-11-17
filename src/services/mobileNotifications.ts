@@ -6,6 +6,10 @@ import {
   PaperVirtualAccountSummary,
 } from '../types';
 import { formatDateTimeWestern } from '../utils/formatters';
+import {
+  AccountDrawdownAlertStateRecord,
+  evaluateAccountDrawdownAlertDecision,
+} from './tradeExecutionRules';
 
 const NOTIFICATIONS_STORAGE_KEY = 'whale_mobile_notifications_log_v1';
 const NOTIFICATION_SETTINGS_KEY = 'whale_mobile_notification_settings_v1';
@@ -63,11 +67,7 @@ declare global {
 const SILENT_WAV_DATA_URI =
   'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
-interface AccountDrawdownAlertRecord {
-  alertedAtThreshold: number;
-  peakAlertedDrawdown: number;
-  lastAlertTimestamp: number;
-}
+type AccountDrawdownAlertRecord = AccountDrawdownAlertStateRecord;
 
 export interface BackgroundKeepAliveDiagnostics {
   keepAliveEnabled: boolean;
@@ -91,6 +91,8 @@ class MobileNotificationService {
   private settings: MobileNotificationSettings = { ...DEFAULT_MOBILE_NOTIFICATION_SETTINGS };
   private listeners: Set<NotificationListener> = new Set();
   private drawdownAlertState: Record<string, AccountDrawdownAlertRecord> = {};
+  private isNetworkOnline: boolean = true;
+  private lastOnlineReconnectAt: number = 0;
   private wakeLockSentinel: {
     release: () => Promise<void>;
     addEventListener?: (type: string, listener: () => void) => void;
@@ -111,6 +113,9 @@ class MobileNotificationService {
     this.settings = this.loadSettings();
     this.notifications = this.loadNotifications();
     this.drawdownAlertState = this.loadDrawdownAlertState();
+    if (typeof navigator !== 'undefined' && 'onLine' in navigator) {
+      this.isNetworkOnline = navigator.onLine !== false;
+    }
     this.initBackgroundAndLockScreenLifecycle();
   }
 
@@ -186,6 +191,14 @@ class MobileNotificationService {
       this.drawdownAlertState = {};
     }
     this.saveDrawdownAlertState();
+  }
+
+  public recordNetworkConnectivityChange(isOnline: boolean, now: number = Date.now()): void {
+    const wasOffline = !this.isNetworkOnline;
+    this.isNetworkOnline = Boolean(isOnline);
+    if (this.isNetworkOnline && wasOffline) {
+      this.lastOnlineReconnectAt = now;
+    }
   }
 
   public getSettings(): MobileNotificationSettings {
@@ -267,6 +280,14 @@ class MobileNotificationService {
       if (this.settings.appExitBehavior === 'FULL_EXIT') {
         this.stopBackgroundWorkers();
       }
+    });
+
+    window.addEventListener('offline', () => {
+      this.recordNetworkConnectivityChange(false);
+    });
+
+    window.addEventListener('online', () => {
+      this.recordNetworkConnectivityChange(true);
     });
   }
 
@@ -901,11 +922,16 @@ class MobileNotificationService {
     const body = lines.join('\n');
     const isUrgent =
       item.actionType === 'DRAWDOWN_ALERT' || Boolean(this.settings.lockScreenNotificationsEnabled);
+    // Use a deterministic per-account tag for DRAWDOWN_ALERT so the OS replaces any existing low-balance banner instead of stacking duplicates
+    const notifTag =
+      item.actionType === 'DRAWDOWN_ALERT'
+        ? `drawdown_alert_${item.accountId || 'acc_default'}`
+        : item.id;
 
     // 1. Dispatch to Native Android APK NotificationManager (shows directly on Android Lock Screen & wakes screen)
     try {
       if (window.AndroidAppControl?.showNativeNotification) {
-        window.AndroidAppControl.showNativeNotification(title, body, item.id, isUrgent);
+        window.AndroidAppControl.showNativeNotification(title, body, notifTag, isUrgent);
       }
     } catch {
       // ignore
@@ -948,7 +974,7 @@ class MobileNotificationService {
                 body,
                 icon: '/assets/aistudio/icone_c1401ade.png',
                 badge: '/assets/aistudio/icone_c1401ade.png',
-                tag: item.id,
+                tag: notifTag,
                 requireInteraction: requireLockScreenInteraction,
                 silent: false,
                 timestamp: item.timestamp || Date.now(),
@@ -967,8 +993,8 @@ class MobileNotificationService {
               badge: '/assets/aistudio/icone_c1401ade.png',
               dir: 'rtl',
               lang: 'ar',
-              tag: item.id,
-              renotify: true,
+              tag: notifTag,
+              renotify: item.actionType !== 'DRAWDOWN_ALERT',
               requireInteraction: requireLockScreenInteraction,
               silent: false,
               timestamp: item.timestamp || Date.now(),
@@ -987,7 +1013,7 @@ class MobileNotificationService {
         icon: '/assets/aistudio/icone_c1401ade.png',
         dir: 'rtl',
         lang: 'ar',
-        tag: item.id,
+        tag: notifTag,
         requireInteraction: requireLockScreenInteraction,
         silent: false,
       });
@@ -1307,11 +1333,14 @@ class MobileNotificationService {
     thresholdPercent?: number;
     openPositionsCount?: number;
     force?: boolean;
+    now?: number;
   }): MobileTradeNotification | null {
     if (!params.force) {
       if (!this.settings.enabled || !this.settings.notifyOnDrawdown) return null;
     }
 
+    const nowTs = params.now && params.now > 0 ? params.now : Date.now();
+    const accId = params.accountId || 'acc_default';
     const threshold = Math.max(
       0.5,
       params.thresholdPercent ?? this.settings.drawdownThresholdPercent ?? 10
@@ -1322,9 +1351,25 @@ class MobileNotificationService {
     );
     const remainingPct = parseFloat(Math.max(0, 100 - ddPct).toFixed(2));
 
+    // Hard deduplication guard against duplicate low-balance notifications on reconnect bursts
+    if (!params.force) {
+      const existingRecentForAccount = this.notifications.find(
+        (n) =>
+          n.actionType === 'DRAWDOWN_ALERT' &&
+          (n.accountId || 'acc_default') === accId &&
+          (nowTs - n.timestamp < 60_000 ||
+            (nowTs - n.timestamp < 15 * 60 * 1000 &&
+              ddPct < (n.drawdownPercent ?? 0) + 5 &&
+              threshold >= (n.drawdownThresholdPercent ?? threshold) - 0.01))
+      );
+      if (existingRecentForAccount) {
+        return null;
+      }
+    }
+
     const notification: MobileTradeNotification = {
-      id: `notif_dd_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      timestamp: Date.now(),
+      id: `notif_dd_${accId}_${nowTs}`,
+      timestamp: nowTs,
       read: false,
       actionType: 'DRAWDOWN_ALERT',
       actionTitleAr: `⚠️ تنبيه تراجع الرصيد (${ddPct}%)`,
@@ -1345,7 +1390,7 @@ class MobileNotificationService {
       commissionUsdt: 0,
       realizedPnlUsdt: -lossUsdt,
       realizedPnlPercent: -ddPct,
-      accountId: params.accountId,
+      accountId: accId,
       accountName: params.accountName,
       drawdownPercent: ddPct,
       drawdownThresholdPercent: threshold,
@@ -1355,9 +1400,24 @@ class MobileNotificationService {
       summaryTextAr: `تنبيه مخاطر فوري: وصلت نسبة التراجع (Drawdown) في "${params.accountName}" إلى ${ddPct}% من رأس المال الأولي (${params.initialBalanceUsdt.toFixed(2)}$ ⬅️ ${params.currentEquityUsdt.toFixed(2)}$ • تراجع -${lossUsdt.toFixed(2)}$) متجاوزة الحد المحدد (${threshold}%).`,
     };
 
-    this.notifications.unshift(notification);
-    if (this.notifications.length > MAX_STORED_NOTIFICATIONS) {
-      this.notifications = this.notifications.slice(0, MAX_STORED_NOTIFICATIONS);
+    // Replace any existing unread DRAWDOWN_ALERT for the same account so the notification center never stacks duplicates
+    if (!params.force) {
+      this.notifications = [
+        notification,
+        ...this.notifications.filter(
+          (n) =>
+            !(
+              n.actionType === 'DRAWDOWN_ALERT' &&
+              !n.read &&
+              (n.accountId || 'acc_default') === accId
+            )
+        ),
+      ].slice(0, MAX_STORED_NOTIFICATIONS);
+    } else {
+      this.notifications.unshift(notification);
+      if (this.notifications.length > MAX_STORED_NOTIFICATIONS) {
+        this.notifications = this.notifications.slice(0, MAX_STORED_NOTIFICATIONS);
+      }
     }
     this.saveNotifications();
 
@@ -1372,10 +1432,32 @@ class MobileNotificationService {
 
   /**
    * Monitor all virtual accounts and fire an instant Push Notification when any account's drawdown
-   * from initial capital reaches or exceeds the configured threshold (e.g., 10%).
+   * from initial capital reaches or exceeds the configured threshold (e.g., 10%), while preventing
+   * duplicate notification storms on internet reconnection or rapid price-map oscillations.
    */
-  public checkAccountsDrawdown(accounts: PaperVirtualAccountSummary[]): MobileTradeNotification[] {
+  public checkAccountsDrawdown(
+    accounts: PaperVirtualAccountSummary[],
+    options?: {
+      now?: number;
+      isOnline?: boolean;
+      lastOnlineReconnectAt?: number;
+    }
+  ): MobileTradeNotification[] {
     if (!this.settings.enabled || !this.settings.notifyOnDrawdown) return [];
+
+    const nowTs = options?.now && options.now > 0 ? options.now : Date.now();
+    const effectiveOnline =
+      options?.isOnline !== undefined
+        ? options.isOnline
+        : this.isNetworkOnline && (typeof navigator === 'undefined' || navigator.onLine !== false);
+    const effectiveReconnectAt =
+      options?.lastOnlineReconnectAt !== undefined
+        ? options.lastOnlineReconnectAt
+        : this.lastOnlineReconnectAt;
+
+    if (!effectiveOnline) {
+      return [];
+    }
 
     const threshold = Math.max(0.5, Number(this.settings.drawdownThresholdPercent) || 10);
     const triggered: MobileTradeNotification[] = [];
@@ -1391,38 +1473,37 @@ class MobileNotificationService {
           ? parseFloat((((acc.initialBalance - acc.totalEquity) / acc.initialBalance) * 100).toFixed(2))
           : 0;
 
-      const prevRecord = this.drawdownAlertState[acc.id];
+      const prevRecord = this.drawdownAlertState[acc.id] || null;
+      const evaluation = evaluateAccountDrawdownAlertDecision({
+        drawdownPercent: ddPct,
+        thresholdPercent: threshold,
+        previousState: prevRecord,
+        now: nowTs,
+        isOnline: effectiveOnline,
+        lastOnlineReconnectAt: effectiveReconnectAt,
+      });
 
-      if (ddPct >= threshold) {
-        // Trigger if never alerted for this drawdown wave, or if threshold was lowered, or if drawdown worsened by >= 5% more
-        const shouldAlert =
-          !prevRecord ||
-          prevRecord.alertedAtThreshold > threshold ||
-          ddPct >= prevRecord.peakAlertedDrawdown + 5;
-
-        if (shouldAlert) {
-          this.drawdownAlertState[acc.id] = {
-            alertedAtThreshold: threshold,
-            peakAlertedDrawdown: Math.max(ddPct, prevRecord?.peakAlertedDrawdown || 0),
-            lastAlertTimestamp: Date.now(),
-          };
-          stateChanged = true;
-
-          const notif = this.notifyDrawdownAlert({
-            accountId: acc.id,
-            accountName: acc.name,
-            initialBalanceUsdt: acc.initialBalance,
-            currentEquityUsdt: acc.totalEquity,
-            drawdownPercent: ddPct,
-            thresholdPercent: threshold,
-            openPositionsCount: acc.openPositionsCount,
-          });
-          if (notif) triggered.push(notif);
+      if (evaluation.stateChanged) {
+        if (evaluation.nextState) {
+          this.drawdownAlertState[acc.id] = evaluation.nextState;
+        } else {
+          delete this.drawdownAlertState[acc.id];
         }
-      } else if (prevRecord && ddPct < threshold * 0.9) {
-        // Account recovered below 90% of the threshold — re-arm alert for future drawdowns
-        delete this.drawdownAlertState[acc.id];
         stateChanged = true;
+      }
+
+      if (evaluation.shouldAlert) {
+        const notif = this.notifyDrawdownAlert({
+          accountId: acc.id,
+          accountName: acc.name,
+          initialBalanceUsdt: acc.initialBalance,
+          currentEquityUsdt: acc.totalEquity,
+          drawdownPercent: ddPct,
+          thresholdPercent: threshold,
+          openPositionsCount: acc.openPositionsCount,
+          now: nowTs,
+        });
+        if (notif) triggered.push(notif);
       }
     }
 

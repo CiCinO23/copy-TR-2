@@ -29,6 +29,7 @@ import {
   MobileTradeNotification,
   MobileNotificationSettings,
   KuCoinSecurityLockConfig,
+  ManualSingleCopyResult,
 } from './types';
 import { Lock, Unlock } from 'lucide-react';
 import {
@@ -528,8 +529,15 @@ export const App: React.FC = () => {
   );
 
   // Copy a single position using the target Account's configured Trade Settings at the CURRENT LIVE MARKET PRICE
+  // If already copied with no uncopied changes -> do nothing.
+  // If already copied with uncopied partial exits or scale-ins -> copy only the uncopied changes without duplicating the trade.
   const handleCopySinglePosition = useCallback(
-    (pos: TraderOpenPosition, traderName: string, marginUsdt: number, accountId?: string) => {
+    (
+      pos: TraderOpenPosition,
+      traderName: string,
+      marginUsdt: number,
+      accountId?: string
+    ): ManualSingleCopyResult | undefined => {
       addWatchedFuturesSymbol(pos.symbol);
       const targetAcc = paperEngine.getAccount(accountId);
       const currentSettings = targetAcc.settings;
@@ -550,29 +558,72 @@ export const App: React.FC = () => {
         ? currentSettings.leverage
         : Math.min(Math.max(pos.leverage || currentSettings.leverage, 1), 50);
 
+      let copyResult: ManualSingleCopyResult;
       try {
-        paperEngine.openPositionWithUserSettings({
-          symbol: pos.symbol,
-          side: pos.side,
+        copyResult = paperEngine.copyOrSyncSinglePositionManually({
+          pos,
+          traderName,
+          sourceType: pos.id.startsWith('sm_') ? 'SMART_MONEY' : 'COPY_TRADING',
           entryPrice: liveMarketPrice,
-          traderEntryPrice: pos.entryPrice > 0 ? pos.entryPrice : liveMarketPrice,
-          traderLeverage: pos.leverage,
           customMarginUsdt: effectiveMargin,
           customLeverage: effectiveLeverage,
-          sourceTraderName: traderName,
-          sourceType: pos.id.startsWith('sm_') ? 'SMART_MONEY' : 'COPY_TRADING',
-          traderEntryTime: pos.entryTime,
-          traderScaleAdjustments: pos.scaleAdjustments,
-          currentScalePercent: pos.currentScalePercent,
           accountId: targetAcc.id,
         });
         updatePaperSnapshot();
       } catch (e) {
         console.warn('Error copying position to engine:', e);
-        return;
+        return undefined;
       }
 
-      // Route to KuCoin with target account's size & leverage at current market price
+      // 1. If the trade is already copied and has no uncopied partial exits or scale-ins, do nothing
+      if (copyResult.status === 'NO_CHANGES_ALREADY_COPIED') {
+        return copyResult;
+      }
+
+      // 2. If the trade is already copied and had uncopied partial exits or scale-ins, route ONLY those deltas to KuCoin
+      if (copyResult.status === 'SYNCED_DELTAS_ONLY') {
+        for (const delta of copyResult.appliedDeltas) {
+          const orderSide: 'LONG' | 'SHORT' =
+            delta.actionType === 'PARTIAL_EXIT'
+              ? pos.side === 'LONG'
+                ? 'SHORT'
+                : 'LONG'
+              : pos.side;
+          const signalLabel =
+            delta.actionType === 'PARTIAL_EXIT'
+              ? `Manual Delta Sync Partial Exit -${delta.volumePercent}% [${targetAcc.name}] (${pos.symbol})`
+              : `Manual Delta Sync Scale-In +${delta.volumePercent}% [${targetAcc.name}] (${pos.symbol})`;
+
+          executeKuCoinOrder({
+            config: {
+              ...kucoinConfig,
+              enableLiveExecution: currentSettings.mode === 'REAL',
+            },
+            binanceSymbol: pos.symbol,
+            side: orderSide,
+            amountUsdt: Math.max(1, delta.marginDeltaUsdt),
+            entryPrice: delta.price > 0 ? delta.price : liveMarketPrice,
+            leverage: delta.leverage || effectiveLeverage,
+            sourceTraderName: `${traderName} (${targetAcc.name})`,
+            sourceSignal: signalLabel,
+          })
+            .then((ord) => {
+              setKucoinConnectionState((prev) => ({
+                ...prev,
+                recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(
+                  0,
+                  50
+                ),
+              }));
+            })
+            .catch((err) => {
+              console.warn('KuCoin delta execution failed:', err);
+            });
+        }
+        return copyResult;
+      }
+
+      // 3. Newly opened position: route initial entry to KuCoin once
       executeKuCoinOrder({
         config: {
           ...kucoinConfig,
@@ -580,11 +631,11 @@ export const App: React.FC = () => {
         },
         binanceSymbol: pos.symbol,
         side: pos.side,
-        amountUsdt: effectiveMargin,
+        amountUsdt: copyResult.position.marginUsdt || effectiveMargin,
         entryPrice: liveMarketPrice,
-        leverage: effectiveLeverage,
+        leverage: copyResult.position.leverage || effectiveLeverage,
         sourceTraderName: `${traderName} (${targetAcc.name})`,
-        sourceSignal: `Single Copy Market [${targetAcc.name}] (${pos.symbol} ${pos.side} @ السعر الحالي ${liveMarketPrice} • ${effectiveMargin}$ × ${effectiveLeverage}x)`,
+        sourceSignal: `Single Copy Market [${targetAcc.name}] (${pos.symbol} ${pos.side} @ السعر الحالي ${liveMarketPrice} • ${copyResult.position.marginUsdt || effectiveMargin}$ × ${copyResult.position.leverage || effectiveLeverage}x)`,
       })
         .then((ord) => {
           setKucoinConnectionState((prev) => ({
@@ -595,6 +646,8 @@ export const App: React.FC = () => {
         .catch((err) => {
           console.warn('KuCoin execution failed:', err);
         });
+
+      return copyResult;
     },
     [kucoinConfig, pricesMap, updatePaperSnapshot]
   );
@@ -685,7 +738,6 @@ export const App: React.FC = () => {
 
         const updatedSnapshot = paperEngine.getSnapshot(mergedPrices);
         setPaperSnapshot(updatedSnapshot);
-        mobileNotifications.checkAccountsDrawdown(updatedSnapshot.accounts);
       })();
 
       const timeoutGuardPromise = new Promise<void>((resolve) => {

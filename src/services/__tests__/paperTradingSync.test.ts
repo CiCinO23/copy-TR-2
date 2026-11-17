@@ -727,3 +727,203 @@ test('PaperEngine executes SMART_MONEY whale trades and live SCALE_IN immediatel
   });
   assert.equal(repeatScaleLogs.filter((l) => l.action === 'SCALE_IN').length, 0);
 });
+
+test('PaperEngine and mobileNotifications emit at most 1 DRAWDOWN_ALERT when internet disconnects and reconnects with partial price updates (v2.16)', () => {
+  memoryStorage.clear();
+  mobileNotifications.clearAllNotifications();
+  mobileNotifications.resetAccountDrawdownAlert();
+  const engine = new PaperEngine();
+  engine.clearAllDataAndReset({ scope: 'ALL_ACCOUNTS' });
+
+  // Open two positions on default account (1,000 USDT initial balance):
+  // BTCUSDT LONG (margin 200 USDT @ 100,000, 5x -> qty 0.01)
+  // ETHUSDT LONG (margin 200 USDT @ 3,000, 5x -> qty 0.33333)
+  engine.openPosition('BTCUSDT', 'LONG', 0.01, 100000, 5, 'acc_default', 'MANUAL');
+  engine.openPosition('ETHUSDT', 'LONG', 0.33333, 3000, 5, 'acc_default', 'MANUAL');
+
+  // Drop BTCUSDT price to 88,000 (-120 USDT unrealized loss -> 12% drawdown on 1,000 USDT account)
+  engine.getSnapshot({ BTCUSDT: 88000, ETHUSDT: 3000 });
+
+  const ddNotifsInitial = mobileNotifications
+    .getNotifications()
+    .filter((n) => n.actionType === 'DRAWDOWN_ALERT');
+  assert.equal(ddNotifsInitial.length, 1, 'Should emit 1 DRAWDOWN_ALERT when crossing 10% threshold');
+
+  // Now simulate internet disconnection and reconnection followed by 20 rapid calls with empty, partial, and full price maps
+  const baseTs = Date.now();
+  mobileNotifications.recordNetworkConnectivityChange(false, baseTs);
+  engine.getSnapshot({});
+  mobileNotifications.recordNetworkConnectivityChange(true, baseTs + 500);
+
+  for (let i = 0; i < 20; i++) {
+    // Alternate between empty price map, single-symbol price map, and full price map
+    if (i % 3 === 0) {
+      engine.getSnapshot({});
+    } else if (i % 3 === 1) {
+      engine.getSnapshot({ ETHUSDT: 3000 });
+    } else {
+      engine.getSnapshot({ BTCUSDT: 87800, ETHUSDT: 2995 });
+    }
+  }
+
+  const ddNotifsAfterReconnectBurst = mobileNotifications
+    .getNotifications()
+    .filter((n) => n.actionType === 'DRAWDOWN_ALERT');
+  assert.equal(
+    ddNotifsAfterReconnectBurst.length,
+    1,
+    'Must NOT emit duplicate DRAWDOWN_ALERT notifications on internet reconnection or partial price updates'
+  );
+});
+
+test('PaperEngine.copyOrSyncSinglePositionManually: opens trade once, does nothing if already copied with no changes, and copies ONLY uncopied partial exits or scale-ins without duplicating the trade (v2.17)', () => {
+  memoryStorage.clear();
+  mobileNotifications.clearAllNotifications();
+  const engine = new PaperEngine();
+  engine.clearAllDataAndReset({ scope: 'ALL_ACCOUNTS' });
+
+  const t0 = Date.now() - 120_000;
+  const basePos: TraderOpenPosition = {
+    id: 'manual_pos_eth_1',
+    symbol: 'ETHUSDT',
+    collateral: 'USDT',
+    positionAmount: 10,
+    side: 'LONG',
+    entryPrice: 3000,
+    markPrice: 3020,
+    breakEvenPrice: 3000,
+    unrealizedProfit: 200,
+    cumRealized: 0,
+    notionalValue: 30200,
+    leverage: 5,
+    isolated: false,
+    roePercent: 3.3,
+    entryTime: t0,
+    lastUpdateTime: t0,
+    currentScalePercent: 100,
+    scaleAdjustments: [
+      {
+        id: 'eth_init_1',
+        actionType: 'INITIAL_ENTRY',
+        actionLabelAr: 'فتح',
+        timestamp: t0,
+        volumePercent: 100,
+        remainingPercentAfter: 100,
+        executedQty: 10,
+        price: 3000,
+      },
+    ],
+  };
+
+  // 1. First manual copy -> opens the position once ('OPENED_NEW')
+  const res1 = engine.copyOrSyncSinglePositionManually({
+    pos: basePos,
+    traderName: 'ManualMaster',
+    entryPrice: 3020,
+  });
+  assert.equal(res1.status, 'OPENED_NEW');
+  assert.equal(engine.getAccount().positions.filter((p) => p.status === 'OPEN').length, 1);
+  const initialMargin = res1.position.marginUsdt;
+  const balanceAfterFirstOpen = engine.getAccount().availableBalance;
+
+  // 2. Clicking manual copy again on the already-copied position with NO changes -> does nothing ('NO_CHANGES_ALREADY_COPIED')
+  const res2 = engine.copyOrSyncSinglePositionManually({
+    pos: basePos,
+    traderName: 'ManualMaster',
+    entryPrice: 3025,
+  });
+  assert.equal(res2.status, 'NO_CHANGES_ALREADY_COPIED');
+  assert.equal(res2.appliedDeltas.length, 0);
+  assert.equal(engine.getAccount().positions.filter((p) => p.status === 'OPEN').length, 1);
+  assert.equal(engine.getAccount().availableBalance, balanceAfterFirstOpen);
+
+  // 3. Trader performs a +50% SCALE_IN -> clicking manual copy copies ONLY the +50% scale-in on the existing position ('SYNCED_DELTAS_ONLY')
+  const tScaleIn = t0 + 30_000;
+  const posAfterScaleIn: TraderOpenPosition = {
+    ...basePos,
+    positionAmount: 15,
+    lastUpdateTime: tScaleIn,
+    currentScalePercent: 150,
+    scaleAdjustments: [
+      ...basePos.scaleAdjustments,
+      {
+        id: 'eth_scale_in_50',
+        actionType: 'SCALE_IN',
+        actionLabelAr: 'تدعيم +50%',
+        timestamp: tScaleIn,
+        volumePercent: 50,
+        remainingPercentAfter: 150,
+        executedQty: 5,
+        price: 3030,
+      },
+    ],
+  };
+
+  const res3 = engine.copyOrSyncSinglePositionManually({
+    pos: posAfterScaleIn,
+    traderName: 'ManualMaster',
+    entryPrice: 3030,
+  });
+  assert.equal(res3.status, 'SYNCED_DELTAS_ONLY');
+  assert.equal(res3.appliedDeltas.length, 1);
+  assert.equal(res3.appliedDeltas[0].actionType, 'SCALE_IN');
+  assert.equal(res3.appliedDeltas[0].volumePercent, 50);
+  assert.equal(engine.getAccount().positions.filter((p) => p.status === 'OPEN').length, 1);
+  assert.equal(res3.position.id, res1.position.id);
+  assert.equal(res3.position.currentScalePercent, 150);
+  assert.equal(res3.position.marginUsdt, Number((initialMargin * 1.5).toFixed(2)));
+
+  // 4. Clicking manual copy again after the scale-in is already synced -> does nothing ('NO_CHANGES_ALREADY_COPIED')
+  const res4 = engine.copyOrSyncSinglePositionManually({
+    pos: posAfterScaleIn,
+    traderName: 'ManualMaster',
+    entryPrice: 3032,
+  });
+  assert.equal(res4.status, 'NO_CHANGES_ALREADY_COPIED');
+  assert.equal(res4.appliedDeltas.length, 0);
+
+  // 5. Trader performs a -40% PARTIAL_EXIT -> clicking manual copy copies ONLY the -40% partial exit on the existing position ('SYNCED_DELTAS_ONLY')
+  const tPartialExit = t0 + 60_000;
+  const posAfterPartialExit: TraderOpenPosition = {
+    ...posAfterScaleIn,
+    positionAmount: 9,
+    lastUpdateTime: tPartialExit,
+    currentScalePercent: 90,
+    scaleAdjustments: [
+      ...posAfterScaleIn.scaleAdjustments,
+      {
+        id: 'eth_partial_exit_40',
+        actionType: 'PARTIAL_EXIT',
+        actionLabelAr: 'انسحاب جزئي -40%',
+        timestamp: tPartialExit,
+        volumePercent: -40,
+        remainingPercentAfter: 90,
+        executedQty: 6,
+        price: 3050,
+      },
+    ],
+  };
+
+  const res5 = engine.copyOrSyncSinglePositionManually({
+    pos: posAfterPartialExit,
+    traderName: 'ManualMaster',
+    entryPrice: 3050,
+  });
+  assert.equal(res5.status, 'SYNCED_DELTAS_ONLY');
+  assert.equal(res5.appliedDeltas.length, 1);
+  assert.equal(res5.appliedDeltas[0].actionType, 'PARTIAL_EXIT');
+  assert.equal(res5.appliedDeltas[0].volumePercent, 40);
+  assert.equal(engine.getAccount().positions.filter((p) => p.status === 'OPEN').length, 1);
+  assert.equal(res5.position.id, res1.position.id);
+  assert.equal(res5.position.currentScalePercent, 90);
+
+  // 6. Clicking manual copy again after partial exit is already synced -> does nothing ('NO_CHANGES_ALREADY_COPIED')
+  const res6 = engine.copyOrSyncSinglePositionManually({
+    pos: posAfterPartialExit,
+    traderName: 'ManualMaster',
+    entryPrice: 3050,
+  });
+  assert.equal(res6.status, 'NO_CHANGES_ALREADY_COPIED');
+  assert.equal(res6.appliedDeltas.length, 0);
+});
+

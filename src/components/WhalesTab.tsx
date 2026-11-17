@@ -41,6 +41,7 @@ import {
   KuCoinConnectionState,
   TradeExecutionSettings,
   PaperVirtualAccountSummary,
+  ManualSingleCopyResult,
 } from '../types';
 import {
   fetchSmartMoneyTradersList,
@@ -75,7 +76,7 @@ interface WhalesTabProps {
     traderName: string,
     marginUsdt: number,
     accountId?: string
-  ) => void;
+  ) => ManualSingleCopyResult | undefined;
   onOpenSimulationTab: () => void;
   targetWhaleId?: string | null;
   onClearTargetWhaleId?: () => void;
@@ -1400,14 +1401,15 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
           if (target.type === 'WHALE') {
             executeCopyWhaleToAccount(target.whale, chosenAccountId);
           } else if (target.type === 'SINGLE_POSITION') {
-            onCopySinglePosition(
+            const copyResult = onCopySinglePosition(
               target.pos,
               target.traderName,
               chosenTradeVal,
               chosenAccountId
             );
             setFeedbackBanner(
-              `${target.customBanner || `تم نسخ مركز ${target.pos.symbol}`} إلى حساب «${chosenAccName}»!`
+              copyResult?.messageAr ||
+                `${target.customBanner || `تم نسخ مركز ${target.pos.symbol}`} إلى حساب «${chosenAccName}»!`
             );
           }
         }}

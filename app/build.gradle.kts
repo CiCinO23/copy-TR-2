@@ -12,8 +12,8 @@ android {
         applicationId = "ai.whalecopy.pro"
         minSdk = 24
         targetSdk = 34
-        versionCode = 215
-        versionName = "2.15"
+        versionCode = 217
+        versionName = "2.17"
         buildConfigField("String", "API_BASE_URL", "\"http://10.0.2.2:8000/\"")
     }
 

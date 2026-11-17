@@ -19,6 +19,8 @@ import {
   formatTradeTimestampAr,
   isTraderTradePermanentlyClosed,
   hasTraderEntryAlreadyBeenSynced,
+  evaluateAccountDrawdownAlertDecision,
+  evaluateManualSinglePositionCopyPlan,
 } from '../tradeExecutionRules';
 import type {
   ActiveCopiedTrader,
@@ -26,6 +28,7 @@ import type {
   PendingReconnectTradeChoice,
   PositionScaleAdjustment,
   TraderLatestRecord,
+  TraderOpenPosition,
   TraderPositionHistoryItem,
 } from '../../types';
 
@@ -724,3 +727,182 @@ test('calculatePositionQuantityIncreaseScaleInPct and shouldExecuteWhaleOrLiveTr
     false
   );
 });
+
+test('evaluateAccountDrawdownAlertDecision prevents duplicate low-balance notifications on internet reconnect and price oscillation (v2.16)', () => {
+  const t0 = 1700000000000;
+
+  // 1. First time crossing 10% threshold (at 11.2%) alerts once
+  const first = evaluateAccountDrawdownAlertDecision({
+    drawdownPercent: 11.2,
+    thresholdPercent: 10,
+    previousState: null,
+    now: t0,
+    isOnline: true,
+  });
+  assert.equal(first.shouldAlert, true);
+  assert.ok(first.nextState);
+  assert.equal(first.nextState.isArmed, false);
+
+  // 2. Rapid oscillation down to 5% (e.g. partial price map on reconnect 500ms later) and back to 11.5% must NOT re-arm or re-alert
+  const oscDown = evaluateAccountDrawdownAlertDecision({
+    drawdownPercent: 5.0,
+    thresholdPercent: 10,
+    previousState: first.nextState,
+    now: t0 + 500,
+    isOnline: true,
+  });
+  assert.equal(oscDown.shouldAlert, false);
+  assert.equal(oscDown.nextState?.isArmed, false);
+
+  const oscUp = evaluateAccountDrawdownAlertDecision({
+    drawdownPercent: 11.5,
+    thresholdPercent: 10,
+    previousState: oscDown.nextState,
+    now: t0 + 1000,
+    isOnline: true,
+  });
+  assert.equal(oscUp.shouldAlert, false);
+
+  // 3. During offline -> online reconnect grace window (within 4000ms of lastOnlineReconnectAt), never alerts or resets state
+  const reconnectTick = evaluateAccountDrawdownAlertDecision({
+    drawdownPercent: 18.0, // even if +6.8% higher during the 4s reconnect stabilization window
+    thresholdPercent: 10,
+    previousState: oscUp.nextState,
+    now: t0 + 10_000,
+    isOnline: true,
+    lastOnlineReconnectAt: t0 + 8_500,
+    reconnectGracePeriodMs: 4000,
+  });
+  assert.equal(reconnectTick.shouldAlert, false);
+
+  // 4. Escalation (+5% worse, e.g. 17.0%) within 1 minute of first alert is suppressed by minEscalationCooldownMs (5 minutes)
+  const earlyEscalation = evaluateAccountDrawdownAlertDecision({
+    drawdownPercent: 17.0,
+    thresholdPercent: 10,
+    previousState: oscUp.nextState,
+    now: t0 + 60_000,
+    isOnline: true,
+  });
+  assert.equal(earlyEscalation.shouldAlert, false);
+
+  // 5. After 6 minutes (> 5 min escalation cooldown), if drawdown worsened by >= 5% (to 17.0%), it alerts once
+  const validEscalation = evaluateAccountDrawdownAlertDecision({
+    drawdownPercent: 17.0,
+    thresholdPercent: 10,
+    previousState: oscUp.nextState,
+    now: t0 + 6 * 60_000,
+    isOnline: true,
+  });
+  assert.equal(validEscalation.shouldAlert, true);
+});
+
+test('evaluateManualSinglePositionCopyPlan: opens new position once, does nothing if already copied with no changes, and copies ONLY uncopied deltas (v2.17)', () => {
+  const tEntry = 1700000000000;
+  const incomingPos: TraderOpenPosition = {
+    id: 'pos_btc_1',
+    symbol: 'BTCUSDT',
+    collateral: 'USDT',
+    positionAmount: 1.0,
+    side: 'LONG',
+    entryPrice: 90000,
+    markPrice: 91000,
+    breakEvenPrice: 90000,
+    unrealizedProfit: 1000,
+    cumRealized: 0,
+    notionalValue: 91000,
+    leverage: 5,
+    isolated: false,
+    roePercent: 5.5,
+    entryTime: tEntry,
+    lastUpdateTime: tEntry,
+    currentScalePercent: 100,
+    scaleAdjustments: [
+      {
+        id: 'init_1',
+        actionType: 'INITIAL_ENTRY',
+        actionLabelAr: 'فتح',
+        timestamp: tEntry,
+        volumePercent: 100,
+        remainingPercentAfter: 100,
+        executedQty: 1.0,
+        price: 90000,
+      },
+    ],
+  };
+
+  // 1. Not copied yet -> OPEN_NEW
+  const planNew = evaluateManualSinglePositionCopyPlan({
+    incomingPos,
+    traderName: 'AlphaTrader',
+    existingOpenPositions: [],
+    executionPrice: 91000,
+  });
+  assert.equal(planNew.decision, 'OPEN_NEW');
+  assert.equal(planNew.existingPosition, null);
+
+  // 2. Already copied & open with no new adjustments -> DO_NOTHING_ALREADY_COPIED
+  const existingPos: PaperPosition = {
+    id: 'paper_pos_1',
+    accountId: 'acc_default',
+    symbol: 'BTCUSDT',
+    side: 'LONG',
+    quantity: 0.00137,
+    marginUsdt: 25,
+    initialMarginUsdt: 25,
+    entryPrice: 91000,
+    leverage: 5,
+    commissionUsdt: 0.05,
+    status: 'OPEN',
+    openTime: tEntry + 5000,
+    traderEntryTime: tEntry,
+    currentScalePercent: 100,
+    sourceTraderName: 'AlphaTrader',
+    sourceType: 'COPY_TRADING',
+    appliedSyncEventIds: [...planNew.initialAppliedEventKeys],
+    lastSyncedTraderQty: 1.0,
+    scaleAdjustments: [],
+  };
+
+  const planAlreadyCopied = evaluateManualSinglePositionCopyPlan({
+    incomingPos,
+    traderName: 'AlphaTrader',
+    existingOpenPositions: [existingPos],
+    executionPrice: 91000,
+  });
+  assert.equal(planAlreadyCopied.decision, 'DO_NOTHING_ALREADY_COPIED');
+  assert.equal(planAlreadyCopied.deltaActions.length, 0);
+
+  // 3. Already copied, and trader has an uncopied PARTIAL_EXIT (-40%) -> SYNC_DELTAS_ONLY
+  const tPartial = tEntry + 60_000;
+  const posWithUncopiedPartialExit: TraderOpenPosition = {
+    ...incomingPos,
+    positionAmount: 0.6,
+    lastUpdateTime: tPartial,
+    currentScalePercent: 60,
+    scaleAdjustments: [
+      ...incomingPos.scaleAdjustments,
+      {
+        id: 'partial_exit_40',
+        actionType: 'PARTIAL_EXIT',
+        actionLabelAr: 'انسحاب جزئي -40%',
+        timestamp: tPartial,
+        volumePercent: -40,
+        remainingPercentAfter: 60,
+        executedQty: 0.4,
+        price: 92000,
+      },
+    ],
+  };
+
+  const planDelta = evaluateManualSinglePositionCopyPlan({
+    incomingPos: posWithUncopiedPartialExit,
+    traderName: 'AlphaTrader',
+    existingOpenPositions: [existingPos],
+    executionPrice: 92000,
+  });
+  assert.equal(planDelta.decision, 'SYNC_DELTAS_ONLY');
+  assert.equal(planDelta.deltaActions.length, 1);
+  assert.equal(planDelta.deltaActions[0].actionType, 'PARTIAL_EXIT');
+  assert.equal(planDelta.deltaActions[0].volumePercent, 40);
+});
+

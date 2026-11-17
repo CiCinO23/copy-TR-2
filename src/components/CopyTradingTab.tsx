@@ -44,6 +44,7 @@ import {
   KuCoinConnectionState,
   TradeExecutionSettings,
   PaperVirtualAccountSummary,
+  ManualSingleCopyResult,
 } from '../types';
 import {
   fetchCopyTradersList,
@@ -80,7 +81,7 @@ interface CopyTradingTabProps {
     traderName: string,
     marginUsdt: number,
     accountId?: string
-  ) => void;
+  ) => ManualSingleCopyResult | undefined;
   onOpenSimulationTab: () => void;
   targetTraderId?: string | null;
   onClearTargetTraderId?: () => void;
@@ -1015,12 +1016,19 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                                 )}
                               </div>
 
-                              {(isEntry || isScaleIn) && rec.avgPrice > 0 && (
+                              {(isEntry || isScaleIn || isPartialExit) && rec.avgPrice > 0 && (
                                 <button
                                   onClick={() => {
                                     const side: 'LONG' | 'SHORT' =
-                                      rec.positionSide === 'SHORT' ||
-                                      (rec.positionSide === 'BOTH' && rec.side === 'SELL')
+                                      rec.positionSide === 'SHORT'
+                                        ? 'SHORT'
+                                        : rec.positionSide === 'LONG'
+                                        ? 'LONG'
+                                        : isPartialExit
+                                        ? rec.side === 'BUY'
+                                          ? 'SHORT'
+                                          : 'LONG'
+                                        : rec.side === 'SELL'
                                         ? 'SHORT'
                                         : 'LONG';
                                     setPendingCopyTarget({
@@ -1046,7 +1054,11 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                                         scaleAdjustments: [
                                           {
                                             id: `${rec.id}_adj`,
-                                            actionType: isScaleIn ? 'SCALE_IN' : 'INITIAL_ENTRY',
+                                            actionType: isScaleIn
+                                              ? 'SCALE_IN'
+                                              : isPartialExit
+                                              ? 'PARTIAL_EXIT'
+                                              : 'INITIAL_ENTRY',
                                             actionLabelAr: rec.actionLabelAr,
                                             timestamp: rec.orderTime,
                                             volumePercent: rec.volumePercent,
@@ -1057,12 +1069,22 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                                         ],
                                       },
                                       traderName: traderDetail.nickname,
-                                      customBanner: `تم نسخ حركة ${isScaleIn ? `التدعيم (+${rec.volumePercent}%)` : 'الدخول'} (${rec.symbol} ${side}) من نافذة Latest records للمتداول ${traderDetail.nickname}`,
+                                      customBanner: `تم نسخ حركة ${
+                                        isScaleIn
+                                          ? `التدعيم (+${rec.volumePercent}%)`
+                                          : isPartialExit
+                                          ? `السحب الجزئي (${rec.volumePercent}%)`
+                                          : 'الدخول'
+                                      } (${rec.symbol} ${side}) من نافذة Latest records للمتداول ${traderDetail.nickname}`,
                                     });
                                   }}
                                   className="bg-[#01BC8D]/20 hover:bg-[#01BC8D]/30 text-[#01BC8D] border border-[#01BC8D]/40 px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer whitespace-nowrap shrink-0"
                                 >
-                                  {isScaleIn ? `نسخ التدعيم (+${rec.volumePercent}%)` : 'نسخ الدخول'}
+                                  {isScaleIn
+                                    ? `نسخ التدعيم (+${rec.volumePercent}%)`
+                                    : isPartialExit
+                                    ? `نسخ السحب الجزئي (${rec.volumePercent}%)`
+                                    : 'نسخ الدخول'}
                                 </button>
                               )}
                             </div>
@@ -1521,14 +1543,15 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
           if (target.type === 'TRADER') {
             executeCopyTraderToAccount(target.trader, chosenAccountId);
           } else if (target.type === 'SINGLE_POSITION') {
-            onCopySinglePosition(
+            const copyResult = onCopySinglePosition(
               target.pos,
               target.traderName,
               chosenTradeVal,
               chosenAccountId
             );
             setFeedbackBanner(
-              `${target.customBanner || `تم نسخ الصفقة ${target.pos.symbol}`} إلى حساب «${chosenAccName}»!`
+              copyResult?.messageAr ||
+                `${target.customBanner || `تم نسخ الصفقة ${target.pos.symbol}`} إلى حساب «${chosenAccName}»!`
             );
           }
         }}

@@ -10,6 +10,8 @@ import type {
   PendingReconnectTradeChoice,
   ActiveCopiedTrader,
   TraderSyncCheckpoint,
+  ManualAppliedDeltaExecution,
+  ManualSingleCopyResult,
 } from '../types';
 import { mobileNotifications } from './mobileNotifications';
 import {
@@ -30,6 +32,8 @@ import {
   isTraderActionAlreadyProcessed,
   isTraderTradePermanentlyClosed,
   hasTraderEntryAlreadyBeenSynced,
+  buildInitialAppliedEventKeysForOpenPosition,
+  evaluateManualSinglePositionCopyPlan,
 } from './tradeExecutionRules';
 
 const PAPER_STORAGE_KEY = 'whale_copy_paper_state_v3';
@@ -88,11 +92,26 @@ export class PaperEngine {
   private pendingReconnectChoices: PendingReconnectTradeChoice[] = [];
   private dismissedReconnectChoiceIds: Set<string> = new Set();
   private traderSyncCheckpoints: Record<string, TraderSyncCheckpoint> = {};
+  private lastKnownPrices: Record<string, number> = {};
 
   constructor() {
     this.loadMultiAccounts();
     this.loadPendingChoices();
     this.loadTraderSyncCheckpoints();
+  }
+
+  private mergeWithLastKnownPrices(incoming: Record<string, number> = {}): Record<string, number> {
+    if (incoming && typeof incoming === 'object') {
+      for (const [rawSym, rawPrice] of Object.entries(incoming)) {
+        const num = Number(rawPrice);
+        if (rawSym && Number.isFinite(num) && num > 0) {
+          const cleanSym = rawSym.toUpperCase().trim();
+          this.lastKnownPrices[cleanSym] = num;
+          this.lastKnownPrices[rawSym] = num;
+        }
+      }
+    }
+    return { ...this.lastKnownPrices, ...(incoming || {}) };
   }
 
   private loadStoredCopiedTraders(): ActiveCopiedTrader[] {
@@ -544,6 +563,7 @@ export class PaperEngine {
   }
 
   public getAccountsSummaries(currentPrices: Record<string, number> = {}): PaperVirtualAccountSummary[] {
+    const effectivePrices = this.mergeWithLastKnownPrices(currentPrices);
     return this.accounts.map((acc) => {
       let totalUnrealized = 0;
       let openPositionsMargin = 0;
@@ -555,7 +575,10 @@ export class PaperEngine {
           openCount++;
           const margin = p.marginUsdt || (p.quantity * p.entryPrice) / p.leverage;
           openPositionsMargin += margin;
-          const currentPrice = currentPrices[p.symbol] || p.entryPrice;
+          const currentPrice =
+            effectivePrices[p.symbol] ||
+            effectivePrices[p.symbol.toUpperCase()] ||
+            p.entryPrice;
           const dir = p.side === 'LONG' ? 1 : -1;
           totalUnrealized += (currentPrice - p.entryPrice) * p.quantity * dir;
         } else {
@@ -853,6 +876,7 @@ export class PaperEngine {
       this.pendingReconnectChoices = [];
       this.dismissedReconnectChoiceIds.clear();
       this.traderSyncCheckpoints = {};
+      this.lastKnownPrices = {};
     } else {
       const activeId = this.getActiveAccountId();
       this.pendingReconnectChoices = this.pendingReconnectChoices.filter(
@@ -1058,6 +1082,8 @@ export class PaperEngine {
     traderScaleAdjustments?: PaperPosition['scaleAdjustments'];
     currentScalePercent?: number;
     accountId?: string;
+    initialAppliedEventKeys?: string[];
+    lastSyncedTraderQty?: number;
   }): PaperPosition {
     const acc = this.getAccount(params.accountId);
     const accSettings = acc.settings;
@@ -1094,7 +1120,7 @@ export class PaperEngine {
       entryTimestamp: Date.now(),
     });
 
-    return this.openPosition(
+    const openedPos = this.openPosition(
       params.symbol,
       params.side,
       lateEntryState.directQuantity,
@@ -1110,6 +1136,171 @@ export class PaperEngine {
       acc.id,
       params.traderEntryPrice
     );
+
+    const foldedKeys = [
+      ...buildInitialAppliedEventKeysForOpenPosition(params.symbol, params.traderScaleAdjustments),
+      ...(params.initialAppliedEventKeys || []),
+    ];
+    if (foldedKeys.length > 0) {
+      this.recordAppliedSyncEventIds(openedPos, foldedKeys);
+    }
+    if (params.lastSyncedTraderQty !== undefined && params.lastSyncedTraderQty > 0) {
+      openedPos.lastSyncedTraderQty = Math.abs(params.lastSyncedTraderQty);
+      openedPos.lastSyncedTraderUpdateTime = Date.now();
+    }
+    if (foldedKeys.length > 0 || (params.lastSyncedTraderQty !== undefined && params.lastSyncedTraderQty > 0)) {
+      this.saveState();
+    }
+
+    return openedPos;
+  }
+
+  /**
+   * Manual Single Position Copy or Delta Sync:
+   * - If the trade is NOT yet copied in the target account -> opens it once ('OPENED_NEW').
+   * - If the trade IS already copied & open in the target account:
+   *   - If there are NO uncopied partial exits or scale-ins -> does nothing ('NO_CHANGES_ALREADY_COPIED').
+   *   - If there ARE uncopied partial exits or scale-ins -> applies ONLY the uncopied changes ('SYNCED_DELTAS_ONLY')
+   *     without repeating or duplicating the position from scratch.
+   */
+  public copyOrSyncSinglePositionManually(params: {
+    pos: TraderOpenPosition;
+    traderName: string;
+    traderId?: string;
+    sourceType?: 'COPY_TRADING' | 'SMART_MONEY' | 'MANUAL';
+    entryPrice: number;
+    customMarginUsdt?: number;
+    customLeverage?: number;
+    accountId?: string;
+  }): ManualSingleCopyResult {
+    const acc = this.getAccount(params.accountId);
+    const safePrice =
+      params.entryPrice > 0
+        ? params.entryPrice
+        : params.pos.markPrice > 0
+        ? params.pos.markPrice
+        : params.pos.entryPrice;
+
+    const openPositionsInAcc = acc.positions.filter((p) => p.status === 'OPEN');
+    const plan = evaluateManualSinglePositionCopyPlan({
+      incomingPos: params.pos,
+      traderName: params.traderName,
+      traderId: params.traderId,
+      existingOpenPositions: openPositionsInAcc,
+      executionPrice: safePrice,
+    });
+
+    if (plan.decision === 'OPEN_NEW') {
+      const openedPos = this.openPositionWithUserSettings({
+        symbol: params.pos.symbol,
+        side: params.pos.side,
+        entryPrice: safePrice,
+        traderEntryPrice: params.pos.entryPrice,
+        traderLeverage: params.pos.leverage,
+        customMarginUsdt: params.customMarginUsdt,
+        customLeverage: params.customLeverage,
+        sourceTraderId: params.traderId,
+        sourceTraderName: params.traderName,
+        sourceType: params.sourceType || 'COPY_TRADING',
+        traderEntryTime: params.pos.entryTime,
+        traderScaleAdjustments: params.pos.scaleAdjustments,
+        currentScalePercent: params.pos.currentScalePercent,
+        accountId: acc.id,
+        initialAppliedEventKeys: plan.initialAppliedEventKeys,
+        lastSyncedTraderQty: Math.abs(Number(params.pos.positionAmount || 0)),
+      });
+
+      return {
+        status: 'OPENED_NEW',
+        position: openedPos,
+        appliedDeltas: [],
+        messageAr: `تم نسخ وفتح صفقة ${openedPos.symbol} (${openedPos.side}) في "${acc.name}" بسعر السوق الحالي (${safePrice.toFixed(2)}$) ورافعة ${openedPos.leverage}x (هامش: ${openedPos.marginUsdt.toFixed(2)} USDT)`,
+      };
+    }
+
+    const existingPos = plan.existingPosition!;
+    if (plan.decision === 'DO_NOTHING_ALREADY_COPIED' || plan.deltaActions.length === 0) {
+      return {
+        status: 'NO_CHANGES_ALREADY_COPIED',
+        position: existingPos,
+        appliedDeltas: [],
+        messageAr: `صفقة ${existingPos.symbol} (${existingPos.side}) منسوخة ومفتوحة مسبقاً في "${acc.name}" — لا توجد أي سحوبات جزئية أو تدعيمات جديدة غير منسوخة`,
+      };
+    }
+
+    let updatedPos = existingPos;
+    const appliedDeltas: ManualAppliedDeltaExecution[] = [];
+    const summaryLabels: string[] = [];
+
+    for (const delta of plan.deltaActions) {
+      const prevMargin = updatedPos.marginUsdt;
+      const prevQty = updatedPos.quantity;
+      const execPrice = delta.price > 0 ? delta.price : safePrice;
+
+      if (delta.actionType === 'SCALE_IN') {
+        updatedPos = this.scaleInFromTraderSignal(
+          updatedPos.id,
+          delta.volumePercent,
+          execPrice,
+          delta.timestamp,
+          acc.id,
+          {
+            sourceEventId: delta.sourceEventId,
+            appliedEventKeys: delta.candidateKeys,
+            eventKey: `${acc.id}_${updatedPos.id}_${delta.sourceEventId}`,
+          }
+        );
+        const marginDelta = Math.max(0.5, Number((updatedPos.marginUsdt - prevMargin).toFixed(2)));
+        const qtyDelta = Math.max(0.00001, Number((updatedPos.quantity - prevQty).toFixed(5)));
+        appliedDeltas.push({
+          actionType: 'SCALE_IN',
+          volumePercent: delta.volumePercent,
+          price: execPrice,
+          marginDeltaUsdt: marginDelta,
+          executedQty: qtyDelta,
+          leverage: updatedPos.leverage,
+        });
+        summaryLabels.push(`تدعيم +${delta.volumePercent}%`);
+      } else if (delta.actionType === 'PARTIAL_EXIT') {
+        updatedPos = this.partialExitPosition(
+          updatedPos.id,
+          delta.volumePercent,
+          execPrice,
+          delta.timestamp,
+          acc.id,
+          {
+            sourceEventId: delta.sourceEventId,
+            appliedEventKeys: delta.candidateKeys,
+            eventKey: `${acc.id}_${updatedPos.id}_${delta.sourceEventId}`,
+          }
+        );
+        const marginDelta = Math.max(0.25, Number((prevMargin - updatedPos.marginUsdt).toFixed(2)));
+        const qtyDelta = Math.max(0.00001, Number((prevQty - updatedPos.quantity).toFixed(5)));
+        appliedDeltas.push({
+          actionType: 'PARTIAL_EXIT',
+          volumePercent: delta.volumePercent,
+          price: execPrice,
+          marginDeltaUsdt: marginDelta,
+          executedQty: qtyDelta,
+          leverage: updatedPos.leverage,
+        });
+        summaryLabels.push(`سحب جزئي -${delta.volumePercent}%`);
+      }
+    }
+
+    const latestTraderQty = Math.abs(Number(params.pos.positionAmount || 0));
+    if (latestTraderQty > 0) {
+      updatedPos.lastSyncedTraderQty = latestTraderQty;
+    }
+    updatedPos.lastSyncedTraderUpdateTime = params.pos.lastUpdateTime || Date.now();
+    this.saveState();
+
+    return {
+      status: 'SYNCED_DELTAS_ONLY',
+      position: updatedPos,
+      appliedDeltas,
+      messageAr: `الصفقة منسوخة مسبقاً في "${acc.name}" — تم نسخ التغييرات غير المنسوخة فقط (${summaryLabels.join(' ، ')}) على ${updatedPos.symbol} بدون تكرار الصفقة من جديد`,
+    };
   }
 
   /**
@@ -2658,8 +2849,9 @@ export class PaperEngine {
   }
 
   public getSnapshot(currentPrices: Record<string, number>, accountId?: string): PaperAccountSnapshot {
+    const effectivePrices = this.mergeWithLastKnownPrices(currentPrices);
     // Automatically check and execute any Stop-Loss (including secured near-current-price stop-loss)
-    this.checkAndExecuteStopLosses(currentPrices);
+    this.checkAndExecuteStopLosses(effectivePrices);
 
     const acc = this.getAccount(accountId);
     let totalUnrealized = 0;
@@ -2670,7 +2862,10 @@ export class PaperEngine {
         const margin = p.marginUsdt || (p.quantity * p.entryPrice) / p.leverage;
         openPositionsMargin += margin;
 
-        const currentPrice = currentPrices[p.symbol] || p.entryPrice;
+        const currentPrice =
+          effectivePrices[p.symbol] ||
+          effectivePrices[p.symbol.toUpperCase()] ||
+          p.entryPrice;
         const dir = p.side === 'LONG' ? 1 : -1;
         const uPnl = (currentPrice - p.entryPrice) * p.quantity * dir;
         totalUnrealized += uPnl;
@@ -2678,7 +2873,7 @@ export class PaperEngine {
     }
 
     const totalEquity = acc.availableBalance + openPositionsMargin + totalUnrealized;
-    const summaries = this.getAccountsSummaries(currentPrices);
+    const summaries = this.getAccountsSummaries(effectivePrices);
 
     // Check if any virtual account reached the configured Drawdown threshold and dispatch an instant Push Notification
     mobileNotifications.checkAccountsDrawdown(summaries);

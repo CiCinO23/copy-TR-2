@@ -324,7 +324,7 @@ class WhaleBackgroundService : Service() {
 
         return NotificationCompat.Builder(this, BG_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
-            .setContentTitle("Copy TR يعمل في الخلفية (v2.15)")
+            .setContentTitle("Copy TR يعمل في الخلفية (v2.17)")
             .setContentText("مراقبة الصفقات المنسوخة وإشعارات شاشة القفل نشطة بلا توقف")
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)

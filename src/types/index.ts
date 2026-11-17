@@ -571,5 +571,30 @@ export interface KuCoinSecurityLockConfig {
   protectRealTradingSwitch: boolean;
 }
 
+export interface ManualPositionDeltaAction {
+  actionType: 'SCALE_IN' | 'PARTIAL_EXIT';
+  volumePercent: number;
+  price: number;
+  timestamp: number;
+  sourceEventId: string;
+  candidateKeys: string[];
+}
+
+export interface ManualAppliedDeltaExecution {
+  actionType: 'SCALE_IN' | 'PARTIAL_EXIT';
+  volumePercent: number;
+  price: number;
+  marginDeltaUsdt: number;
+  executedQty: number;
+  leverage: number;
+}
+
+export interface ManualSingleCopyResult {
+  status: 'OPENED_NEW' | 'SYNCED_DELTAS_ONLY' | 'NO_CHANGES_ALREADY_COPIED';
+  position: PaperPosition;
+  appliedDeltas: ManualAppliedDeltaExecution[];
+  messageAr: string;
+}
+
 
 

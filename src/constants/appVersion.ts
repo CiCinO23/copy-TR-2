@@ -20,9 +20,11 @@ import { normalizeToWesternDigits } from '../utils/formatters';
  * 13. v2.13 - توحيد مؤقتات المزامنة العامة في مجدول خلفي مركزي (Centralized Background Scheduler) ينظف المستمعات والمؤقتات تلقائياً عند تغير حالة ظهور التطبيق لمنع تضارب الموارد
  * 14. v2.14 - تنفيذ آلية تنظيف الذاكرة التلقائي والدوري (Memory Cleanup) لمسح الكاش عند تجاوز حدود استهلاك الذاكرة ومنع الانهيارات في الأجهزة ذات الإمكانيات المحدودة
  * 15. v2.15 - التنفيذ الفوري في نفس اللحظة لصفقات الحيتان (Smart Money Whales) والصفقات الحية بدون تأخير أو انتظار، مع كشف التدعيم اللحظي ومزامنة المحافظ الحية
+ * 16. v2.16 - منع تكرار إشعار انخفاض الرصيد (Drawdown Alert) عند الاتصال بالإنترنت بعد انقطاعه وتوحيد أسعار تقييم الحساب
+ * 17. v2.17 - منع تكرار الصفقة المنسوخة مسبقاً عند النسخ اليدوي والاكتفاء بنسخ التغييرات الجديدة فقط (التدعيم أو السحب الجزئي)
  */
 export const APP_MAJOR_VERSION = 2;
-export const APP_PROMPT_REVISION = 15;
+export const APP_PROMPT_REVISION = 17;
 export const APP_VERSION = `${APP_MAJOR_VERSION}.${APP_PROMPT_REVISION}`;
 
 export interface PromptVersionEntry {
@@ -106,6 +108,16 @@ export const PROMPT_VERSION_HISTORY: PromptVersionEntry[] = [
     version: '2.15',
     promptNumber: 15,
     summaryAr: 'التنفيذ الفوري في نفس اللحظة لصفقات الحيتان والصفقات الحية بدون تأخير، مع كشف التدعيم اللحظي وتحديث المزامنة الفورية',
+  },
+  {
+    version: '2.16',
+    promptNumber: 16,
+    summaryAr: 'منع تكرار إشعار انخفاض الرصيد عند عودة الاتصال بالإنترنت بعد انقطاعه وتوحيد أسعار تقييم الحساب',
+  },
+  {
+    version: '2.17',
+    promptNumber: 17,
+    summaryAr: 'منع تكرار الصفقة المنسوخة مسبقاً عند النسخ اليدوي والاكتفاء بنسخ التغييرات غير المنسوخة فقط (التدعيم أو السحب الجزئي)',
   },
 ];
 

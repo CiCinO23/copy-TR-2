@@ -10,10 +10,12 @@
 
 import type {
   ActiveCopiedTrader,
+  ManualPositionDeltaAction,
   PaperPosition,
   PendingReconnectTradeChoice,
   PositionScaleAdjustment,
   TraderLatestRecord,
+  TraderOpenPosition,
   TraderPositionHistoryItem,
   TraderSyncCheckpoint,
 } from '../types';
@@ -836,5 +838,557 @@ export function hasTraderEntryAlreadyBeenSynced(params: {
   return false;
 }
 
+export interface AccountDrawdownAlertStateRecord {
+  alertedAtThreshold: number;
+  peakAlertedDrawdown: number;
+  lastAlertTimestamp: number;
+  isArmed?: boolean;
+  recoveryConfirmationCount?: number;
+}
 
+export interface DrawdownAlertEvaluationResult {
+  shouldAlert: boolean;
+  stateChanged: boolean;
+  nextState: AccountDrawdownAlertStateRecord | null;
+}
+
+/**
+ * Pure decision function for Virtual Account Drawdown Alerts (`DRAWDOWN_ALERT`).
+ * Prevents duplicate low-balance notification storms when reconnecting to the internet
+ * after a disconnection or when partial price updates oscillate around the threshold:
+ * 1. Suppresses evaluation while offline (`isOnline === false`) or during the post-reconnect
+ *    stabilization grace window (`reconnectGracePeriodMs`, default 4,000ms) so out-of-order
+ *    or partial price maps never reset the alert lock or trigger false spikes.
+ * 2. Locks an account's drawdown wave (`isArmed = false`) after alerting so repeated syncs
+ *    at the same drawdown level never emit duplicate notifications.
+ * 3. Only escalates within an active drawdown wave if drawdown worsens by >= +5% AND at least
+ *    `minEscalationCooldownMs` (default 5 minutes) has elapsed since the previous alert
+ *    (or if the user explicitly lowered `thresholdPercent` in settings).
+ * 4. Requires sustained recovery (`requiredRecoveryConfirmations`, default 3 consecutive checks
+ *    at <= 85% of threshold after at least 60s) AND `minRepeatCooldownMs` (default 15 minutes)
+ *    before re-arming for a future drawdown wave.
+ */
+export function evaluateAccountDrawdownAlertDecision(params: {
+  drawdownPercent: number;
+  thresholdPercent: number;
+  previousState?: AccountDrawdownAlertStateRecord | null;
+  now?: number;
+  isOnline?: boolean;
+  lastOnlineReconnectAt?: number;
+  reconnectGracePeriodMs?: number;
+  minRepeatCooldownMs?: number;
+  minEscalationCooldownMs?: number;
+  requiredRecoveryConfirmations?: number;
+}): DrawdownAlertEvaluationResult {
+  const ddPct = parseFloat(Math.max(0, Number(params.drawdownPercent) || 0).toFixed(2));
+  const threshold = Math.max(0.5, Number(params.thresholdPercent) || 10);
+  const now = params.now && params.now > 0 ? params.now : Date.now();
+  const isOnline = params.isOnline ?? true;
+  const lastReconnectAt = Number(params.lastOnlineReconnectAt || 0);
+  const reconnectGraceMs = params.reconnectGracePeriodMs ?? 4_000;
+  const minRepeatCooldownMs = params.minRepeatCooldownMs ?? 15 * 60 * 1000;
+  const minEscalationCooldownMs = params.minEscalationCooldownMs ?? 5 * 60 * 1000;
+  const requiredConfirmations = Math.max(2, params.requiredRecoveryConfirmations ?? 3);
+
+  const prev: AccountDrawdownAlertStateRecord | null = params.previousState
+    ? {
+        alertedAtThreshold: Number(params.previousState.alertedAtThreshold || threshold),
+        peakAlertedDrawdown: Number(params.previousState.peakAlertedDrawdown || 0),
+        lastAlertTimestamp: Number(params.previousState.lastAlertTimestamp || 0),
+        isArmed: Boolean(params.previousState.isArmed ?? false),
+        recoveryConfirmationCount: Number(params.previousState.recoveryConfirmationCount || 0),
+      }
+    : null;
+
+  // 1. Offline or inside post-reconnect stabilization window: never reset state or emit duplicate alerts
+  if (!isOnline) {
+    return {
+      shouldAlert: false,
+      stateChanged: false,
+      nextState: prev,
+    };
+  }
+
+  if (
+    lastReconnectAt > 0 &&
+    now >= lastReconnectAt &&
+    now - lastReconnectAt < reconnectGraceMs
+  ) {
+    return {
+      shouldAlert: false,
+      stateChanged: false,
+      nextState: prev,
+    };
+  }
+
+  // 2. Account is at or above the drawdown threshold
+  if (ddPct >= threshold) {
+    if (!prev) {
+      return {
+        shouldAlert: true,
+        stateChanged: true,
+        nextState: {
+          alertedAtThreshold: threshold,
+          peakAlertedDrawdown: ddPct,
+          lastAlertTimestamp: now,
+          isArmed: false,
+          recoveryConfirmationCount: 0,
+        },
+      };
+    }
+
+    const elapsedSinceLastAlert = Math.max(0, now - prev.lastAlertTimestamp);
+    const thresholdWasLoweredByUser = threshold < prev.alertedAtThreshold - 0.01;
+    const worsenedSignificantly = ddPct >= prev.peakAlertedDrawdown + 5;
+
+    let shouldAlert = false;
+    if (thresholdWasLoweredByUser) {
+      shouldAlert = true;
+    } else if (prev.isArmed) {
+      // Account had previously recovered; only alert if repeat cooldown elapsed or drawdown worsened by >= 5%
+      shouldAlert =
+        elapsedSinceLastAlert >= minRepeatCooldownMs ||
+        (worsenedSignificantly && elapsedSinceLastAlert >= minEscalationCooldownMs);
+    } else {
+      // Account is still in the same drawdown wave: only alert if worsened by >= 5% AND escalation cooldown elapsed
+      shouldAlert = worsenedSignificantly && elapsedSinceLastAlert >= minEscalationCooldownMs;
+    }
+
+    if (shouldAlert) {
+      return {
+        shouldAlert: true,
+        stateChanged: true,
+        nextState: {
+          alertedAtThreshold: threshold,
+          peakAlertedDrawdown: Math.max(ddPct, prev.peakAlertedDrawdown),
+          lastAlertTimestamp: now,
+          isArmed: false,
+          recoveryConfirmationCount: 0,
+        },
+      };
+    }
+
+    const nextPeak = Math.max(ddPct, prev.peakAlertedDrawdown);
+    const stateChanged =
+      nextPeak !== prev.peakAlertedDrawdown ||
+      prev.recoveryConfirmationCount !== 0 ||
+      prev.isArmed !== false;
+
+    return {
+      shouldAlert: false,
+      stateChanged,
+      nextState: {
+        ...prev,
+        peakAlertedDrawdown: nextPeak,
+        isArmed: false,
+        recoveryConfirmationCount: 0,
+      },
+    };
+  }
+
+  // 3. Account is below the drawdown threshold
+  if (!prev) {
+    return {
+      shouldAlert: false,
+      stateChanged: false,
+      nextState: null,
+    };
+  }
+
+  const elapsedSinceLastAlert = Math.max(0, now - prev.lastAlertTimestamp);
+  // Require drawdown to drop below 85% of threshold AND at least 60 seconds after the alert
+  // so rapid price-map oscillations during internet reconnection never count as recovery
+  if (ddPct <= threshold * 0.85 && elapsedSinceLastAlert >= 60_000) {
+    const nextConfirmations = (prev.recoveryConfirmationCount || 0) + 1;
+    const shouldRearm =
+      nextConfirmations >= requiredConfirmations && elapsedSinceLastAlert >= minRepeatCooldownMs;
+
+    if (shouldRearm && !prev.isArmed) {
+      return {
+        shouldAlert: false,
+        stateChanged: true,
+        nextState: {
+          ...prev,
+          isArmed: true,
+          recoveryConfirmationCount: nextConfirmations,
+        },
+      };
+    }
+
+    if (nextConfirmations !== (prev.recoveryConfirmationCount || 0)) {
+      return {
+        shouldAlert: false,
+        stateChanged: true,
+        nextState: {
+          ...prev,
+          recoveryConfirmationCount: nextConfirmations,
+        },
+      };
+    }
+  }
+
+  return {
+    shouldAlert: false,
+    stateChanged: false,
+    nextState: prev,
+  };
+}
+
+/**
+ * Collects all deterministic deduplication keys for a trader position's existing scaleAdjustments
+ * so that when a position is opened for the first time, all historical adjustments already folded
+ * into its net entry size are marked as applied and never re-applied on subsequent manual clicks.
+ */
+export function buildInitialAppliedEventKeysForOpenPosition(
+  symbol: string,
+  scaleAdjustments?: PositionScaleAdjustment[]
+): string[] {
+  const sym = String(symbol || '').toUpperCase().trim();
+  const keys = new Set<string>();
+  for (const adj of scaleAdjustments || []) {
+    if (adj.actionType !== 'SCALE_IN' && adj.actionType !== 'PARTIAL_EXIT') {
+      continue;
+    }
+    const keyAdj = buildStableTraderEventKey({
+      kind: 'ADJ',
+      symbol: sym,
+      actionType: adj.actionType,
+      rawId: adj.id,
+      timestamp: adj.timestamp,
+      volumePercent: adj.volumePercent,
+      quantity: adj.executedQty,
+    });
+    const keyRec = buildStableTraderEventKey({
+      kind: 'REC',
+      symbol: sym,
+      actionType: adj.actionType,
+      timestamp: adj.timestamp,
+      volumePercent: adj.volumePercent,
+      quantity: adj.executedQty,
+    });
+    keys.add(keyAdj);
+    keys.add(keyRec);
+    if (adj.id) keys.add(adj.id);
+    if (adj.sourceEventId) keys.add(adj.sourceEventId);
+  }
+  return Array.from(keys);
+}
+
+export interface ManualSinglePositionCopyPlan {
+  decision: 'OPEN_NEW' | 'DO_NOTHING_ALREADY_COPIED' | 'SYNC_DELTAS_ONLY';
+  existingPosition: PaperPosition | null;
+  deltaActions: ManualPositionDeltaAction[];
+  initialAppliedEventKeys: string[];
+}
+
+/**
+ * Evaluates what should happen when the user manually clicks "نسخ الصفقة" on a single trader/whale position:
+ * - If the trade is NOT yet open in the target virtual account -> 'OPEN_NEW'
+ * - If the trade IS already open in the target virtual account:
+ *   - If there are NO uncopied partial exits (سحوبات جزئية) or scale-ins (تدعيم) -> 'DO_NOTHING_ALREADY_COPIED'
+ *   - If there ARE uncopied partial exits or scale-ins -> 'SYNC_DELTAS_ONLY' (returns only the uncopied delta actions)
+ */
+export function evaluateManualSinglePositionCopyPlan(params: {
+  incomingPos: TraderOpenPosition;
+  traderName?: string;
+  traderId?: string;
+  existingOpenPositions: PaperPosition[];
+  executionPrice: number;
+}): ManualSinglePositionCopyPlan {
+  const { incomingPos, traderName, traderId, existingOpenPositions, executionPrice } = params;
+  const sym = String(incomingPos.symbol || '').toUpperCase().trim();
+  const safePrice =
+    executionPrice > 0
+      ? executionPrice
+      : incomingPos.markPrice > 0
+      ? incomingPos.markPrice
+      : incomingPos.entryPrice;
+
+  const initialAppliedEventKeys = buildInitialAppliedEventKeysForOpenPosition(
+    sym,
+    incomingPos.scaleAdjustments
+  );
+
+  const cleanTraderName = String(traderName || '').trim().toLowerCase();
+  const cleanTraderId = String(traderId || '').trim();
+
+  const candidatesForSymAndSide = (existingOpenPositions || []).filter(
+    (p) =>
+      p.status === 'OPEN' &&
+      String(p.symbol || '').toUpperCase().trim() === sym &&
+      p.side === incomingPos.side
+  );
+
+  // Match open position by traderId/traderName first, or fallback to same symbol+side if no conflicting trader
+  let existingPosition: PaperPosition | null = null;
+  for (const p of candidatesForSymAndSide) {
+    const pTid = String(p.sourceTraderId || '').trim();
+    const pTname = String(p.sourceTraderName || '').trim().toLowerCase();
+    if (
+      (cleanTraderId && pTid && cleanTraderId === pTid) ||
+      (cleanTraderName && pTname && cleanTraderName === pTname)
+    ) {
+      existingPosition = p;
+      break;
+    }
+  }
+
+  if (!existingPosition && candidatesForSymAndSide.length > 0) {
+    const nonConflicting = candidatesForSymAndSide.find((p) => {
+      const pTid = String(p.sourceTraderId || '').trim();
+      const pTname = String(p.sourceTraderName || '').trim().toLowerCase();
+      const idConflict = Boolean(cleanTraderId && pTid && cleanTraderId !== pTid);
+      const nameConflict = Boolean(cleanTraderName && pTname && cleanTraderName !== pTname);
+      return !idConflict && !nameConflict;
+    });
+    existingPosition = nonConflicting || candidatesForSymAndSide[0];
+  }
+
+  if (!existingPosition) {
+    return {
+      decision: 'OPEN_NEW',
+      existingPosition: null,
+      deltaActions: [],
+      initialAppliedEventKeys,
+    };
+  }
+
+  const deltaActions: ManualPositionDeltaAction[] = [];
+  const queuedEventKeys = new Set<string>();
+  const existingAppliedIds = existingPosition.appliedSyncEventIds || [];
+  const existingAdjustments = existingPosition.scaleAdjustments || [];
+  const existingScalePct = Math.round(Number(existingPosition.currentScalePercent || 100));
+  const incomingScalePct = Math.round(Number(incomingPos.currentScalePercent || 100));
+
+  // 1. Check explicit scaleAdjustments on incomingPos for uncopied SCALE_IN or PARTIAL_EXIT events
+  const sortedIncomingAdjs = [...(incomingPos.scaleAdjustments || [])].sort(
+    (a, b) => (a.timestamp || 0) - (b.timestamp || 0)
+  );
+
+  for (const adj of sortedIncomingAdjs) {
+    if (adj.actionType !== 'SCALE_IN' && adj.actionType !== 'PARTIAL_EXIT') {
+      continue;
+    }
+
+    const keyAdj = buildStableTraderEventKey({
+      kind: 'ADJ',
+      symbol: sym,
+      actionType: adj.actionType,
+      rawId: adj.id,
+      timestamp: adj.timestamp,
+      volumePercent: adj.volumePercent,
+      quantity: adj.executedQty,
+    });
+    const keyRec = buildStableTraderEventKey({
+      kind: 'REC',
+      symbol: sym,
+      actionType: adj.actionType,
+      timestamp: adj.timestamp,
+      volumePercent: adj.volumePercent,
+      quantity: adj.executedQty,
+    });
+    const candidateKeys = [keyAdj, keyRec, adj.id, adj.sourceEventId].filter(
+      (k): k is string => Boolean(k)
+    );
+
+    if (candidateKeys.some((k) => queuedEventKeys.has(k))) {
+      continue;
+    }
+
+    const alreadyApplied = hasSyncEventBeenApplied({
+      appliedSyncEventIds: existingAppliedIds,
+      scaleAdjustments: existingAdjustments,
+      candidateKeys,
+      actionType: adj.actionType,
+      eventTimestamp: adj.timestamp,
+    });
+
+    if (alreadyApplied) {
+      continue;
+    }
+
+    // Guard for legacy positions opened before appliedSyncEventIds was tracked:
+    // If the adjustment happened at/before existingPosition.openTime AND the net scale percent already matches,
+    // it was already folded into existingPosition at initial late-entry time.
+    const wasFoldedAtInitialEntry =
+      existingAppliedIds.length === 0 &&
+      adj.timestamp > 0 &&
+      existingPosition.openTime > 0 &&
+      adj.timestamp <= existingPosition.openTime &&
+      existingScalePct === incomingScalePct;
+
+    if (wasFoldedAtInitialEntry) {
+      continue;
+    }
+
+    const volPct = Math.max(5, Math.abs(Math.round(Number(adj.volumePercent || 25))));
+    const adjPrice = adj.price && adj.price > 0 ? adj.price : safePrice;
+    const adjTs = adj.timestamp && adj.timestamp > 0 ? adj.timestamp : Date.now();
+
+    for (const k of candidateKeys) {
+      queuedEventKeys.add(k);
+    }
+
+    deltaActions.push({
+      actionType: adj.actionType,
+      volumePercent: adj.actionType === 'PARTIAL_EXIT' ? Math.min(95, volPct) : volPct,
+      price: adjPrice,
+      timestamp: adjTs,
+      sourceEventId: keyAdj,
+      candidateKeys,
+    });
+  }
+
+  // 2. If no discrete scaleAdjustments were unapplied, check live trader quantity delta
+  const currentTraderQty = Math.abs(Number(incomingPos.positionAmount || 0));
+  const previousTraderQty = Math.abs(Number(existingPosition.lastSyncedTraderQty || 0));
+  if (deltaActions.length === 0 && previousTraderQty > 0 && currentTraderQty > 0) {
+    const dropPct = calculatePositionQuantityDropPartialExitPct({
+      previousQty: previousTraderQty,
+      currentQty: currentTraderQty,
+    });
+    if (dropPct >= 5) {
+      const qtyDropKey = buildStableTraderEventKey({
+        kind: 'QTY_DROP',
+        symbol: sym,
+        actionType: 'PARTIAL_EXIT',
+        volumePercent: dropPct,
+        quantity: currentTraderQty,
+      });
+      const candidateKeys = [qtyDropKey];
+      if (
+        !hasSyncEventBeenApplied({
+          appliedSyncEventIds: existingAppliedIds,
+          scaleAdjustments: existingAdjustments,
+          candidateKeys,
+          actionType: 'PARTIAL_EXIT',
+        })
+      ) {
+        deltaActions.push({
+          actionType: 'PARTIAL_EXIT',
+          volumePercent: dropPct,
+          price: safePrice,
+          timestamp: incomingPos.lastUpdateTime || Date.now(),
+          sourceEventId: qtyDropKey,
+          candidateKeys,
+        });
+      }
+    } else {
+      const scaleInPct = calculatePositionQuantityIncreaseScaleInPct({
+        previousQty: previousTraderQty,
+        currentQty: currentTraderQty,
+      });
+      if (scaleInPct >= 5) {
+        const qtyScaleKey = buildStableTraderEventKey({
+          kind: 'QTY_SCALE',
+          symbol: sym,
+          actionType: 'SCALE_IN',
+          volumePercent: scaleInPct,
+          quantity: currentTraderQty,
+        });
+        const candidateKeys = [qtyScaleKey];
+        if (
+          !hasSyncEventBeenApplied({
+            appliedSyncEventIds: existingAppliedIds,
+            scaleAdjustments: existingAdjustments,
+            candidateKeys,
+            actionType: 'SCALE_IN',
+          })
+        ) {
+          deltaActions.push({
+            actionType: 'SCALE_IN',
+            volumePercent: scaleInPct,
+            price: safePrice,
+            timestamp: incomingPos.lastUpdateTime || Date.now(),
+            sourceEventId: qtyScaleKey,
+            candidateKeys,
+          });
+        }
+      }
+    }
+  }
+
+  // 3. Fallback: check net scale percentage difference (currentScalePercent)
+  if (
+    deltaActions.length === 0 &&
+    incomingScalePct > 0 &&
+    existingScalePct > 0 &&
+    Math.abs(incomingScalePct - existingScalePct) >= 5
+  ) {
+    if (incomingScalePct < existingScalePct) {
+      const withdrawPct = Math.min(
+        95,
+        Math.max(5, Math.round(((existingScalePct - incomingScalePct) / existingScalePct) * 100))
+      );
+      const scaleDropKey = buildStableTraderEventKey({
+        kind: 'ADJ',
+        symbol: sym,
+        actionType: 'PARTIAL_EXIT',
+        rawId: `scale_diff_${existingScalePct}_to_${incomingScalePct}`,
+        volumePercent: withdrawPct,
+      });
+      const candidateKeys = [scaleDropKey];
+      if (
+        !hasSyncEventBeenApplied({
+          appliedSyncEventIds: existingAppliedIds,
+          scaleAdjustments: existingAdjustments,
+          candidateKeys,
+          actionType: 'PARTIAL_EXIT',
+        })
+      ) {
+        deltaActions.push({
+          actionType: 'PARTIAL_EXIT',
+          volumePercent: withdrawPct,
+          price: safePrice,
+          timestamp: incomingPos.lastUpdateTime || Date.now(),
+          sourceEventId: scaleDropKey,
+          candidateKeys,
+        });
+      }
+    } else {
+      const addPct = Math.min(300, Math.max(5, Math.round(incomingScalePct - existingScalePct)));
+      const scaleAddKey = buildStableTraderEventKey({
+        kind: 'ADJ',
+        symbol: sym,
+        actionType: 'SCALE_IN',
+        rawId: `scale_diff_${existingScalePct}_to_${incomingScalePct}`,
+        volumePercent: addPct,
+      });
+      const candidateKeys = [scaleAddKey];
+      if (
+        !hasSyncEventBeenApplied({
+          appliedSyncEventIds: existingAppliedIds,
+          scaleAdjustments: existingAdjustments,
+          candidateKeys,
+          actionType: 'SCALE_IN',
+        })
+      ) {
+        deltaActions.push({
+          actionType: 'SCALE_IN',
+          volumePercent: addPct,
+          price: safePrice,
+          timestamp: incomingPos.lastUpdateTime || Date.now(),
+          sourceEventId: scaleAddKey,
+          candidateKeys,
+        });
+      }
+    }
+  }
+
+  if (deltaActions.length === 0) {
+    return {
+      decision: 'DO_NOTHING_ALREADY_COPIED',
+      existingPosition,
+      deltaActions: [],
+      initialAppliedEventKeys,
+    };
+  }
+
+  return {
+    decision: 'SYNC_DELTAS_ONLY',
+    existingPosition,
+    deltaActions,
+    initialAppliedEventKeys,
+  };
+}
 
