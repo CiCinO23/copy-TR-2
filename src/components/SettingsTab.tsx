@@ -715,6 +715,42 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               className="w-4 h-4 accent-[#01BC8D] cursor-pointer shrink-0 mt-0.5"
             />
           </label>
+
+          <label className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 flex items-start justify-between gap-2.5 cursor-pointer sm:col-span-2">
+            <div>
+              <div className="text-xs font-bold text-white flex items-center gap-2 flex-wrap">
+                <span>
+                  تنظيف السجلات القديمة (History Logs &gt; {memorySnapshot.historyRetentionDays} يوماً) تلقائياً عند بدء التشغيل
+                </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/30">
+                  تم حذف {memorySnapshot.expiredHistoryLogsPurgedCount} سجل منتهي
+                </span>
+              </div>
+              <div className="text-[11px] text-[#8A99AD] mt-0.5">
+                يمسح تلقائياً الصفقات المغلقة والإشعارات وسجلات أوامر التنفيذ التي تجاوزت 30 يوماً فور فتح التطبيق لضمان سرعة الاستجابة الدائمة
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              data-testid="toggle_startup_history_cleanup"
+              checked={memorySnapshot.config.autoCleanExpiredLogsOnStartup !== false}
+              onChange={(e) => {
+                memoryCleanupService.updateConfig({
+                  autoCleanExpiredLogsOnStartup: e.target.checked,
+                });
+                if (e.target.checked) {
+                  memoryCleanupService.runStartupHistoryCleanup({ force: true });
+                }
+                setStatusFeedback(
+                  e.target.checked
+                    ? 'تم تفعيل التنظيف التلقائي للسجلات الأقدم من 30 يوماً عند بدء التشغيل.'
+                    : 'تم إيقاف تنظيف السجلات القديمة عند بدء التشغيل.'
+                );
+                setTimeout(() => setStatusFeedback(null), 3500);
+              }}
+              className="w-4 h-4 accent-[#01BC8D] cursor-pointer shrink-0 mt-0.5"
+            />
+          </label>
         </div>
 
         {/* Manual Memory Cleanup Action Row */}

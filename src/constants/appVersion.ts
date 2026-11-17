@@ -22,9 +22,11 @@ import { normalizeToWesternDigits } from '../utils/formatters';
  * 15. v2.15 - التنفيذ الفوري في نفس اللحظة لصفقات الحيتان (Smart Money Whales) والصفقات الحية بدون تأخير أو انتظار، مع كشف التدعيم اللحظي ومزامنة المحافظ الحية
  * 16. v2.16 - منع تكرار إشعار انخفاض الرصيد (Drawdown Alert) عند الاتصال بالإنترنت بعد انقطاعه وتوحيد أسعار تقييم الحساب
  * 17. v2.17 - منع تكرار الصفقة المنسوخة مسبقاً عند النسخ اليدوي والاكتفاء بنسخ التغييرات الجديدة فقط (التدعيم أو السحب الجزئي)
+ * 18. v2.18 - استخدام Web Workers لتحويل عملية معالجة ومزامنة الصفقات الطويلة (Sync) إلى مسار منفصل عن الواجهة الرئيسية لمنع أي تعليق (Lag) في استجابة الأزرار
+ * 19. v2.19 - تحسين memoryCleanupService ليشمل تنظيف السجلات القديمة (History Logs) التي تجاوزت 30 يوماً تلقائياً عند بدء تشغيل التطبيق لضمان سرعة الاستجابة الدائمة
  */
 export const APP_MAJOR_VERSION = 2;
-export const APP_PROMPT_REVISION = 17;
+export const APP_PROMPT_REVISION = 19;
 export const APP_VERSION = `${APP_MAJOR_VERSION}.${APP_PROMPT_REVISION}`;
 
 export interface PromptVersionEntry {
@@ -118,6 +120,16 @@ export const PROMPT_VERSION_HISTORY: PromptVersionEntry[] = [
     version: '2.17',
     promptNumber: 17,
     summaryAr: 'منع تكرار الصفقة المنسوخة مسبقاً عند النسخ اليدوي والاكتفاء بنسخ التغييرات غير المنسوخة فقط (التدعيم أو السحب الجزئي)',
+  },
+  {
+    version: '2.18',
+    promptNumber: 18,
+    summaryAr: 'استخدام Web Workers لتحويل معالجة ومزامنة الصفقات الطويلة (Sync) إلى مسار منفصل تماماً عن الواجهة الرئيسية لمنع أي تعليق (Lag) في استجابة الأزرار',
+  },
+  {
+    version: '2.19',
+    promptNumber: 19,
+    summaryAr: 'تحسين memoryCleanupService ليشمل تنظيف السجلات القديمة (History Logs) التي تجاوزت 30 يوماً تلقائياً عند بدء تشغيل التطبيق لضمان سرعة الاستجابة الدائمة',
   },
 ];
 

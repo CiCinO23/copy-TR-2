@@ -35,6 +35,12 @@ import {
   buildInitialAppliedEventKeysForOpenPosition,
   evaluateManualSinglePositionCopyPlan,
 } from './tradeExecutionRules';
+import { tradeSyncWorkerClient } from './tradeSyncWorkerClient';
+import type {
+  WorkerAccountContext,
+  WorkerSyncBatchResponse,
+  WorkerTraderSyncInputTask,
+} from './tradeSyncWorkerLogic';
 
 const PAPER_STORAGE_KEY = 'whale_copy_paper_state_v3';
 const TRADE_SETTINGS_STORAGE_KEY = 'whale_copy_trade_settings_v1';
@@ -93,11 +99,47 @@ export class PaperEngine {
   private dismissedReconnectChoiceIds: Set<string> = new Set();
   private traderSyncCheckpoints: Record<string, TraderSyncCheckpoint> = {};
   private lastKnownPrices: Record<string, number> = {};
+  private batchSaveDepth: number = 0;
+  private batchDirtyState: boolean = false;
+  private batchDirtyPendingChoices: boolean = false;
+  private batchDirtyCheckpoints: boolean = false;
 
   constructor() {
     this.loadMultiAccounts();
     this.loadPendingChoices();
     this.loadTraderSyncCheckpoints();
+  }
+
+  /**
+   * Coalesces all storage writes (JSON.stringify + localStorage.setItem) inside `fn`
+   * into a single flush at the end of the batch, avoiding main-thread serialization lag.
+   */
+  public runInBatch<T>(fn: () => T): T {
+    this.batchSaveDepth++;
+    mobileNotifications.beginBatchSave();
+    try {
+      return fn();
+    } finally {
+      this.batchSaveDepth = Math.max(0, this.batchSaveDepth - 1);
+      if (this.batchSaveDepth === 0) {
+        if (this.batchDirtyState) {
+          this.batchDirtyState = false;
+          this.batchDirtyPendingChoices = false;
+          this.batchDirtyCheckpoints = false;
+          this.saveState();
+        } else {
+          if (this.batchDirtyPendingChoices) {
+            this.batchDirtyPendingChoices = false;
+            this.savePendingChoices();
+          }
+          if (this.batchDirtyCheckpoints) {
+            this.batchDirtyCheckpoints = false;
+            this.saveTraderSyncCheckpoints();
+          }
+        }
+      }
+      mobileNotifications.endBatchSave();
+    }
   }
 
   private mergeWithLastKnownPrices(incoming: Record<string, number> = {}): Record<string, number> {
@@ -190,6 +232,10 @@ export class PaperEngine {
   }
 
   private savePendingChoices(): void {
+    if (this.batchSaveDepth > 0) {
+      this.batchDirtyPendingChoices = true;
+      return;
+    }
     const storage = getSafeStorage();
     if (!storage) return;
     try {
@@ -223,6 +269,10 @@ export class PaperEngine {
   }
 
   private saveTraderSyncCheckpoints(): void {
+    if (this.batchSaveDepth > 0) {
+      this.batchDirtyCheckpoints = true;
+      return;
+    }
     const storage = getSafeStorage();
     if (!storage) return;
     try {
@@ -451,6 +501,10 @@ export class PaperEngine {
   }
 
   private saveState(): void {
+    if (this.batchSaveDepth > 0) {
+      this.batchDirtyState = true;
+      return;
+    }
     const storage = getSafeStorage();
     if (!storage) return;
     try {
@@ -1769,6 +1823,28 @@ export class PaperEngine {
     syncVersion?: number;
     actionId?: string;
     isPartialOrRateLimited?: boolean;
+    precomputedByWorker?: boolean;
+  }): CopiedSyncLog[] {
+    return this.runInBatch(() => this.syncTraderPositionsAndRecordsInternal(params));
+  }
+
+  private syncTraderPositionsAndRecordsInternal(params: {
+    traderId: string;
+    traderName: string;
+    source: 'COPY_TRADING' | 'SMART_MONEY';
+    positions: TraderOpenPosition[];
+    latestRecords: TraderLatestRecord[];
+    positionHistory?: TraderPositionHistoryItem[];
+    marginPerTradeUsdt?: number;
+    accountId?: string;
+    currentPrices?: Record<string, number>;
+    checkReconnectAdvantage?: boolean;
+    forceImmediateExecution?: boolean;
+    copiedStartedAt?: number;
+    syncVersion?: number;
+    actionId?: string;
+    isPartialOrRateLimited?: boolean;
+    precomputedByWorker?: boolean;
   }): CopiedSyncLog[] {
     const acc = this.getAccount(params.accountId);
     const checkpoint = this.getOrCreateTraderSyncCheckpoint({
@@ -2629,6 +2705,7 @@ export class PaperEngine {
     // 2. Copy ONLY genuinely active open positions from `Positions` tab (never permanently closed or already-synced trades)
     for (const pos of params.positions) {
       if (
+        !params.precomputedByWorker &&
         isTraderTradePermanentlyClosed({
           symbol: pos.symbol,
           side: pos.side,
@@ -2848,6 +2925,111 @@ export class PaperEngine {
     return logs;
   }
 
+  /**
+   * Builds a lightweight, serializable snapshot of account contexts and checkpoints
+   * to send to the dedicated Web Worker (`tradeSync.worker.ts`).
+   */
+  public buildWorkerAccountContexts(
+    tasks: WorkerTraderSyncInputTask[]
+  ): Record<string, WorkerAccountContext> {
+    const accountsByKey: Record<string, WorkerAccountContext> = {};
+    for (const task of tasks) {
+      const acc = this.getAccount(task.accountId);
+      const cpKey = this.getTraderSyncCheckpointKey(task.traderId, task.source, acc.id);
+      const cp = this.traderSyncCheckpoints[cpKey] || null;
+      const ctx: WorkerAccountContext = {
+        accountId: acc.id,
+        accountName: acc.name,
+        settings: { ...acc.settings },
+        positions: acc.positions,
+        checkpoint: cp,
+      };
+      accountsByKey[cpKey] = ctx;
+      if (!accountsByKey[acc.id]) {
+        accountsByKey[acc.id] = ctx;
+      }
+    }
+    return accountsByKey;
+  }
+
+  /**
+   * Applies the precomputed sync batch returned by the Web Worker in a single fast main-thread batch commit.
+   */
+  public applyWorkerPrecomputedSyncBatch(
+    workerResponse: WorkerSyncBatchResponse,
+    currentPrices: Record<string, number> = {}
+  ): CopiedSyncLog[] {
+    return this.runInBatch(() => {
+      const allLogs: CopiedSyncLog[] = [];
+      for (const res of workerResponse.results || []) {
+        if (res.staleChoiceIdsToRemove && res.staleChoiceIdsToRemove.length > 0) {
+          const removeSet = new Set(res.staleChoiceIdsToRemove);
+          const beforeLen = this.pendingReconnectChoices.length;
+          this.pendingReconnectChoices = this.pendingReconnectChoices.filter(
+            (c) => !removeSet.has(c.id)
+          );
+          if (this.pendingReconnectChoices.length !== beforeLen) {
+            this.savePendingChoices();
+          }
+        }
+
+        if (res.isSkippedStale || !res.hasActionableChanges) {
+          continue;
+        }
+
+        const taskLogs = this.syncTraderPositionsAndRecordsInternal({
+          traderId: res.traderId,
+          traderName: res.traderName,
+          source: res.source,
+          positions: res.filteredPositions,
+          latestRecords: res.actionableRecords,
+          marginPerTradeUsdt: res.marginPerTradeUsdt,
+          accountId: res.accountId,
+          currentPrices,
+          checkReconnectAdvantage: res.checkReconnectAdvantage,
+          forceImmediateExecution: res.forceImmediateExecution,
+          copiedStartedAt: res.copiedStartedAt,
+          syncVersion: res.syncVersion,
+          actionId: res.actionId,
+          isPartialOrRateLimited: res.isPartialOrRateLimited,
+          precomputedByWorker: true,
+        });
+        if (taskLogs.length > 0) {
+          allLogs.push(...taskLogs);
+        }
+      }
+      return allLogs;
+    });
+  }
+
+  /**
+   * Offloads a batch of trader/whale sync payloads to the dedicated Web Worker (`tradeSync.worker.ts`)
+   * so all heavy filtering, sorting, closed-trade detection, and deduplication run off the main UI thread,
+   * then applies only the actionable changes in a single batched commit.
+   */
+  public async syncMultipleTradersOffMainThread(
+    tasks: Array<Omit<WorkerTraderSyncInputTask, 'taskId'> & { taskId?: string }>,
+    currentPrices: Record<string, number> = {}
+  ): Promise<{ logs: CopiedSyncLog[]; workerResponse: WorkerSyncBatchResponse }> {
+    const normalizedTasks: WorkerTraderSyncInputTask[] = (tasks || []).map((t, idx) => ({
+      ...t,
+      taskId: t.taskId || `task_${t.accountId || 'acc_default'}_${t.traderId}_${idx}`,
+      accountId: t.accountId || this.getActiveAccountId(),
+    }));
+
+    const effectivePrices = this.mergeWithLastKnownPrices(currentPrices);
+    const accountsByKey = this.buildWorkerAccountContexts(normalizedTasks);
+
+    const workerResponse = await tradeSyncWorkerClient.offloadSyncBatchToWorker({
+      tasks: normalizedTasks,
+      accountsByKey,
+      currentPrices: effectivePrices,
+    });
+
+    const logs = this.applyWorkerPrecomputedSyncBatch(workerResponse, effectivePrices);
+    return { logs, workerResponse };
+  }
+
   public getSnapshot(currentPrices: Record<string, number>, accountId?: string): PaperAccountSnapshot {
     const effectivePrices = this.mergeWithLastKnownPrices(currentPrices);
     // Automatically check and execute any Stop-Loss (including secured near-current-price stop-loss)
@@ -2948,6 +3130,85 @@ export class PaperEngine {
   }
 
   /**
+   * Purges expired history logs (CLOSED positions, old per-symbol sync checkpoints, and stale pending choices)
+   * that exceeded maxAgeMs (defaults to 30 days) across all virtual accounts.
+   * Never modifies or deletes active OPEN positions or virtual account balances.
+   */
+  public purgeExpiredHistoryLogs(
+    maxAgeMs: number = 30 * 24 * 60 * 60 * 1000,
+    nowMs: number = Date.now()
+  ): {
+    removedClosedPositions: number;
+    removedCheckpoints: number;
+    removedStaleChoices: number;
+    totalRemoved: number;
+  } {
+    const cutoffTimestamp = nowMs - Math.max(24 * 60 * 60 * 1000, maxAgeMs);
+    let removedClosedPositions = 0;
+    let removedCheckpoints = 0;
+    let removedStaleChoices = 0;
+
+    let accountsChanged = false;
+    for (const acc of this.accounts) {
+      const beforeLen = acc.positions.length;
+      acc.positions = acc.positions.filter((p) => {
+        if (p.status === 'OPEN') return true;
+        const ts = Number(p.closeTime || p.openTime || 0);
+        if (ts > 0 && ts < cutoffTimestamp) {
+          removedClosedPositions += 1;
+          return false;
+        }
+        return true;
+      });
+      if (acc.positions.length !== beforeLen) {
+        accountsChanged = true;
+      }
+    }
+    if (accountsChanged) {
+      this.saveState();
+    }
+
+    let checkpointsChanged = false;
+    for (const cp of Object.values(this.traderSyncCheckpoints)) {
+      if (cp.lastActionsBySymbol) {
+        for (const [sym, actionMeta] of Object.entries(cp.lastActionsBySymbol)) {
+          const ts = Number(actionMeta?.timestamp || 0);
+          if (ts > 0 && ts < cutoffTimestamp) {
+            delete cp.lastActionsBySymbol[sym];
+            removedCheckpoints += 1;
+            checkpointsChanged = true;
+          }
+        }
+      }
+    }
+    if (checkpointsChanged) {
+      this.saveTraderSyncCheckpoints();
+    }
+
+    if (this.pendingReconnectChoices.length > 0) {
+      const beforeChoices = this.pendingReconnectChoices.length;
+      this.pendingReconnectChoices = this.pendingReconnectChoices.filter((choice) => {
+        const ts = Number(choice.createdAt || choice.traderEntryTime || 0);
+        if (ts > 0 && ts < cutoffTimestamp) {
+          removedStaleChoices += 1;
+          return false;
+        }
+        return true;
+      });
+      if (this.pendingReconnectChoices.length !== beforeChoices) {
+        this.savePendingChoices();
+      }
+    }
+
+    return {
+      removedClosedPositions,
+      removedCheckpoints,
+      removedStaleChoices,
+      totalRemoved: removedClosedPositions + removedCheckpoints + removedStaleChoices,
+    };
+  }
+
+  /**
    * Trims excess historical closed positions and old sync checkpoint IDs to free memory
    * on low-end devices without touching OPEN positions or virtual account balances.
    */
@@ -2955,11 +3216,17 @@ export class PaperEngine {
     maxClosedPerAccount?: number;
     maxCheckpointItems?: number;
     maxDismissedChoices?: number;
+    maxHistoryAgeMs?: number;
+    nowMs?: number;
   }): number {
+    const expiredResult = this.purgeExpiredHistoryLogs(
+      options?.maxHistoryAgeMs ?? 30 * 24 * 60 * 60 * 1000,
+      options?.nowMs ?? Date.now()
+    );
     const maxClosed = Math.max(10, options?.maxClosedPerAccount ?? 50);
     const maxCpItems = Math.max(30, options?.maxCheckpointItems ?? 120);
     const maxDismissed = Math.max(20, options?.maxDismissedChoices ?? 100);
-    let trimmedCount = 0;
+    let trimmedCount = expiredResult.totalRemoved;
 
     let accountsChanged = false;
     for (const acc of this.accounts) {

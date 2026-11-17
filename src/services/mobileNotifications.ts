@@ -152,7 +152,26 @@ class MobileNotificationService {
     return [];
   }
 
+  private batchSaveDepth = 0;
+  private batchDirtyNotifications = false;
+
+  public beginBatchSave(): void {
+    this.batchSaveDepth++;
+  }
+
+  public endBatchSave(): void {
+    this.batchSaveDepth = Math.max(0, this.batchSaveDepth - 1);
+    if (this.batchSaveDepth === 0 && this.batchDirtyNotifications) {
+      this.batchDirtyNotifications = false;
+      this.saveNotifications();
+    }
+  }
+
   private saveNotifications(): void {
+    if (this.batchSaveDepth > 0) {
+      this.batchDirtyNotifications = true;
+      return;
+    }
     try {
       localStorage.setItem(
         NOTIFICATIONS_STORAGE_KEY,
@@ -1718,12 +1737,40 @@ class MobileNotificationService {
   }
 
   /**
-   * Trims older read notifications to free memory when Memory Cleanup runs
+   * Purges notification history logs older than maxAgeMs (defaults to 30 days).
+   * Returns the number of expired notifications removed.
    */
-  public trimNotificationsCache(maxKeep: number = 35): number {
+  public purgeExpiredNotifications(
+    maxAgeMs: number = 30 * 24 * 60 * 60 * 1000,
+    nowMs: number = Date.now()
+  ): number {
+    if (this.notifications.length === 0) return 0;
+    const cutoffTimestamp = nowMs - Math.max(24 * 60 * 60 * 1000, maxAgeMs);
+    const before = this.notifications.length;
+    this.notifications = this.notifications.filter((n) => {
+      const ts = Number(n?.timestamp || 0);
+      return !(ts > 0 && ts < cutoffTimestamp);
+    });
+    const removed = Math.max(0, before - this.notifications.length);
+    if (removed > 0) {
+      this.saveNotifications();
+      this.emitChange(null);
+    }
+    return removed;
+  }
+
+  /**
+   * Trims older read notifications and purges expired (>30 days) notifications to free memory when Memory Cleanup runs
+   */
+  public trimNotificationsCache(
+    maxKeep: number = 35,
+    maxAgeMs: number = 30 * 24 * 60 * 60 * 1000,
+    nowMs: number = Date.now()
+  ): number {
+    const expiredRemoved = this.purgeExpiredNotifications(maxAgeMs, nowMs);
     const safeCap = Math.max(10, maxKeep);
     if (this.notifications.length <= safeCap) {
-      return 0;
+      return expiredRemoved;
     }
     const before = this.notifications.length;
     const unread = this.notifications.filter((n) => !n.read);
@@ -1735,7 +1782,7 @@ class MobileNotificationService {
       this.saveNotifications();
       this.emitChange(null);
     }
-    return removed;
+    return expiredRemoved + removed;
   }
 }
 

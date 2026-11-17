@@ -201,6 +201,36 @@ export function clearKuCoinOrderHistory(): KuCoinOrderRecord[] {
 }
 
 /**
+ * Purges KuCoin order history logs older than maxAgeMs (defaults to 30 days).
+ * Returns the number of expired order records removed.
+ */
+export function purgeExpiredKuCoinOrderHistory(
+  maxAgeMs: number = 30 * 24 * 60 * 60 * 1000,
+  nowMs: number = Date.now()
+): number {
+  try {
+    if (typeof localStorage === 'undefined') return 0;
+    const raw = localStorage.getItem(KUCOIN_ORDERS_STORAGE_KEY);
+    if (!raw) return 0;
+    const parsed: KuCoinOrderRecord[] = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return 0;
+
+    const cutoffTimestamp = nowMs - Math.max(24 * 60 * 60 * 1000, maxAgeMs);
+    const kept = parsed.filter((order) => {
+      const ts = Number(order?.createdAt || 0);
+      return !(ts > 0 && ts < cutoffTimestamp);
+    });
+    const removedCount = Math.max(0, parsed.length - kept.length);
+    if (removedCount > 0) {
+      localStorage.setItem(KUCOIN_ORDERS_STORAGE_KEY, JSON.stringify(kept));
+    }
+    return removedCount;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Native Web Crypto HMAC-SHA256 signature generation (Base64 encoded)
  */
 export async function generateHmacSha256Base64(secret: string, message: string): Promise<string> {

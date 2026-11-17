@@ -8,9 +8,12 @@ import {
 } from './binanceApi';
 import { paperEngine } from './paperTrading';
 import { mobileNotifications } from './mobileNotifications';
+import { purgeExpiredKuCoinOrderHistory } from './kucoinApi';
 import { ActiveCopiedTrader } from '../types';
 
 export const MEMORY_CLEANUP_STORAGE_KEY = 'whale_memory_cleanup_config_v1';
+export const DEFAULT_HISTORY_RETENTION_DAYS = 30;
+export const HISTORY_RETENTION_MS = DEFAULT_HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
 export interface MemoryCleanupConfig {
   enabled: boolean;
@@ -18,6 +21,8 @@ export interface MemoryCleanupConfig {
   maxCacheSizeKb: number;
   periodicIntervalSeconds: number;
   lowEndDeviceMode: boolean;
+  historyRetentionDays?: number;
+  autoCleanExpiredLogsOnStartup?: boolean;
 }
 
 export interface MemoryPressureEvaluationInput {
@@ -39,9 +44,23 @@ export interface MemoryPressureEvaluationResult {
 
 export interface MemoryCleanupResult {
   executed: boolean;
-  mode: 'NONE' | 'SOFT' | 'AGGRESSIVE' | 'MANUAL';
+  mode: 'NONE' | 'SOFT' | 'AGGRESSIVE' | 'MANUAL' | 'STARTUP';
   freedItemsCount: number;
   freedEstimatedKb: number;
+  timestamp: number;
+  reasonAr: string;
+}
+
+export interface StartupHistoryCleanupResult {
+  executed: boolean;
+  retentionDays: number;
+  cutoffTimestamp: number;
+  removedClosedPositions: number;
+  removedCheckpoints: number;
+  removedStaleChoices: number;
+  removedNotifications: number;
+  removedKuCoinOrders: number;
+  totalExpiredLogsRemoved: number;
   timestamp: number;
   reasonAr: string;
 }
@@ -64,6 +83,10 @@ export interface MemoryTelemetrySnapshot {
   totalKbFreed: number;
   lastCleanupAt: number | null;
   lastCleanupReasonAr: string | null;
+  historyRetentionDays: number;
+  startupCleanupExecuted: boolean;
+  lastStartupCleanupAt: number | null;
+  expiredHistoryLogsPurgedCount: number;
 }
 
 declare global {
@@ -96,7 +119,46 @@ export const DEFAULT_MEMORY_CLEANUP_CONFIG: MemoryCleanupConfig = {
   maxCacheSizeKb: 360,
   periodicIntervalSeconds: 30,
   lowEndDeviceMode: detectLowEndDevice(),
+  historyRetentionDays: DEFAULT_HISTORY_RETENTION_DAYS,
+  autoCleanExpiredLogsOnStartup: true,
 };
+
+/**
+ * Pure helper function to filter out any history logs whose timestamp is strictly older
+ * than the retention window (defaults to 30 days) relative to `nowMs`.
+ * Items without a positive timestamp are preserved safely.
+ */
+export function filterExpiredHistoryLogsByAge<T>(
+  items: readonly T[],
+  getTimestamp: (item: T) => number | undefined | null,
+  nowMs: number = Date.now(),
+  retentionDays: number = DEFAULT_HISTORY_RETENTION_DAYS
+): {
+  kept: T[];
+  removedCount: number;
+  cutoffTimestamp: number;
+} {
+  const safeDays = Math.max(1, Number(retentionDays) || DEFAULT_HISTORY_RETENTION_DAYS);
+  const cutoffTimestamp = nowMs - safeDays * 24 * 60 * 60 * 1000;
+  const kept: T[] = [];
+  let removedCount = 0;
+
+  for (const item of items) {
+    const rawTs = getTimestamp(item);
+    const ts = typeof rawTs === 'number' && Number.isFinite(rawTs) ? rawTs : 0;
+    if (ts > 0 && ts < cutoffTimestamp) {
+      removedCount += 1;
+    } else {
+      kept.push(item);
+    }
+  }
+
+  return {
+    kept,
+    removedCount,
+    cutoffTimestamp,
+  };
+}
 
 /**
  * Pure helper to compute effective cache size ceiling (in KB) taking low-end device mode into account.
@@ -200,6 +262,9 @@ class MemoryCleanupService {
   private totalKbFreed: number = 0;
   private lastCleanupAt: number | null = null;
   private lastCleanupReasonAr: string | null = null;
+  private startupCleanupExecuted: boolean = false;
+  private lastStartupCleanupAt: number | null = null;
+  private expiredHistoryLogsPurgedCount: number = 0;
   private listeners: Set<(snapshot: MemoryTelemetrySnapshot) => void> = new Set();
 
   constructor() {
@@ -214,6 +279,12 @@ class MemoryCleanupService {
         );
       };
     }
+
+    // Automatically purge old History Logs (> 30 days) on application startup
+    // to guarantee permanent fast responsiveness.
+    if (this.config.autoCleanExpiredLogsOnStartup !== false) {
+      this.runStartupHistoryCleanup();
+    }
   }
 
   private loadConfig(): MemoryCleanupConfig {
@@ -225,6 +296,12 @@ class MemoryCleanupService {
           return {
             ...DEFAULT_MEMORY_CLEANUP_CONFIG,
             ...parsed,
+            historyRetentionDays:
+              Math.max(1, Number(parsed?.historyRetentionDays) || DEFAULT_HISTORY_RETENTION_DAYS),
+            autoCleanExpiredLogsOnStartup:
+              parsed?.autoCleanExpiredLogsOnStartup !== undefined
+                ? Boolean(parsed.autoCleanExpiredLogsOnStartup)
+                : true,
           };
         }
       }
@@ -252,6 +329,11 @@ class MemoryCleanupService {
     this.config = {
       ...this.config,
       ...partial,
+      historyRetentionDays: Math.max(
+        1,
+        Number(partial.historyRetentionDays ?? this.config.historyRetentionDays) ||
+          DEFAULT_HISTORY_RETENTION_DAYS
+      ),
     };
     this.saveConfig();
     this.emitChange();
@@ -367,8 +449,13 @@ class MemoryCleanupService {
       config: this.config,
     });
 
+    const retentionDays = Math.max(
+      1,
+      Number(this.config.historyRetentionDays) || DEFAULT_HISTORY_RETENTION_DAYS
+    );
+
     return {
-      config: { ...this.config },
+      config: { ...this.config, historyRetentionDays: retentionDays },
       usedHeapMb:
         usedHeapBytes !== null ? Number((usedHeapBytes / (1024 * 1024)).toFixed(1)) : null,
       heapLimitMb:
@@ -387,15 +474,120 @@ class MemoryCleanupService {
       totalKbFreed: this.totalKbFreed,
       lastCleanupAt: this.lastCleanupAt,
       lastCleanupReasonAr: this.lastCleanupReasonAr,
+      historyRetentionDays: retentionDays,
+      startupCleanupExecuted: this.startupCleanupExecuted,
+      lastStartupCleanupAt: this.lastStartupCleanupAt,
+      expiredHistoryLogsPurgedCount: this.expiredHistoryLogsPurgedCount,
     };
   }
 
   /**
-   * Periodically called by CentralizedSyncScheduler to check memory pressure and evict stale caches.
+   * Automatically cleans up old History Logs (Closed trades, trader sync checkpoints,
+   * stale pending choices, mobile notifications log, and KuCoin execution orders)
+   * that exceeded 30 days (`historyRetentionDays`) at application startup
+   * to guarantee permanent fast responsiveness.
+   */
+  public runStartupHistoryCleanup(options?: {
+    nowMs?: number;
+    retentionDays?: number;
+    force?: boolean;
+  }): StartupHistoryCleanupResult {
+    const nowMs = options?.nowMs ?? Date.now();
+    const retentionDays = Math.max(
+      1,
+      Number(options?.retentionDays ?? this.config.historyRetentionDays) ||
+        DEFAULT_HISTORY_RETENTION_DAYS
+    );
+    const maxAgeMs = retentionDays * 24 * 60 * 60 * 1000;
+    const cutoffTimestamp = nowMs - maxAgeMs;
+
+    if (!options?.force && this.config.autoCleanExpiredLogsOnStartup === false) {
+      return {
+        executed: false,
+        retentionDays,
+        cutoffTimestamp,
+        removedClosedPositions: 0,
+        removedCheckpoints: 0,
+        removedStaleChoices: 0,
+        removedNotifications: 0,
+        removedKuCoinOrders: 0,
+        totalExpiredLogsRemoved: 0,
+        timestamp: nowMs,
+        reasonAr: 'تنظيف السجلات القديمة عند بدء التشغيل متوقف من الإعدادات',
+      };
+    }
+
+    // 1. Purge >30-day closed positions, old per-symbol sync checkpoints, and stale choices in PaperEngine
+    const paperPurge = paperEngine.purgeExpiredHistoryLogs(maxAgeMs, nowMs);
+
+    // 2. Purge >30-day mobile trade notification logs
+    const removedNotifications = mobileNotifications.purgeExpiredNotifications(maxAgeMs, nowMs);
+
+    // 3. Purge >30-day KuCoin execution order history logs
+    const removedKuCoinOrders = purgeExpiredKuCoinOrderHistory(maxAgeMs, nowMs);
+
+    const totalExpiredLogsRemoved =
+      paperPurge.totalRemoved + removedNotifications + removedKuCoinOrders;
+
+    this.startupCleanupExecuted = true;
+    this.lastStartupCleanupAt = nowMs;
+    this.expiredHistoryLogsPurgedCount += totalExpiredLogsRemoved;
+
+    const reasonAr =
+      totalExpiredLogsRemoved > 0
+        ? `تنظيف تلقائي عند بدء التشغيل: تم حذف ${totalExpiredLogsRemoved} سجل قديم تجاوز ${retentionDays} يوماً`
+        : `فحص بدء التشغيل مكتمل: لا توجد سجلات قديمة تتجاوز ${retentionDays} يوماً`;
+
+    if (totalExpiredLogsRemoved > 0) {
+      const freedKb = Math.max(4, Math.round(totalExpiredLogsRemoved * 0.85));
+      this.cleanupRunCount += 1;
+      this.totalItemsFreed += totalExpiredLogsRemoved;
+      this.totalKbFreed += freedKb;
+      this.lastCleanupAt = nowMs;
+      this.lastCleanupReasonAr = reasonAr;
+    } else if (!this.lastCleanupReasonAr) {
+      this.lastCleanupAt = nowMs;
+      this.lastCleanupReasonAr = reasonAr;
+    }
+
+    this.emitChange();
+
+    return {
+      executed: true,
+      retentionDays,
+      cutoffTimestamp,
+      removedClosedPositions: paperPurge.removedClosedPositions,
+      removedCheckpoints: paperPurge.removedCheckpoints,
+      removedStaleChoices: paperPurge.removedStaleChoices,
+      removedNotifications,
+      removedKuCoinOrders,
+      totalExpiredLogsRemoved,
+      timestamp: nowMs,
+      reasonAr,
+    };
+  }
+
+  /**
+   * Periodically called by CentralizedSyncScheduler or at startup to check memory pressure and evict stale caches.
    */
   public checkAndCleanupIfNeeded(
-    triggerSource: 'PERIODIC' | 'VISIBILITY_HIDDEN' | 'OS_LOW_MEMORY' = 'PERIODIC'
+    triggerSource: 'PERIODIC' | 'VISIBILITY_HIDDEN' | 'OS_LOW_MEMORY' | 'STARTUP' = 'PERIODIC'
   ): MemoryCleanupResult {
+    if (triggerSource === 'STARTUP') {
+      const startupRes = this.runStartupHistoryCleanup();
+      return {
+        executed: startupRes.executed,
+        mode: 'STARTUP',
+        freedItemsCount: startupRes.totalExpiredLogsRemoved,
+        freedEstimatedKb: Math.max(
+          startupRes.totalExpiredLogsRemoved > 0 ? 4 : 0,
+          Math.round(startupRes.totalExpiredLogsRemoved * 0.85)
+        ),
+        timestamp: startupRes.timestamp,
+        reasonAr: startupRes.reasonAr,
+      };
+    }
+
     if (!this.config.enabled) {
       return {
         executed: false,
@@ -472,7 +664,8 @@ class MemoryCleanupService {
   }
 
   /**
-   * Executes an immediate SOFT, AGGRESSIVE, or MANUAL memory cleanup across all caches.
+   * Executes an immediate SOFT, AGGRESSIVE, or MANUAL memory cleanup across all caches
+   * and also purges any History Logs older than 30 days (`historyRetentionDays`).
    * Never deletes active virtual accounts or OPEN positions.
    */
   public performCleanup(
@@ -482,6 +675,12 @@ class MemoryCleanupService {
     const beforeSnap = this.getSnapshot();
     const { traderIds, openSymbols } = this.getActiveCopiedTraderIdsAndSymbols();
     const isDeep = mode === 'AGGRESSIVE' || mode === 'MANUAL';
+    const retentionDays = Math.max(
+      1,
+      Number(this.config.historyRetentionDays) || DEFAULT_HISTORY_RETENTION_DAYS
+    );
+    const maxHistoryAgeMs = retentionDays * 24 * 60 * 60 * 1000;
+    const now = Date.now();
 
     // 1. Clean up Copy Trading & Smart Money API caches
     const freedTraderEntries = cleanupCopyTraderCaches({
@@ -497,19 +696,26 @@ class MemoryCleanupService {
       forceClearAll: false,
     });
 
-    // 3. Trim excess historical closed positions and sync checkpoints in PaperEngine
+    // 3. Trim excess historical closed positions, sync checkpoints, and >30-day logs in PaperEngine
     const freedPaperItems = paperEngine.trimHistoricalMemoryCache({
       maxClosedPerAccount: isDeep ? 35 : this.config.lowEndDeviceMode ? 40 : 60,
       maxCheckpointItems: isDeep ? 80 : 120,
       maxDismissedChoices: isDeep ? 60 : 100,
+      maxHistoryAgeMs,
+      nowMs: now,
     });
 
-    // 4. Trim old read notifications in MobileNotificationService
+    // 4. Trim old read notifications and >30-day notification logs in MobileNotificationService
     const freedNotifs = mobileNotifications.trimNotificationsCache(
-      isDeep ? 25 : this.config.lowEndDeviceMode ? 30 : 45
+      isDeep ? 25 : this.config.lowEndDeviceMode ? 30 : 45,
+      maxHistoryAgeMs,
+      now
     );
 
-    // 5. Notify Android Native APK bridge if available to clear WebView transient cache & run GC
+    // 5. Purge >30-day KuCoin order history logs
+    const freedKuCoinOrders = purgeExpiredKuCoinOrderHistory(maxHistoryAgeMs, now);
+
+    // 6. Notify Android Native APK bridge if available to clear WebView transient cache & run GC
     try {
       const win = typeof window !== 'undefined' ? (window as unknown as {
         AndroidAppControl?: { performNativeMemoryCleanup?: () => void };
@@ -521,13 +727,12 @@ class MemoryCleanupService {
 
     const afterSnap = this.getSnapshot();
     const freedItemsCount =
-      freedTraderEntries + freedPriceSymbols + freedPaperItems + freedNotifs;
+      freedTraderEntries + freedPriceSymbols + freedPaperItems + freedNotifs + freedKuCoinOrders;
     const freedEstimatedKb = Math.max(
       freedItemsCount > 0 ? 8 : 0,
       beforeSnap.totalEstimatedCacheKb - afterSnap.totalEstimatedCacheKb
     );
 
-    const now = Date.now();
     this.cleanupRunCount += 1;
     this.totalItemsFreed += freedItemsCount;
     this.totalKbFreed += freedEstimatedKb;
@@ -535,10 +740,10 @@ class MemoryCleanupService {
     this.lastCleanupReasonAr =
       customReasonAr ||
       (mode === 'MANUAL'
-        ? 'تنظيف يدوي فوري للكاش والذاكرة المؤقتة'
+        ? 'تنظيف يدوي فوري للكاش والسجلات الأقدم من 30 يوماً'
         : mode === 'AGGRESSIVE'
         ? 'تنظيف عميق تلقائي عند وصول الذاكرة للحد الأعلى'
-        : 'تنظيف دوري تلقائي للبيانات المؤقتة');
+        : 'تنظيف دوري تلقائي للبيانات المؤقتة والسجلات القديمة');
 
     this.emitChange();
 

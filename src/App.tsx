@@ -465,7 +465,10 @@ export const App: React.FC = () => {
         copiedStartedAt: params.copiedStartedAt,
         isPartialOrRateLimited: params.isPartialOrRateLimited,
       });
-      setPaperSnapshot(paperEngine.getSnapshot(livePrices));
+
+      React.startTransition(() => {
+        setPaperSnapshot(paperEngine.getSnapshot(livePrices));
+      });
       setTimeout(refreshCopiedTradersList, 50);
 
       // 2. Route synced entries, scale-ins, partial exits, and full exits to KuCoin API at current market price
@@ -527,6 +530,65 @@ export const App: React.FC = () => {
     },
     [refreshCopiedTradersList]
   );
+
+  const routeSyncedLogsToKuCoin = useCallback((logs: CopiedSyncLog[]) => {
+    for (const log of logs) {
+      if (
+        (log.action === 'POSITION_SYNC' ||
+          log.action === 'ENTRY' ||
+          log.action === 'SCALE_IN' ||
+          log.action === 'PARTIAL_EXIT' ||
+          log.action === 'EXIT') &&
+        log.quantity > 0
+      ) {
+        const targetAcc = paperEngine.getAccount(log.accountId);
+        const currentSettings = targetAcc.settings;
+        const userTradeValue = currentSettings.tradeValueUsdt;
+        const userLeverage = log.leverage || currentSettings.leverage;
+        const isClosingAction = log.action === 'EXIT' || log.action === 'PARTIAL_EXIT';
+        const executionSide: 'LONG' | 'SHORT' = isClosingAction
+          ? log.side === 'LONG'
+            ? 'SHORT'
+            : 'LONG'
+          : log.side;
+
+        const orderAmountUsdt =
+          log.action === 'SCALE_IN'
+            ? currentSettings.scaleInSamePercentAsTrader !== false
+              ? Number((userTradeValue * (Math.abs(log.volumePercent || 25) / 100)).toFixed(2))
+              : Math.max(1, currentSettings.scaleInFixedValueUsdt || 10)
+            : log.action === 'PARTIAL_EXIT'
+            ? Number((userTradeValue * (Math.abs(log.volumePercent || 30) / 100)).toFixed(2))
+            : userTradeValue;
+
+        executeKuCoinOrder({
+          config: {
+            ...kucoinConfigRef.current,
+            enableLiveExecution: currentSettings.mode === 'REAL',
+          },
+          binanceSymbol: log.symbol,
+          side: executionSide,
+          amountUsdt: orderAmountUsdt,
+          entryPrice: log.price,
+          leverage: userLeverage,
+          sourceTraderName: `${log.traderName} (${targetAcc.name})`,
+          sourceSignal: `Binance ${log.source} [${targetAcc.name}] (${log.action} بالسعر الحالي • ${orderAmountUsdt}$ × ${userLeverage}x)`,
+        })
+          .then((ord) => {
+            setKucoinConnectionState((prev) => ({
+              ...prev,
+              recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(
+                0,
+                50
+              ),
+            }));
+          })
+          .catch((err) => {
+            console.warn('KuCoin order execution error:', err);
+          });
+      }
+    }
+  }, []);
 
   // Copy a single position using the target Account's configured Trade Settings at the CURRENT LIVE MARKET PRICE
   // If already copied with no uncopied changes -> do nothing.
@@ -656,8 +718,6 @@ export const App: React.FC = () => {
   const isSyncInFlightRef = useRef<boolean>(false);
   const syncStartedAtRef = useRef<number>(0);
   const pendingResyncRef = useRef<boolean>(false);
-  const handleSyncTraderToEngineRef = useRef(handleSyncTraderToEngine);
-  handleSyncTraderToEngineRef.current = handleSyncTraderToEngine;
 
   const handleSyncAllCopiedTraders = useCallback(async () => {
     if (mobileNotifications.isAppStoppedByFullExit()) return;
@@ -711,33 +771,79 @@ export const App: React.FC = () => {
           Promise.allSettled(traderDataPromises),
         ]);
 
-        const mergedPrices = { ...pricesMapRef.current, ...(freshPrices || {}) };
-        pricesMapRef.current = mergedPrices;
+        const mergedPrices: Record<string, number> = {
+          ...pricesMapRef.current,
+          ...(freshPrices || {}),
+        };
 
-        for (const res of results) {
+        const workerTasks: Array<{
+          taskId: string;
+          traderId: string;
+          traderName: string;
+          source: 'COPY_TRADING' | 'SMART_MONEY';
+          accountId: string;
+          positions: TraderOpenPosition[];
+          latestRecords: TraderLatestRecord[];
+          positionHistory?: TraderPositionHistoryItem[];
+          marginPerTradeUsdt?: number;
+          checkReconnectAdvantage?: boolean;
+          forceImmediateExecution?: boolean;
+          copiedStartedAt?: number;
+          isPartialOrRateLimited?: boolean;
+        }> = [];
+
+        for (let idx = 0; idx < results.length; idx++) {
+          const res = results[idx];
           if (res.status === 'fulfilled') {
             const { ct, targetAcc, data } = res.value;
-            handleSyncTraderToEngineRef.current({
+            for (const pos of data.positions || []) {
+              if (pos?.symbol) {
+                const sym = pos.symbol.toUpperCase().trim();
+                addWatchedFuturesSymbol(sym);
+                if (pos.markPrice && pos.markPrice > 0 && !mergedPrices[sym]) {
+                  mergedPrices[sym] = pos.markPrice;
+                }
+              }
+            }
+            workerTasks.push({
+              taskId: `sync_${targetAcc.id}_${ct.source}_${ct.traderId}_${idx}`,
               traderId: ct.traderId,
               traderName: ct.nickname,
               source: ct.source,
-              positions: data.positions,
-              latestRecords: data.latestRecords,
+              accountId: targetAcc.id,
+              positions: data.positions || [],
+              latestRecords: data.latestRecords || [],
               positionHistory: data.positionHistory,
               marginPerTradeUsdt: targetAcc.settings.tradeValueUsdt,
-              accountId: targetAcc.id,
-              overridePrices: mergedPrices,
-              isPartialOrRateLimited: Boolean((data as any).isPartialOrRateLimited),
+              checkReconnectAdvantage: targetAcc.settings.promptOnUnfavorableLateEntry !== false,
               forceImmediateExecution: ct.source === 'SMART_MONEY',
               copiedStartedAt: ct.startedAt,
+              isPartialOrRateLimited: Boolean((data as any).isPartialOrRateLimited),
             });
           } else {
             console.warn('Failed syncing trader:', res.reason);
           }
         }
 
+        pricesMapRef.current = mergedPrices;
+
+        if (workerTasks.length > 0) {
+          // Offload heavy trade & record processing to the dedicated Web Worker (`tradeSync.worker.ts`)
+          // so the main UI thread and button responsiveness never lag even with hundreds of trades
+          const { logs } = await paperEngine.syncMultipleTradersOffMainThread(
+            workerTasks,
+            mergedPrices
+          );
+          if (logs.length > 0) {
+            routeSyncedLogsToKuCoin(logs);
+          }
+        }
+
         const updatedSnapshot = paperEngine.getSnapshot(mergedPrices);
-        setPaperSnapshot(updatedSnapshot);
+        React.startTransition(() => {
+          setPaperSnapshot(updatedSnapshot);
+          refreshCopiedTradersList();
+        });
       })();
 
       const timeoutGuardPromise = new Promise<void>((resolve) => {
@@ -756,7 +862,7 @@ export const App: React.FC = () => {
         }, 150);
       }
     }
-  }, []);
+  }, [refreshCopiedTradersList, routeSyncedLogsToKuCoin]);
 
   handleSyncAllCopiedTradersRef.current = handleSyncAllCopiedTraders;
 
@@ -835,6 +941,22 @@ export const App: React.FC = () => {
       scheduler.stop();
     };
   }, [handleSyncAllCopiedTraders]);
+
+  // Startup History Logs Cleanup (> 30 days): runs automatically on application startup
+  // to purge expired closed trades, notifications, sync checkpoints, and KuCoin order logs
+  useEffect(() => {
+    const startupResult = memoryCleanupService.runStartupHistoryCleanup();
+    if (startupResult.totalExpiredLogsRemoved > 0) {
+      setPaperSnapshot(paperEngine.getSnapshot(pricesMapRef.current));
+      setNotificationsList(mobileNotifications.getNotifications());
+      if (startupResult.removedKuCoinOrders > 0) {
+        setKucoinConnectionState((prev) => ({
+          ...prev,
+          recentOrders: loadKuCoinOrderHistory(),
+        }));
+      }
+    }
+  }, []);
 
   // Remove a copied trader from storage (optionally scoped to a specific virtual account)
   const handleRemoveCopiedTrader = useCallback(
