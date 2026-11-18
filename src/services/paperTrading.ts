@@ -18,6 +18,7 @@ import {
   evaluatePreviousTradePriceAdvantage,
   calculateSecureStopLossPrice,
   isStopLossTriggered,
+  isTakeProfitTriggered,
   resolveLiveMarketExecutionPrice,
   filterPendingChoicesForCopiedTradersOnPage,
   calculateLateEntryNetPositionState,
@@ -34,6 +35,9 @@ import {
   hasTraderEntryAlreadyBeenSynced,
   buildInitialAppliedEventKeysForOpenPosition,
   evaluateManualSinglePositionCopyPlan,
+  inferRecordPositionSide,
+  reconcileTraderPositionBeforeCopy,
+  reconcileAllTraderPositionsBeforeCopy,
 } from './tradeExecutionRules';
 import { tradeSyncWorkerClient } from './tradeSyncWorkerClient';
 import type {
@@ -1015,7 +1019,9 @@ export class PaperEngine {
     currentScalePercent?: number,
     initialMarginOverride?: number,
     accountId?: string,
-    traderEntryPrice?: number
+    traderEntryPrice?: number,
+    stopLossPrice?: number,
+    takeProfitPrice?: number
   ): PaperPosition {
     const acc = this.getAccount(accountId);
     const openCount = this.getOpenPositionsCount(acc.id);
@@ -1058,6 +1064,9 @@ export class PaperEngine {
       userEntryTime: now,
     });
 
+    const slLabel = stopLossPrice && stopLossPrice > 0 ? ` • SL @ ${stopLossPrice}` : '';
+    const tpLabel = takeProfitPrice && takeProfitPrice > 0 ? ` • TP @ ${takeProfitPrice}` : '';
+
     const defaultAdjustments: PaperPosition['scaleAdjustments'] =
       initialScaleAdjustments && initialScaleAdjustments.length > 0
         ? initialScaleAdjustments
@@ -1068,7 +1077,7 @@ export class PaperEngine {
               actionLabelAr:
                 sourceType && sourceType !== 'MANUAL'
                   ? `فتح الصفقة بالسعر الحالي للسوق (${side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${baseInitialMargin.toFixed(2)}$) — ${defaultComp.combinedSummaryAr}`
-                  : `فتح الصفقة بالسعر الحالي للسوق (${side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${baseInitialMargin.toFixed(2)}$)`,
+                  : `فتح صفقة يدوية (${side === 'LONG' ? 'شراء Long' : 'بيع Short'} 100% • ${baseInitialMargin.toFixed(2)}$${slLabel}${tpLabel})`,
               timestamp: now,
               volumePercent: 100,
               remainingPercentAfter: 100,
@@ -1089,6 +1098,8 @@ export class PaperEngine {
       initialMarginUsdt: baseInitialMargin,
       entryPrice,
       traderEntryPrice: traderEntryPrice && traderEntryPrice > 0 ? traderEntryPrice : entryPrice,
+      stopLossPrice: stopLossPrice && stopLossPrice > 0 ? stopLossPrice : undefined,
+      takeProfitPrice: takeProfitPrice && takeProfitPrice > 0 ? takeProfitPrice : undefined,
       leverage: safeLeverage,
       commissionUsdt: Number(entryCommission.toFixed(4)),
       status: 'OPEN',
@@ -1235,9 +1246,21 @@ export class PaperEngine {
         ? params.pos.markPrice
         : params.pos.entryPrice;
 
+    const reconciledCheck = reconcileTraderPositionBeforeCopy({
+      position: params.pos,
+      traderId: params.traderId,
+    });
+    if (reconciledCheck.isFinished || !reconciledCheck.reconciledPosition) {
+      throw new Error(
+        reconciledCheck.reasonAr ||
+          `لا يمكن نسخ صفقة ${params.pos.symbol} لأن المتداول قام بقفلها أو سحبها بالكامل (صفقة منتهية)`
+      );
+    }
+    const targetTraderPos = reconciledCheck.reconciledPosition;
+
     const openPositionsInAcc = acc.positions.filter((p) => p.status === 'OPEN');
     const plan = evaluateManualSinglePositionCopyPlan({
-      incomingPos: params.pos,
+      incomingPos: targetTraderPos,
       traderName: params.traderName,
       traderId: params.traderId,
       existingOpenPositions: openPositionsInAcc,
@@ -1246,22 +1269,25 @@ export class PaperEngine {
 
     if (plan.decision === 'OPEN_NEW') {
       const openedPos = this.openPositionWithUserSettings({
-        symbol: params.pos.symbol,
-        side: params.pos.side,
+        symbol: targetTraderPos.symbol,
+        side: targetTraderPos.side,
         entryPrice: safePrice,
-        traderEntryPrice: params.pos.entryPrice,
-        traderLeverage: params.pos.leverage,
+        traderEntryPrice: targetTraderPos.entryPrice,
+        traderLeverage: targetTraderPos.leverage,
         customMarginUsdt: params.customMarginUsdt,
         customLeverage: params.customLeverage,
         sourceTraderId: params.traderId,
         sourceTraderName: params.traderName,
         sourceType: params.sourceType || 'COPY_TRADING',
-        traderEntryTime: params.pos.entryTime,
-        traderScaleAdjustments: params.pos.scaleAdjustments,
-        currentScalePercent: params.pos.currentScalePercent,
+        traderEntryTime: targetTraderPos.entryTime,
+        traderScaleAdjustments: targetTraderPos.scaleAdjustments,
+        currentScalePercent: targetTraderPos.currentScalePercent,
         accountId: acc.id,
-        initialAppliedEventKeys: plan.initialAppliedEventKeys,
-        lastSyncedTraderQty: Math.abs(Number(params.pos.positionAmount || 0)),
+        initialAppliedEventKeys: [
+          ...plan.initialAppliedEventKeys,
+          ...reconciledCheck.preCopyFoldedEventKeys,
+        ],
+        lastSyncedTraderQty: Math.abs(Number(targetTraderPos.positionAmount || 0)),
       });
 
       return {
@@ -1429,10 +1455,44 @@ export class PaperEngine {
               leverage: closed.leverage,
               accountId: acc.id,
               accountName: acc.name,
-              messageAr: `[${acc.name}] تم تفعيل وقف الخسارة الآمن (تأمين الصفقة) وإغلاق ${closed.symbol} بالسعر الحالي ${livePrice.toFixed(4)} USDT`,
+              messageAr: `[${acc.name}] تم تفعيل وقف الخسارة (SL) وإغلاق ${closed.symbol} بالسعر الحالي ${livePrice.toFixed(4)} USDT`,
             });
           } catch (e) {
             console.warn('Stop-loss execution failed:', e);
+          }
+          continue;
+        }
+
+        if (
+          pos.takeProfitPrice &&
+          pos.takeProfitPrice > 0 &&
+          isTakeProfitTriggered({
+            side: pos.side,
+            takeProfitPrice: pos.takeProfitPrice,
+            currentMarketPrice: livePrice,
+          })
+        ) {
+          try {
+            const closed = this.closePosition(pos.id, livePrice, Date.now(), acc.id);
+            logs.push({
+              id: `log_tp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              timestamp: Date.now(),
+              traderId: pos.sourceTraderId || 'manual_tp',
+              traderName: pos.sourceTraderName || 'هدف جني الأرباح (TP)',
+              source: pos.sourceType === 'SMART_MONEY' ? 'SMART_MONEY' : 'COPY_TRADING',
+              action: 'EXIT',
+              volumePercent: -100,
+              symbol: closed.symbol,
+              side: closed.side,
+              price: livePrice,
+              quantity: closed.quantity,
+              leverage: closed.leverage,
+              accountId: acc.id,
+              accountName: acc.name,
+              messageAr: `[${acc.name}] تم تحقيق الهدف وجني الأرباح (TP) وإغلاق ${closed.symbol} بالسعر الحالي ${livePrice.toFixed(4)} USDT`,
+            });
+          } catch (e) {
+            console.warn('Take-profit execution failed:', e);
           }
         }
       }
@@ -1886,6 +1946,16 @@ export class PaperEngine {
         : params.marginPerTradeUsdt || acc.settings.tradeValueUsdt;
     const userLeverage = acc.settings.leverage;
 
+    // Pre-reconcile all incoming trader positions against latestRecords and positionHistory (v2.21)
+    // so already-closed/finished trades are discarded before copying and remaining trades carry only their net remaining size
+    const preReconciled = reconcileAllTraderPositionsBeforeCopy({
+      positions: params.positions,
+      latestRecords: params.latestRecords,
+      positionHistory: params.positionHistory,
+      traderId: params.traderId,
+    });
+    const reconciledPositions = preReconciled.openPositions;
+
     // Track which positions executed a PARTIAL_EXIT or SCALE_IN during this sync cycle
     // so the exact same trader move is NEVER applied twice across `latestRecords`, `scaleAdjustments`, and `positionAmount` deltas
     const partialExitAppliedThisTick = new Set<string>();
@@ -1896,21 +1966,18 @@ export class PaperEngine {
       (a, b) => (a.orderTime || 0) - (b.orderTime || 0)
     );
     for (const rec of recentRecords) {
-      const recSide: 'LONG' | 'SHORT' | null =
-        rec.positionSide === 'LONG' || rec.positionSide === 'SHORT'
-          ? rec.positionSide
-          : null;
+      const recSide = inferRecordPositionSide(rec);
 
       const matchingOpen = acc.positions.find(
         (p) =>
           p.status === 'OPEN' &&
           p.symbol.toUpperCase() === rec.symbol.toUpperCase() &&
-          (!recSide || p.side === recSide) &&
+          p.side === recSide &&
           (p.sourceTraderId === params.traderId || p.sourceTraderName === params.traderName)
       );
 
       if (matchingOpen) {
-        const traderPos = params.positions.find(
+        const traderPos = reconciledPositions.find(
           (tp) =>
             tp.symbol.toUpperCase() === matchingOpen.symbol.toUpperCase() &&
             tp.side === matchingOpen.side
@@ -1926,7 +1993,11 @@ export class PaperEngine {
           const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
             recordTimestamp: rec.orderTime,
             userPositionOpenTime: matchingOpen.openTime,
+            traderPositionEntryTime: matchingOpen.traderEntryTime,
           });
+          const isAfterTraderEntry =
+            !matchingOpen.traderEntryTime ||
+            rec.orderTime >= matchingOpen.traderEntryTime - 5_000;
           const eventKey = buildStableTraderEventKey({
             kind: 'REC',
             symbol: rec.symbol,
@@ -1960,8 +2031,8 @@ export class PaperEngine {
               actionType: 'FULL_EXIT',
               eventTimestamp: rec.orderTime,
             });
-          // Apply EXIT if it occurred after our entry OR trader no longer has the position open
-          if ((isAfterOurEntry || !traderPos) && !alreadyApplied) {
+          // Apply EXIT only if it belongs to this trade cycle (isAfterTraderEntry) and occurred after our entry (or traderPos is gone)
+          if (isAfterTraderEntry && (isAfterOurEntry || !traderPos) && !alreadyApplied) {
             try {
               const closed = this.closePosition(matchingOpen.id, liveExecPrice, rec.orderTime, acc.id, {
                 sourceEventId: eventKey,
@@ -2001,6 +2072,7 @@ export class PaperEngine {
           const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
             recordTimestamp: rec.orderTime,
             userPositionOpenTime: matchingOpen.openTime,
+            traderPositionEntryTime: matchingOpen.traderEntryTime,
           });
           const withdrawPct = Math.min(95, Math.max(5, Math.abs(rec.volumePercent || 30)));
           const eventKey = buildStableTraderEventKey({
@@ -2090,6 +2162,7 @@ export class PaperEngine {
           const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
             recordTimestamp: rec.orderTime,
             userPositionOpenTime: matchingOpen.openTime,
+            traderPositionEntryTime: matchingOpen.traderEntryTime,
           });
           const addPct = Math.max(5, Math.abs(rec.volumePercent || 30));
           const eventKey = buildStableTraderEventKey({
@@ -2184,7 +2257,7 @@ export class PaperEngine {
       }
     }
 
-    // 1.B: Detect full exits and partial withdrawals directly from `params.positions` changes
+    // 1.B: Detect full exits and partial withdrawals directly from `reconciledPositions` changes
     const openTraderPositionsInAcc = acc.positions.filter(
       (p) =>
         p.status === 'OPEN' &&
@@ -2192,7 +2265,7 @@ export class PaperEngine {
     );
 
     for (const userOpenPos of openTraderPositionsInAcc) {
-      const stillOpenByTrader = params.positions.find(
+      const stillOpenByTrader = reconciledPositions.find(
         (tp) =>
           tp.symbol.toUpperCase() === userOpenPos.symbol.toUpperCase() &&
           tp.side === userOpenPos.side
@@ -2207,12 +2280,19 @@ export class PaperEngine {
 
       if (!stillOpenByTrader && !params.isPartialOrRateLimited) {
         const isTransientEmptyResponse =
-          params.positions.length === 0 &&
+          reconciledPositions.length === 0 &&
           params.latestRecords.length === 0 &&
           (!params.positionHistory || params.positionHistory.length === 0);
-        const justOpenedFromRecord =
-          params.positions.length === 0 && Date.now() - userOpenPos.openTime < 5000;
-        if (!justOpenedFromRecord && !isTransientEmptyResponse) {
+        const hasExplicitCloseSignal = isTraderTradePermanentlyClosed({
+          symbol: userOpenPos.symbol,
+          side: userOpenPos.side,
+          entryTime: userOpenPos.traderEntryTime || userOpenPos.openTime,
+          latestRecords: params.latestRecords,
+          positionHistory: params.positionHistory,
+        });
+        const withinInitialOpenGraceWindow =
+          Date.now() - userOpenPos.openTime < 15_000 && !hasExplicitCloseSignal;
+        if (!withinInitialOpenGraceWindow && !isTransientEmptyResponse) {
           try {
             const eventKey = buildStableTraderEventKey({
               kind: 'QTY_DROP',
@@ -2679,7 +2759,7 @@ export class PaperEngine {
       }
     }
 
-    // Remove any pending choices for this trader in this account that are no longer open in `params.positions`,
+    // Remove any pending choices for this trader in this account that are no longer open in `reconciledPositions`,
     // are already open in `acc.positions`, belong to `SMART_MONEY` whales (which execute immediately),
     // or when the user disabled the prompt option
     this.pendingReconnectChoices = this.pendingReconnectChoices.filter((c) => {
@@ -2688,7 +2768,7 @@ export class PaperEngine {
       if (params.source === 'SMART_MONEY' || params.forceImmediateExecution || !shouldCheckAdvantage) {
         return false;
       }
-      const stillOpenInTrader = params.positions.some(
+      const stillOpenInTrader = reconciledPositions.some(
         (tp) => tp.symbol.toUpperCase() === c.symbol.toUpperCase() && tp.side === c.side
       );
       const alreadyOpenInAcc = acc.positions.some(
@@ -2702,28 +2782,8 @@ export class PaperEngine {
     });
     this.savePendingChoices();
 
-    // 2. Copy ONLY genuinely active open positions from `Positions` tab (never permanently closed or already-synced trades)
-    for (const pos of params.positions) {
-      if (
-        !params.precomputedByWorker &&
-        isTraderTradePermanentlyClosed({
-          symbol: pos.symbol,
-          side: pos.side,
-          entryTime: pos.entryTime,
-          latestRecords: params.latestRecords,
-          positionHistory: params.positionHistory,
-        })
-      ) {
-        const staleChoiceId = `choice_${acc.id}_${params.traderId}_${pos.symbol.toUpperCase()}_${pos.side}`;
-        if (this.pendingReconnectChoices.some((c) => c.id === staleChoiceId)) {
-          this.pendingReconnectChoices = this.pendingReconnectChoices.filter(
-            (c) => c.id !== staleChoiceId
-          );
-          this.savePendingChoices();
-        }
-        continue;
-      }
-
+    // 2. Copy ONLY genuinely active, reconciled open positions (`reconciledPositions`) — never finished or already-synced trades
+    for (const pos of reconciledPositions) {
       if (
         hasTraderEntryAlreadyBeenSynced({
           traderId: params.traderId,
@@ -2830,6 +2890,13 @@ export class PaperEngine {
       this.pendingReconnectChoices = this.pendingReconnectChoices.filter((c) => c.id !== choiceId);
       this.savePendingChoices();
 
+      const preCopyFoldedEventKeys = buildInitialAppliedEventKeysForOpenPosition(
+        pos.symbol,
+        pos.scaleAdjustments,
+        params.latestRecords,
+        params.traderId
+      );
+
       try {
         const opened = this.openPositionWithUserSettings({
           symbol: pos.symbol,
@@ -2846,6 +2913,8 @@ export class PaperEngine {
           traderScaleAdjustments: pos.scaleAdjustments,
           currentScalePercent: pos.currentScalePercent,
           accountId: acc.id,
+          initialAppliedEventKeys: preCopyFoldedEventKeys,
+          lastSyncedTraderQty: pos.positionAmount,
         });
         opened.lastSyncedTraderQty = pos.positionAmount;
         opened.lastSyncedTraderUpdateTime = pos.lastUpdateTime || pos.entryTime;
@@ -2868,7 +2937,7 @@ export class PaperEngine {
         });
         this.recordTraderSyncAction(checkpoint, {
           actionId: entryActionId,
-          candidateKeys: [entryActionId, entryTimeActionId],
+          candidateKeys: [entryActionId, entryTimeActionId, ...preCopyFoldedEventKeys],
           symbol: pos.symbol,
           actionType: 'ENTRY',
           timestamp: pos.entryTime || opened.openTime,

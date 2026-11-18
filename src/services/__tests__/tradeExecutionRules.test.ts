@@ -21,6 +21,12 @@ import {
   hasTraderEntryAlreadyBeenSynced,
   evaluateAccountDrawdownAlertDecision,
   evaluateManualSinglePositionCopyPlan,
+  isTakeProfitTriggered,
+  calculateSlTpPriceByPriceMovePercent,
+  evaluateManualOrderRiskReward,
+  inferRecordPositionSide,
+  reconcileTraderPositionBeforeCopy,
+  reconcileAllTraderPositionsBeforeCopy,
 } from '../tradeExecutionRules';
 import type {
   ActiveCopiedTrader,
@@ -905,4 +911,330 @@ test('evaluateManualSinglePositionCopyPlan: opens new position once, does nothin
   assert.equal(planDelta.deltaActions[0].actionType, 'PARTIAL_EXIT');
   assert.equal(planDelta.deltaActions[0].volumePercent, 40);
 });
+
+test('isTakeProfitTriggered and calculateSlTpPriceByPriceMovePercent work for LONG and SHORT', () => {
+  // LONG at 1000: +5% TP = 1050, -2% SL = 980
+  const longTp = calculateSlTpPriceByPriceMovePercent({
+    side: 'LONG',
+    entryPrice: 1000,
+    movePercent: 5,
+    kind: 'TAKE_PROFIT',
+  });
+  const longSl = calculateSlTpPriceByPriceMovePercent({
+    side: 'LONG',
+    entryPrice: 1000,
+    movePercent: 2,
+    kind: 'STOP_LOSS',
+  });
+  assert.equal(longTp, 1050);
+  assert.equal(longSl, 980);
+  assert.equal(isTakeProfitTriggered({ side: 'LONG', takeProfitPrice: longTp, currentMarketPrice: 1049 }), false);
+  assert.equal(isTakeProfitTriggered({ side: 'LONG', takeProfitPrice: longTp, currentMarketPrice: 1050 }), true);
+  assert.equal(isTakeProfitTriggered({ side: 'LONG', takeProfitPrice: longTp, currentMarketPrice: 1060 }), true);
+
+  // SHORT at 1000: +5% TP = 950, -2% SL = 1020
+  const shortTp = calculateSlTpPriceByPriceMovePercent({
+    side: 'SHORT',
+    entryPrice: 1000,
+    movePercent: 5,
+    kind: 'TAKE_PROFIT',
+  });
+  const shortSl = calculateSlTpPriceByPriceMovePercent({
+    side: 'SHORT',
+    entryPrice: 1000,
+    movePercent: 2,
+    kind: 'STOP_LOSS',
+  });
+  assert.equal(shortTp, 950);
+  assert.equal(shortSl, 1020);
+  assert.equal(isTakeProfitTriggered({ side: 'SHORT', takeProfitPrice: shortTp, currentMarketPrice: 951 }), false);
+  assert.equal(isTakeProfitTriggered({ side: 'SHORT', takeProfitPrice: shortTp, currentMarketPrice: 950 }), true);
+  assert.equal(isTakeProfitTriggered({ side: 'SHORT', takeProfitPrice: shortTp, currentMarketPrice: 940 }), true);
+});
+
+test('evaluateManualOrderRiskReward calculates notional, liquidation price, SL loss, TP profit, and R:R ratio', () => {
+  const evalLong = evaluateManualOrderRiskReward({
+    side: 'LONG',
+    entryPrice: 1000,
+    marginUsdt: 100,
+    leverage: 10,
+    commissionPercent: 0,
+    stopLossPrice: 980, // -2% price move -> -20% ROE -> -20 USDT
+    takeProfitPrice: 1060, // +6% price move -> +60% ROE -> +60 USDT
+  });
+
+  assert.equal(evalLong.notionalUsdt, 1000);
+  assert.equal(evalLong.quantity, 1);
+  assert.equal(evalLong.stopLossValid, true);
+  assert.equal(evalLong.takeProfitValid, true);
+  assert.equal(evalLong.estimatedLossAtSlUsdt, -20);
+  assert.equal(evalLong.estimatedLossAtSlRoePercent, -20);
+  assert.equal(evalLong.estimatedProfitAtTpUsdt, 60);
+  assert.equal(evalLong.estimatedProfitAtTpRoePercent, 60);
+  assert.equal(evalLong.riskRewardRatio, 3);
+});
+
+test('reconcileTraderPositionBeforeCopy (v2.21): discards finished/closed trades before copying so they never open and close 3s later', () => {
+  const tOpen = 1_715_000_000_000;
+  const tClose = tOpen + 60_000;
+
+  const candidatePos: TraderOpenPosition = {
+    id: 'pos_closed_btc',
+    symbol: 'BTCUSDT',
+    collateral: 'USDT',
+    positionAmount: 0.5,
+    initialPositionAmount: 0.5,
+    side: 'LONG',
+    entryPrice: 90000,
+    markPrice: 91000,
+    breakEvenPrice: 90010,
+    unrealizedProfit: 500,
+    cumRealized: 0,
+    notionalValue: 45500,
+    leverage: 10,
+    isolated: false,
+    roePercent: 11,
+    entryTime: tOpen,
+    lastUpdateTime: tOpen,
+    currentScalePercent: 100,
+    scaleAdjustments: [
+      {
+        id: 'adj_init',
+        actionType: 'INITIAL_ENTRY',
+        actionLabelAr: 'فتح الصفقة 100%',
+        timestamp: tOpen,
+        volumePercent: 100,
+        remainingPercentAfter: 100,
+        executedQty: 0.5,
+        price: 90000,
+      },
+    ],
+  };
+
+  // Case 1: Trader has an EXIT order in latestRecords after entryTime
+  const exitRecord: TraderLatestRecord = {
+    id: 'rec_exit_1',
+    symbol: 'BTCUSDT',
+    baseAsset: 'BTC',
+    quoteAsset: 'USDT',
+    side: 'SELL',
+    type: 'MARKET',
+    positionSide: 'BOTH',
+    actionType: 'EXIT',
+    actionLabelAr: 'خروج كامل -100%',
+    volumePercent: -100,
+    remainingPercentAfter: 0,
+    executedQty: 0.5,
+    avgPrice: 91000,
+    totalPnl: 500,
+    orderTime: tClose,
+    entryTime: tOpen,
+    exitTime: tClose,
+  };
+
+  const resWithExitRecord = reconcileTraderPositionBeforeCopy({
+    position: candidatePos,
+    latestRecords: [exitRecord],
+    positionHistory: [],
+    traderId: 'trader_1',
+  });
+  assert.equal(resWithExitRecord.isFinished, true);
+  assert.equal(resWithExitRecord.reconciledPosition, null);
+  assert.equal(resWithExitRecord.netRemainingScalePercent, 0);
+
+  // Case 2: Position history reports >= 98% of maxOpenInterest withdrawn ("Partially Closed" or "All Closed")
+  const closedHistory: TraderPositionHistoryItem = {
+    id: 'hist_1',
+    symbol: 'BTCUSDT',
+    side: 'LONG',
+    opened: tOpen,
+    closed: tClose,
+    avgCost: 90000,
+    avgClosePrice: 91000,
+    closingPnl: 500,
+    maxOpenInterest: 0.5,
+    closedVolume: 0.5,
+    isolated: false,
+    scaleAdjustments: [],
+  };
+
+  const resWithClosedHistory = reconcileTraderPositionBeforeCopy({
+    position: candidatePos,
+    latestRecords: [],
+    positionHistory: [closedHistory],
+    traderId: 'trader_1',
+  });
+  assert.equal(resWithClosedHistory.isFinished, true);
+  assert.equal(resWithClosedHistory.reconciledPosition, null);
+});
+
+test('reconcileTraderPositionBeforeCopy (v2.21): reconciles scale-ins and partial withdrawals and copies ONLY what remains', () => {
+  const tPriorClose = 1_715_000_000_000;
+  const tOpen = tPriorClose + 120_000;
+  const tScaleIn = tOpen + 180_000;
+  const tPartialExit = tOpen + 360_000;
+
+  // Trader had a prior closed position at tPriorClose (which must be ignored)
+  // Then opened a new BTCUSDT SHORT at tOpen (100%), scaled in +50% (150%), and withdrew -40% -> remaining = 90%
+  const candidatePos: TraderOpenPosition = {
+    id: 'pos_active_btc_short',
+    symbol: 'BTCUSDT',
+    collateral: 'USDT',
+    positionAmount: 0.9,
+    initialPositionAmount: 1.0,
+    side: 'SHORT',
+    entryPrice: 95000,
+    markPrice: 94000,
+    breakEvenPrice: 94950,
+    unrealizedProfit: 900,
+    cumRealized: 300,
+    notionalValue: 84600,
+    leverage: 10,
+    isolated: false,
+    roePercent: 10.6,
+    entryTime: tOpen,
+    lastUpdateTime: tPartialExit,
+    currentScalePercent: 90,
+    scaleAdjustments: [
+      // Stale adjustment from prior closed cycle (before tPriorClose) that must be stripped
+      {
+        id: 'stale_adj_before_close',
+        actionType: 'SCALE_IN',
+        actionLabelAr: 'تدعيم قديم +100%',
+        timestamp: tPriorClose - 60_000,
+        volumePercent: 100,
+        remainingPercentAfter: 200,
+        executedQty: 1.0,
+        price: 96000,
+      },
+      {
+        id: 'adj_entry',
+        actionType: 'INITIAL_ENTRY',
+        actionLabelAr: 'فتح الصفقة الأولي 100%',
+        timestamp: tOpen,
+        volumePercent: 100,
+        remainingPercentAfter: 100,
+        executedQty: 1.0,
+        price: 95000,
+      },
+      {
+        id: 'adj_scale_in',
+        actionType: 'SCALE_IN',
+        actionLabelAr: 'تدعيم +50%',
+        timestamp: tScaleIn,
+        volumePercent: 50,
+        remainingPercentAfter: 150,
+        executedQty: 0.5,
+        price: 95500,
+      },
+      {
+        id: 'adj_partial_exit',
+        actionType: 'PARTIAL_EXIT',
+        actionLabelAr: 'سحب جزئي -40%',
+        timestamp: tPartialExit,
+        volumePercent: -40,
+        remainingPercentAfter: 90,
+        executedQty: 0.6,
+        price: 94200,
+      },
+    ],
+  };
+
+  const priorClosedHist: TraderPositionHistoryItem = {
+    id: 'hist_prior',
+    symbol: 'BTCUSDT',
+    side: 'SHORT',
+    opened: tPriorClose - 300_000,
+    closed: tPriorClose,
+    avgCost: 96000,
+    avgClosePrice: 95200,
+    closingPnl: 800,
+    maxOpenInterest: 1.0,
+    closedVolume: 1.0,
+    isolated: false,
+    scaleAdjustments: [],
+  };
+
+  const reconciled = reconcileTraderPositionBeforeCopy({
+    position: candidatePos,
+    latestRecords: [],
+    positionHistory: [priorClosedHist],
+    traderId: 'trader_2',
+  });
+
+  assert.equal(reconciled.isFinished, false);
+  assert.ok(reconciled.reconciledPosition);
+  assert.equal(reconciled.scaleInCount, 1);
+  assert.equal(reconciled.partialExitCount, 1);
+  assert.equal(reconciled.netRemainingScalePercent, 90);
+  assert.equal(reconciled.reconciledPosition.currentScalePercent, 90);
+
+  // Verify calculateLateEntryNetPositionState copies ONLY the remaining 90% (22.5 USDT on a 25 USDT base trade)
+  const lateState = calculateLateEntryNetPositionState({
+    baseMarginUsdt: 25,
+    leverage: 10,
+    executionPrice: 94000,
+    side: 'SHORT',
+    traderEntryPrice: reconciled.reconciledPosition.entryPrice,
+    traderEntryTime: reconciled.reconciledPosition.entryTime,
+    traderCurrentScalePercent: reconciled.reconciledPosition.currentScalePercent,
+    traderScaleAdjustments: reconciled.reconciledPosition.scaleAdjustments,
+    scaleInSamePercentAsTrader: true,
+  });
+  assert.equal(lateState.netScalePercent, 90);
+  assert.equal(lateState.netMarginUsdt, 22.5);
+});
+
+test('reconcileAllTraderPositionsBeforeCopy (v2.21): reconciles direct quantity reductions (e.g. maxOpenInterest 0.17 -> current 0.11 = 65%) and filters closed positions', () => {
+  const tOpen = 1_715_500_000_000;
+
+  const partiallyClosedPos: TraderOpenPosition = {
+    id: 'pos_partial_qty',
+    symbol: 'BTCUSDT',
+    collateral: 'USDT',
+    positionAmount: 0.11,
+    initialPositionAmount: 0.17,
+    side: 'SHORT',
+    entryPrice: 74986.88,
+    markPrice: 74200,
+    breakEvenPrice: 75000,
+    unrealizedProfit: 86.55,
+    cumRealized: 132.42,
+    notionalValue: 8162,
+    leverage: 10,
+    isolated: false,
+    roePercent: 10.6,
+    entryTime: tOpen,
+    lastUpdateTime: tOpen + 60_000,
+    currentScalePercent: 100,
+    scaleAdjustments: [
+      {
+        id: 'adj_init',
+        actionType: 'INITIAL_ENTRY',
+        actionLabelAr: 'فتح الصفقة الأولي 100%',
+        timestamp: tOpen,
+        volumePercent: 100,
+        remainingPercentAfter: 100,
+        executedQty: 0.17,
+        price: 74986.88,
+      },
+    ],
+  };
+
+  const batch = reconcileAllTraderPositionsBeforeCopy({
+    positions: [partiallyClosedPos],
+    latestRecords: [],
+    positionHistory: [],
+    traderId: 'trader_partial',
+  });
+
+  assert.equal(batch.openPositions.length, 1);
+  assert.equal(batch.discardedFinishedPositions.length, 0);
+  assert.equal(batch.openPositions[0].currentScalePercent, 65);
+  assert.equal(batch.openPositions[0].positionAmount, 0.11);
+  assert.equal(inferRecordPositionSide({ positionSide: 'BOTH', side: 'SELL', actionType: 'EXIT' }), 'LONG');
+  assert.equal(inferRecordPositionSide({ positionSide: 'BOTH', side: 'BUY', actionType: 'EXIT' }), 'SHORT');
+});
+
+
 

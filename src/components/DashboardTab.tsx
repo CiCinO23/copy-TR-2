@@ -8,9 +8,13 @@ import {
   Layers,
   ArrowUpRight,
   ArrowDownRight,
-  BarChart2,
   CandlestickChart,
   TrendingUp,
+  Sliders,
+  ShieldAlert,
+  Target,
+  CheckCircle2,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -38,6 +42,10 @@ import {
   searchFuturesSymbols,
   DEFAULT_WATCHED_SYMBOLS,
 } from '../services/binanceApi';
+import {
+  calculateSlTpPriceByPriceMovePercent,
+  evaluateManualOrderRiskReward,
+} from '../services/tradeExecutionRules';
 
 interface DashboardTabProps {
   connectionState: BinanceConnectionState;
@@ -48,6 +56,21 @@ interface DashboardTabProps {
   onRefreshMarket: () => void;
   onRefreshKucoin: () => void;
   onFetchRealKucoinBalance?: () => void;
+  onOpenOrder?: (
+    symbol: string,
+    side: 'LONG' | 'SHORT',
+    quantity: number,
+    entryPrice: number,
+    leverage: number,
+    options?: {
+      stopLossPrice?: number;
+      takeProfitPrice?: number;
+      accountId?: string;
+      useCustomPrice?: boolean;
+    }
+  ) => void;
+  onSelectAccount?: (accountId: string) => void;
+  onNavigateToTrading?: () => void;
 }
 
 import { CoinIcon, REAL_COIN_DATA, extractBaseCoin } from './CoinIcon';
@@ -78,6 +101,9 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   onRefreshMarket,
   onRefreshKucoin,
   onFetchRealKucoinBalance,
+  onOpenOrder,
+  onSelectAccount,
+  onNavigateToTrading,
 }) => {
   // Add Coin State
   const [showAddCoinPanel, setShowAddCoinPanel] = useState<boolean>(false);
@@ -144,6 +170,179 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const activeNumericPrice = activeTicker
     ? parseFloat(activeTicker.lastPrice.replace(/,/g, ''))
     : undefined;
+
+  // ==========================================
+  // Advanced Manual Trading Terminal State (v2.20)
+  // ==========================================
+  const accounts = paperSnapshot?.accounts || [];
+  const activeAccountId = paperSnapshot?.activeAccountId || 'acc_default';
+  const activeAccountSummary =
+    accounts.find((a) => a.id === activeAccountId) || accounts[0];
+  const defaultTradeValue =
+    activeAccountSummary?.settings?.tradeValueUsdt ??
+    paperSnapshot?.settings?.tradeValueUsdt ??
+    25;
+  const defaultLeverage =
+    activeAccountSummary?.settings?.leverage ??
+    paperSnapshot?.settings?.leverage ??
+    10;
+  const defaultCommissionPct =
+    activeAccountSummary?.settings?.commissionPercent ??
+    paperSnapshot?.settings?.commissionPercent ??
+    0.05;
+  const isRealMode =
+    (activeAccountSummary?.settings?.mode ?? paperSnapshot?.settings?.mode) === 'REAL';
+  const openPositionsCount =
+    paperSnapshot?.positions?.filter((p) => p.status === 'OPEN').length ?? 0;
+
+  const [manualSide, setManualSide] = useState<'LONG' | 'SHORT'>('LONG');
+  const [priceMode, setPriceMode] = useState<'MARKET' | 'CUSTOM'>('MARKET');
+  const [customPriceInput, setCustomPriceInput] = useState<string>('');
+  const [manualMarginInput, setManualMarginInput] = useState<string>(
+    String(defaultTradeValue)
+  );
+  const [manualLeverage, setManualLeverage] = useState<number>(defaultLeverage);
+  const [stopLossInput, setStopLossInput] = useState<string>('');
+  const [takeProfitInput, setTakeProfitInput] = useState<string>('');
+  const [manualOrderError, setManualOrderError] = useState<string | null>(null);
+  const [manualOrderSuccess, setManualOrderSuccess] = useState<string | null>(null);
+
+  // Sync default margin and leverage when switching accounts
+  useEffect(() => {
+    setManualMarginInput(String(defaultTradeValue));
+    setManualLeverage(defaultLeverage);
+  }, [activeAccountId, defaultTradeValue, defaultLeverage]);
+
+  const getFallbackSymbolPrice = (sym: string): number => {
+    const cleanSym = sym.toUpperCase().trim();
+    if (connectionState.allPrices?.[cleanSym] && connectionState.allPrices[cleanSym] > 0) {
+      return connectionState.allPrices[cleanSym];
+    }
+    const foundTicker = connectionState.tickers.find((t) => t.symbol === cleanSym);
+    if (foundTicker) {
+      const p = parseFloat(foundTicker.lastPrice.replace(/,/g, ''));
+      if (!isNaN(p) && p > 0) return p;
+    }
+    if (cleanSym === 'BTCUSDT') return 96450;
+    if (cleanSym === 'ETHUSDT') return 2780;
+    if (cleanSym === 'SOLUSDT') return 198;
+    if (cleanSym === 'BNBUSDT') return 654;
+    if (cleanSym === 'XRPUSDT') return 2.48;
+    if (cleanSym === 'DOGEUSDT') return 0.264;
+    return 100;
+  };
+
+  const liveSymbolPrice = activeNumericPrice || getFallbackSymbolPrice(selectedChartSymbol);
+
+  // Keep custom price input initialized when symbol changes if empty or in MARKET mode
+  useEffect(() => {
+    if (priceMode === 'MARKET' && liveSymbolPrice > 0) {
+      setCustomPriceInput(String(liveSymbolPrice));
+    }
+  }, [selectedChartSymbol, liveSymbolPrice, priceMode]);
+
+  const effectiveEntryPrice =
+    priceMode === 'CUSTOM' && parseFloat(customPriceInput) > 0
+      ? parseFloat(customPriceInput)
+      : liveSymbolPrice;
+
+  const parsedMarginUsdt = Math.max(0.5, parseFloat(manualMarginInput) || defaultTradeValue);
+  const parsedSlPrice = parseFloat(stopLossInput) > 0 ? parseFloat(stopLossInput) : undefined;
+  const parsedTpPrice = parseFloat(takeProfitInput) > 0 ? parseFloat(takeProfitInput) : undefined;
+
+  const orderPreview = React.useMemo(
+    () =>
+      evaluateManualOrderRiskReward({
+        side: manualSide,
+        entryPrice: effectiveEntryPrice,
+        marginUsdt: parsedMarginUsdt,
+        leverage: manualLeverage,
+        commissionPercent: defaultCommissionPct,
+        stopLossPrice: parsedSlPrice,
+        takeProfitPrice: parsedTpPrice,
+      }),
+    [
+      manualSide,
+      effectiveEntryPrice,
+      parsedMarginUsdt,
+      manualLeverage,
+      defaultCommissionPct,
+      parsedSlPrice,
+      parsedTpPrice,
+    ]
+  );
+
+  const handleApplySlMovePreset = (movePct: number | null) => {
+    setManualOrderError(null);
+    if (!movePct || movePct <= 0) {
+      setStopLossInput('');
+      return;
+    }
+    const slPrice = calculateSlTpPriceByPriceMovePercent({
+      side: manualSide,
+      entryPrice: effectiveEntryPrice,
+      movePercent: movePct,
+      kind: 'STOP_LOSS',
+    });
+    setStopLossInput(String(slPrice));
+  };
+
+  const handleApplyTpMovePreset = (movePct: number | null) => {
+    setManualOrderError(null);
+    if (!movePct || movePct <= 0) {
+      setTakeProfitInput('');
+      return;
+    }
+    const tpPrice = calculateSlTpPriceByPriceMovePercent({
+      side: manualSide,
+      entryPrice: effectiveEntryPrice,
+      movePercent: movePct,
+      kind: 'TAKE_PROFIT',
+    });
+    setTakeProfitInput(String(tpPrice));
+  };
+
+  const handleExecuteManualTrade = (e: React.FormEvent) => {
+    e.preventDefault();
+    setManualOrderError(null);
+    setManualOrderSuccess(null);
+
+    if (!onOpenOrder) return;
+
+    if (!orderPreview.stopLossValid && orderPreview.stopLossErrorAr) {
+      setManualOrderError(orderPreview.stopLossErrorAr);
+      return;
+    }
+    if (!orderPreview.takeProfitValid && orderPreview.takeProfitErrorAr) {
+      setManualOrderError(orderPreview.takeProfitErrorAr);
+      return;
+    }
+
+    try {
+      onOpenOrder(
+        selectedChartSymbol,
+        manualSide,
+        orderPreview.quantity,
+        orderPreview.entryPrice,
+        orderPreview.leverage,
+        {
+          stopLossPrice: parsedSlPrice,
+          takeProfitPrice: parsedTpPrice,
+          accountId: activeAccountId,
+          useCustomPrice: priceMode === 'CUSTOM',
+        }
+      );
+
+      const slBadge = parsedSlPrice ? ` • وقف الخسارة: ${parsedSlPrice}$` : '';
+      const tpBadge = parsedTpPrice ? ` • الهدف: ${parsedTpPrice}$` : '';
+      setManualOrderSuccess(
+        `تم فتح صفقة ${manualSide === 'LONG' ? 'شراء (LONG)' : 'بيع (SHORT)'} على ${selectedChartSymbol} بقيمة ${orderPreview.marginUsdt}$ × ${orderPreview.leverage}x بالسعر ${orderPreview.entryPrice}$${slBadge}${tpBadge}`
+      );
+      setTimeout(() => setManualOrderSuccess(null), 6500);
+    } catch (err: any) {
+      setManualOrderError(err?.message || 'تعذر تنفيذ الصفقة اليدوية');
+    }
+  };
 
   // Load chart klines whenever selected symbol or interval changes
   useEffect(() => {
@@ -1149,6 +1348,588 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             </div>
           )}
         </div>
+      </div>
+
+      {/* 4. منصة التداول اليدوي المتقدم في الصفحة الرئيسية (السعر، وقف الخسارة، الهدف، الرافعة، والحساب) */}
+      <div
+        data-testid="dashboard_manual_trading_terminal"
+        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4 overflow-hidden"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#1E2733] pb-3.5">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-xl bg-[#0D2B24] border border-[#01BC8D]/40 flex items-center justify-center text-[#01BC8D] shrink-0">
+              <Sliders className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="font-bold text-sm sm:text-base text-white">
+                  منصة التداول اليدوي المتقدم
+                </h3>
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-md font-mono ${
+                    isRealMode
+                      ? 'bg-[#01BC8D]/20 text-[#01BC8D] border border-[#01BC8D]/40'
+                      : 'bg-[#161D26] text-[#8A99AD] border border-[#232E3A]'
+                  }`}
+                >
+                  {isRealMode ? 'تنفيذ حقيقي KuCoin' : 'محاكاة وتداول افتراضي'}
+                </span>
+              </div>
+              <p className="text-[11px] text-[#8A99AD] mt-0.5">
+                تحكم كامل في السعر (سوق/مخصص)، وقف الخسارة (SL)، الهدف وجني الأرباح (TP)، الرافعة المالية، وقيمة الهامش
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {accounts.length > 0 && onSelectAccount && (
+              <div className="flex items-center gap-1.5 bg-[#0B0E11] border border-[#232E3A] rounded-xl px-2.5 py-1.5 text-xs">
+                <span className="text-[#8A99AD] text-[11px]">الحساب:</span>
+                <select
+                  data-testid="dashboard_manual_account_select"
+                  value={activeAccountId}
+                  onChange={(e) => onSelectAccount(e.target.value)}
+                  className="bg-transparent text-white font-bold focus:outline-none cursor-pointer text-xs"
+                >
+                  {accounts.map((acc) => (
+                    <option key={acc.id} value={acc.id} className="bg-[#12171D] text-white">
+                      {acc.name} ({acc.availableBalance.toFixed(1)} USDT)
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {onNavigateToTrading && (
+              <button
+                type="button"
+                data-testid="dashboard_go_to_positions_btn"
+                onClick={onNavigateToTrading}
+                className="bg-[#161D26] hover:bg-[#1E2733] border border-[#232E3A] text-[#01BC8D] font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>المراكز المفتوحة ({openPositionsCount})</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <form onSubmit={handleExecuteManualTrade} className="space-y-4">
+          {/* Row 1: Symbol Selection & Direction (LONG / SHORT) */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+            {/* Symbol Picker */}
+            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#8A99AD] font-semibold">زوج العملة (مرتبط بالشارت)</span>
+                <span dir="ltr" className="text-[#01BC8D] font-mono font-bold tabular-nums">
+                  السعر الحي: {liveSymbolPrice.toLocaleString('en-US', { maximumFractionDigits: 6 })} USDT
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <RealCoinIcon symbol={selectedChartSymbol} size="md" />
+                <select
+                  data-testid="dashboard_manual_symbol_select"
+                  value={selectedChartSymbol}
+                  onChange={(e) => setSelectedChartSymbol(e.target.value)}
+                  className="flex-1 bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] focus:outline-none rounded-xl px-3 py-2 text-xs sm:text-sm text-white font-mono font-bold cursor-pointer"
+                >
+                  {Array.from(
+                    new Set([
+                      ...connectionState.tickers.map((t) => t.symbol),
+                      'BTCUSDT',
+                      'ETHUSDT',
+                      'SOLUSDT',
+                      'BNBUSDT',
+                      'XRPUSDT',
+                      'DOGEUSDT',
+                      'ADAUSDT',
+                      'SUIUSDT',
+                      'AVAXUSDT',
+                      'LINKUSDT',
+                    ])
+                  ).map((sym) => (
+                    <option key={sym} value={sym} className="bg-[#12171D] text-white">
+                      {sym}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Side Selector (LONG / SHORT) */}
+            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#8A99AD] font-semibold">اتجاه الصفقة (Side)</span>
+                <span className="text-[11px] text-[#8A99AD] font-mono">
+                  {manualSide === 'LONG' ? 'ربح عند صعود السعر ↑' : 'ربح عند هبوط السعر ↓'}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  data-testid="dashboard_manual_side_long"
+                  onClick={() => {
+                    setManualSide('LONG');
+                    setManualOrderError(null);
+                  }}
+                  className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    manualSide === 'LONG'
+                      ? 'bg-[#01BC8D] text-[#0B0E11] shadow-[0_0_14px_rgba(1,188,141,0.3)]'
+                      : 'bg-[#12171D] text-[#8A99AD] hover:text-white border border-[#232E3A]'
+                  }`}
+                >
+                  <ArrowUpRight className="w-4 h-4" />
+                  <span>شراء / LONG</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="dashboard_manual_side_short"
+                  onClick={() => {
+                    setManualSide('SHORT');
+                    setManualOrderError(null);
+                  }}
+                  className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    manualSide === 'SHORT'
+                      ? 'bg-[#F6465D] text-white shadow-[0_0_14px_rgba(246,70,93,0.3)]'
+                      : 'bg-[#12171D] text-[#8A99AD] hover:text-white border border-[#232E3A]'
+                  }`}
+                >
+                  <ArrowDownRight className="w-4 h-4" />
+                  <span>بيع / SHORT</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Row 2: Entry Price Control (Market vs Custom Price) & Leverage Control */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+            {/* Price Control */}
+            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-bold text-white">
+                  تحكم السعر (Entry Price)
+                </label>
+                <div className="flex items-center bg-[#12171D] border border-[#232E3A] rounded-lg p-0.5 text-[11px]">
+                  <button
+                    type="button"
+                    data-testid="dashboard_price_mode_market"
+                    onClick={() => {
+                      setPriceMode('MARKET');
+                      setCustomPriceInput(String(liveSymbolPrice));
+                    }}
+                    className={`px-2.5 py-1 rounded-md font-bold cursor-pointer transition-colors ${
+                      priceMode === 'MARKET'
+                        ? 'bg-[#01BC8D] text-[#0B0E11]'
+                        : 'text-[#8A99AD] hover:text-white'
+                    }`}
+                  >
+                    سعر السوق الحي
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="dashboard_price_mode_custom"
+                    onClick={() => {
+                      setPriceMode('CUSTOM');
+                      if (!customPriceInput) setCustomPriceInput(String(liveSymbolPrice));
+                    }}
+                    className={`px-2.5 py-1 rounded-md font-bold cursor-pointer transition-colors ${
+                      priceMode === 'CUSTOM'
+                        ? 'bg-[#01BC8D] text-[#0B0E11]'
+                        : 'text-[#8A99AD] hover:text-white'
+                    }`}
+                  >
+                    سعر مخصص
+                  </button>
+                </div>
+              </div>
+
+              <div className="relative flex items-center">
+                <input
+                  type="number"
+                  step="any"
+                  min="0.000001"
+                  data-testid="dashboard_manual_entry_price_input"
+                  value={priceMode === 'MARKET' ? liveSymbolPrice : customPriceInput}
+                  onChange={(e) => {
+                    setPriceMode('CUSTOM');
+                    setCustomPriceInput(e.target.value);
+                  }}
+                  className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-sm text-white font-mono font-bold focus:outline-none"
+                />
+                <span className="absolute left-3 text-[11px] font-mono text-[#8A99AD]">
+                  USDT
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                <span className="text-[#8A99AD]">تعديل سريع للسعر:</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPriceMode('MARKET');
+                    setCustomPriceInput(String(liveSymbolPrice));
+                  }}
+                  className="px-2 py-0.5 rounded bg-[#12171D] hover:bg-[#1E2733] text-[#01BC8D] border border-[#232E3A] font-mono cursor-pointer"
+                >
+                  سعر السوق ({liveSymbolPrice})
+                </button>
+                {[-1, -0.5, 0.5, 1].map((deltaPct) => (
+                  <button
+                    key={deltaPct}
+                    type="button"
+                    onClick={() => {
+                      setPriceMode('CUSTOM');
+                      const base = liveSymbolPrice;
+                      const decimals = base >= 1000 ? 2 : base >= 10 ? 3 : base >= 1 ? 4 : 6;
+                      const nextP = Number((base * (1 + deltaPct / 100)).toFixed(decimals));
+                      setCustomPriceInput(String(nextP));
+                    }}
+                    className="px-2 py-0.5 rounded bg-[#12171D] hover:bg-[#1E2733] text-[#8A99AD] hover:text-white border border-[#232E3A] font-mono cursor-pointer"
+                  >
+                    {deltaPct > 0 ? `+${deltaPct}%` : `${deltaPct}%`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Leverage Control */}
+            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-bold text-white">
+                  الرافعة المالية (Leverage)
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="number"
+                    min={1}
+                    max={125}
+                    step={1}
+                    data-testid="dashboard_manual_leverage_input"
+                    value={manualLeverage}
+                    onChange={(e) =>
+                      setManualLeverage(
+                        Math.max(1, Math.min(125, Math.round(Number(e.target.value) || 1)))
+                      )
+                    }
+                    className="w-16 bg-[#12171D] border border-[#01BC8D]/50 rounded-lg px-2 py-1 text-xs font-mono font-bold text-[#01BC8D] text-center focus:outline-none"
+                  />
+                  <span className="text-xs font-mono font-bold text-[#01BC8D]">x</span>
+                </div>
+              </div>
+
+              <input
+                type="range"
+                min={1}
+                max={125}
+                value={manualLeverage}
+                onChange={(e) => setManualLeverage(Number(e.target.value))}
+                className="w-full accent-[#01BC8D] cursor-pointer h-1.5 bg-[#12171D] rounded-lg"
+              />
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[2, 5, 10, 20, 30, 50, 75, 100, 125].map((lev) => (
+                  <button
+                    key={lev}
+                    type="button"
+                    data-testid={`dashboard_leverage_preset_${lev}`}
+                    onClick={() => setManualLeverage(lev)}
+                    className={`px-2 py-0.5 rounded-lg text-[11px] font-mono font-bold cursor-pointer transition-colors ${
+                      manualLeverage === lev
+                        ? 'bg-[#01BC8D] text-[#0B0E11]'
+                        : 'bg-[#12171D] text-[#8A99AD] hover:text-white border border-[#232E3A]'
+                    }`}
+                  >
+                    {lev}x
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Row 3: Margin Size (USDT), Stop Loss (SL), and Take Profit (Target TP) */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
+            {/* 1. Margin Size Control */}
+            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-white">قيمة الهامش (Margin USDT)</span>
+                <span dir="ltr" className="text-[11px] font-mono text-[#8A99AD] tabular-nums">
+                  المتاح: {(activeAccountSummary?.availableBalance ?? availableKucoinUsdt).toFixed(2)}$
+                </span>
+              </div>
+
+              <div className="relative flex items-center">
+                <input
+                  type="number"
+                  min="1"
+                  step="any"
+                  data-testid="dashboard_manual_margin_input"
+                  value={manualMarginInput}
+                  onChange={(e) => setManualMarginInput(e.target.value)}
+                  className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-sm text-white font-mono font-bold focus:outline-none"
+                />
+                <span className="absolute left-3 text-[11px] font-mono text-[#01BC8D] font-bold">
+                  USDT
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1 text-[10px]">
+                {[10, 25, 50, 100, 250].map((amt) => (
+                  <button
+                    key={amt}
+                    type="button"
+                    onClick={() => setManualMarginInput(String(amt))}
+                    className={`px-2 py-0.5 rounded font-mono font-bold cursor-pointer ${
+                      parsedMarginUsdt === amt
+                        ? 'bg-[#01BC8D] text-[#0B0E11]'
+                        : 'bg-[#12171D] text-[#8A99AD] hover:text-white border border-[#232E3A]'
+                    }`}
+                  >
+                    {amt}$
+                  </button>
+                ))}
+                {[25, 50, 100].map((pct) => (
+                  <button
+                    key={`bal_${pct}`}
+                    type="button"
+                    onClick={() => {
+                      const avail = Math.max(
+                        1,
+                        activeAccountSummary?.availableBalance ?? availableKucoinUsdt
+                      );
+                      const target = Math.max(1, Number(((avail * (pct / 100)) * 0.98).toFixed(1)));
+                      setManualMarginInput(String(target));
+                    }}
+                    className="px-2 py-0.5 rounded bg-[#161D26] hover:bg-[#1E2733] text-[#01BC8D] border border-[#01BC8D]/30 font-mono cursor-pointer"
+                  >
+                    {pct}% رصيد
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 2. Stop Loss (وقف الخسارة SL) */}
+            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-white flex items-center gap-1.5">
+                  <ShieldAlert className="w-3.5 h-3.5 text-[#F6465D]" />
+                  <span>وقف الخسارة (Stop Loss)</span>
+                </span>
+                {orderPreview.estimatedLossAtSlUsdt !== null && (
+                  <span dir="ltr" className="text-[11px] font-mono font-bold text-[#F6465D] tabular-nums">
+                    {orderPreview.estimatedLossAtSlUsdt.toFixed(2)}$ ({orderPreview.estimatedLossAtSlRoePercent}%)
+                  </span>
+                )}
+              </div>
+
+              <div className="relative flex items-center">
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  placeholder={
+                    manualSide === 'LONG'
+                      ? `أقل من ${effectiveEntryPrice} (اختياري)`
+                      : `أعلى من ${effectiveEntryPrice} (اختياري)`
+                  }
+                  data-testid="dashboard_manual_sl_input"
+                  value={stopLossInput}
+                  onChange={(e) => {
+                    setStopLossInput(e.target.value);
+                    setManualOrderError(null);
+                  }}
+                  className={`w-full bg-[#12171D] border rounded-xl px-3 py-2 text-sm text-white font-mono font-bold focus:outline-none ${
+                    !orderPreview.stopLossValid
+                      ? 'border-[#F6465D]'
+                      : stopLossInput
+                      ? 'border-[#F6465D]/60 focus:border-[#F6465D]'
+                      : 'border-[#232E3A] focus:border-[#F6465D]'
+                  }`}
+                />
+                {stopLossInput && (
+                  <button
+                    type="button"
+                    onClick={() => setStopLossInput('')}
+                    className="absolute left-2 text-[10px] text-[#8A99AD] hover:text-white bg-[#1A222B] px-1.5 py-0.5 rounded cursor-pointer"
+                  >
+                    مسح
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1 text-[10px]">
+                <span className="text-[#8A99AD]">تحديد سريع:</span>
+                {[1, 2, 3, 5, 10].map((pct) => (
+                  <button
+                    key={pct}
+                    type="button"
+                    data-testid={`dashboard_sl_preset_${pct}`}
+                    onClick={() => handleApplySlMovePreset(pct)}
+                    className="px-2 py-0.5 rounded bg-[#2B1216] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/30 font-mono font-bold cursor-pointer"
+                  >
+                    -{pct}%
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 3. Take Profit / Target (الهدف وجني الأرباح TP) */}
+            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-white flex items-center gap-1.5">
+                  <Target className="w-3.5 h-3.5 text-[#01BC8D]" />
+                  <span>الهدف / جني الأرباح (TP)</span>
+                </span>
+                {orderPreview.estimatedProfitAtTpUsdt !== null && (
+                  <span dir="ltr" className="text-[11px] font-mono font-bold text-[#01BC8D] tabular-nums">
+                    +{orderPreview.estimatedProfitAtTpUsdt.toFixed(2)}$ (+{orderPreview.estimatedProfitAtTpRoePercent}%)
+                  </span>
+                )}
+              </div>
+
+              <div className="relative flex items-center">
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  placeholder={
+                    manualSide === 'LONG'
+                      ? `أعلى من ${effectiveEntryPrice} (اختياري)`
+                      : `أقل من ${effectiveEntryPrice} (اختياري)`
+                  }
+                  data-testid="dashboard_manual_tp_input"
+                  value={takeProfitInput}
+                  onChange={(e) => {
+                    setTakeProfitInput(e.target.value);
+                    setManualOrderError(null);
+                  }}
+                  className={`w-full bg-[#12171D] border rounded-xl px-3 py-2 text-sm text-white font-mono font-bold focus:outline-none ${
+                    !orderPreview.takeProfitValid
+                      ? 'border-[#F6465D]'
+                      : takeProfitInput
+                      ? 'border-[#01BC8D]/60 focus:border-[#01BC8D]'
+                      : 'border-[#232E3A] focus:border-[#01BC8D]'
+                  }`}
+                />
+                {takeProfitInput && (
+                  <button
+                    type="button"
+                    onClick={() => setTakeProfitInput('')}
+                    className="absolute left-2 text-[10px] text-[#8A99AD] hover:text-white bg-[#1A222B] px-1.5 py-0.5 rounded cursor-pointer"
+                  >
+                    مسح
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1 text-[10px]">
+                <span className="text-[#8A99AD]">تحديد سريع:</span>
+                {[2, 5, 10, 20, 50].map((pct) => (
+                  <button
+                    key={pct}
+                    type="button"
+                    data-testid={`dashboard_tp_preset_${pct}`}
+                    onClick={() => handleApplyTpMovePreset(pct)}
+                    className="px-2 py-0.5 rounded bg-[#0D2B24] hover:bg-[#01BC8D]/30 text-[#01BC8D] border border-[#01BC8D]/30 font-mono font-bold cursor-pointer"
+                  >
+                    +{pct}%
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Live Order Metrics Summary Bar */}
+          <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs font-mono">
+            <div>
+              <span className="text-[10px] text-[#8A99AD] font-sans block">الحجم الإجمالي بالرافعة</span>
+              <strong dir="ltr" className="text-white tabular-nums">
+                {orderPreview.notionalUsdt.toLocaleString('en-US', { maximumFractionDigits: 2 })} USDT
+              </strong>
+            </div>
+            <div>
+              <span className="text-[10px] text-[#8A99AD] font-sans block">الكمية المقدرة</span>
+              <strong dir="ltr" className="text-[#01BC8D] tabular-nums">
+                {orderPreview.quantity} {selectedChartSymbol.replace(/USDT$/, '')}
+              </strong>
+            </div>
+            <div>
+              <span className="text-[10px] text-[#8A99AD] font-sans block">سعر التصفية التقريبي</span>
+              <strong dir="ltr" className="text-[#F59E0B] tabular-nums">
+                {orderPreview.estimatedLiquidationPrice} USDT
+              </strong>
+            </div>
+            <div>
+              <span className="text-[10px] text-[#8A99AD] font-sans block">العمولة المقدرة</span>
+              <strong dir="ltr" className="text-[#8A99AD] tabular-nums">
+                {orderPreview.commissionUsdt} USDT
+              </strong>
+            </div>
+            <div>
+              <span className="text-[10px] text-[#8A99AD] font-sans block">نسبة العائد للمخاطرة (R:R)</span>
+              <strong dir="ltr" className="text-[#01BC8D] tabular-nums">
+                {orderPreview.riskRewardRatio !== null ? `1 : ${orderPreview.riskRewardRatio}` : '--'}
+              </strong>
+            </div>
+          </div>
+
+          {/* Validation Error or Success Feedback */}
+          {(manualOrderError || !orderPreview.stopLossValid || !orderPreview.takeProfitValid) && (
+            <div
+              data-testid="dashboard_manual_order_error"
+              className="bg-[#2B1216] border border-[#F6465D]/50 rounded-xl px-3.5 py-2.5 text-xs text-[#F6465D] font-bold flex items-center gap-2"
+            >
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>
+                {manualOrderError ||
+                  orderPreview.stopLossErrorAr ||
+                  orderPreview.takeProfitErrorAr}
+              </span>
+            </div>
+          )}
+
+          {manualOrderSuccess && (
+            <div
+              data-testid="dashboard_manual_order_success"
+              className="bg-[#0D2B24] border border-[#01BC8D]/50 rounded-xl px-3.5 py-2.5 text-xs text-[#01BC8D] font-bold flex items-center justify-between gap-2"
+            >
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>{manualOrderSuccess}</span>
+              </div>
+              {onNavigateToTrading && (
+                <button
+                  type="button"
+                  onClick={onNavigateToTrading}
+                  className="underline text-white hover:text-[#01BC8D] shrink-0 cursor-pointer"
+                >
+                  عرض الصفقة ↗
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Submit Manual Order Button */}
+          <button
+            type="submit"
+            data-testid="dashboard_submit_manual_order_btn"
+            className={`w-full font-bold py-3 px-4 rounded-xl text-xs sm:text-sm transition-all cursor-pointer flex items-center justify-center gap-2 shadow-md ${
+              manualSide === 'LONG'
+                ? 'bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11]'
+                : 'bg-[#F6465D] hover:bg-[#D9384E] text-white'
+            }`}
+          >
+            {manualSide === 'LONG' ? (
+              <ArrowUpRight className="w-4 h-4 shrink-0" />
+            ) : (
+              <ArrowDownRight className="w-4 h-4 shrink-0" />
+            )}
+            <span>
+              {isRealMode
+                ? `تنفيذ صفقة ${manualSide === 'LONG' ? 'شراء LONG' : 'بيع SHORT'} حقيقية على KuCoin (${selectedChartSymbol} • ${orderPreview.marginUsdt}$ × ${orderPreview.leverage}x @ ${orderPreview.entryPrice}$)`
+                : `فتح صفقة ${manualSide === 'LONG' ? 'شراء LONG' : 'بيع SHORT'} (${selectedChartSymbol} • ${orderPreview.marginUsdt}$ × ${orderPreview.leverage}x @ ${orderPreview.entryPrice}$)`}
+            </span>
+          </button>
+        </form>
       </div>
     </div>
   );

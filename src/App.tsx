@@ -49,6 +49,7 @@ import {
   executeKuCoinOrder,
   loadKuCoinOrderHistory,
   clearKuCoinOrderHistory,
+  type KuCoinOrderRequestParams,
 } from './services/kucoinApi';
 import {
   fetchCopyTraderFullData,
@@ -471,59 +472,65 @@ export const App: React.FC = () => {
       });
       setTimeout(refreshCopiedTradersList, 50);
 
-      // 2. Route synced entries, scale-ins, partial exits, and full exits to KuCoin API at current market price
+      // 2. Route synced entries, scale-ins, partial exits, and full exits to KuCoin API simultaneously via Promise.all
+      const batchOrders: KuCoinOrderRequestParams[] = [];
       for (const log of logs) {
         if (
-          log.action === 'POSITION_SYNC' ||
-          log.action === 'ENTRY' ||
-          log.action === 'SCALE_IN' ||
-          log.action === 'PARTIAL_EXIT' ||
-          log.action === 'EXIT'
+          (log.action === 'POSITION_SYNC' ||
+            log.action === 'ENTRY' ||
+            log.action === 'SCALE_IN' ||
+            log.action === 'PARTIAL_EXIT' ||
+            log.action === 'EXIT') &&
+          log.quantity > 0
         ) {
-          if (log.quantity > 0) {
-            const isClosingAction = log.action === 'EXIT' || log.action === 'PARTIAL_EXIT';
-            const executionSide: 'LONG' | 'SHORT' = isClosingAction
-              ? log.side === 'LONG'
-                ? 'SHORT'
-                : 'LONG'
-              : log.side;
+          const isClosingAction = log.action === 'EXIT' || log.action === 'PARTIAL_EXIT';
+          const executionSide: 'LONG' | 'SHORT' = isClosingAction
+            ? log.side === 'LONG'
+              ? 'SHORT'
+              : 'LONG'
+            : log.side;
 
-            const orderAmountUsdt =
-              log.action === 'SCALE_IN'
-                ? currentSettings.scaleInSamePercentAsTrader !== false
-                  ? Number((userTradeValue * (Math.abs(log.volumePercent || 25) / 100)).toFixed(2))
-                  : Math.max(1, currentSettings.scaleInFixedValueUsdt || 10)
-                : log.action === 'PARTIAL_EXIT'
-                ? Number((userTradeValue * (Math.abs(log.volumePercent || 30) / 100)).toFixed(2))
-                : userTradeValue;
+          const orderAmountUsdt =
+            log.action === 'SCALE_IN'
+              ? currentSettings.scaleInSamePercentAsTrader !== false
+                ? Number((userTradeValue * (Math.abs(log.volumePercent || 25) / 100)).toFixed(2))
+                : Math.max(1, currentSettings.scaleInFixedValueUsdt || 10)
+              : log.action === 'PARTIAL_EXIT'
+              ? Number((userTradeValue * (Math.abs(log.volumePercent || 30) / 100)).toFixed(2))
+              : userTradeValue;
 
-            executeKuCoinOrder({
-              config: {
-                ...kucoinConfigRef.current,
-                enableLiveExecution: currentSettings.mode === 'REAL',
-              },
-              binanceSymbol: log.symbol,
-              side: executionSide,
-              amountUsdt: orderAmountUsdt,
-              entryPrice: log.price,
-              leverage: userLeverage,
-              sourceTraderName: `${params.traderName} (${targetAcc.name})`,
-              sourceSignal: `Binance ${params.source} [${targetAcc.name}] (${log.action} بالسعر الحالي • ${orderAmountUsdt}$ × ${userLeverage}x)`,
-            })
-              .then((ord) => {
-                setKucoinConnectionState((prev) => ({
-                  ...prev,
-                  recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(
-                    0,
-                    50
-                  ),
-                }));
-              })
-              .catch((err) => {
-                console.warn('KuCoin order execution error:', err);
-              });
-          }
+          batchOrders.push({
+            config: {
+              ...kucoinConfigRef.current,
+              enableLiveExecution: currentSettings.mode === 'REAL',
+            },
+            binanceSymbol: log.symbol,
+            side: executionSide,
+            amountUsdt: orderAmountUsdt,
+            entryPrice: log.price,
+            leverage: userLeverage,
+            sourceTraderName: `${params.traderName} (${targetAcc.name})`,
+            sourceSignal: `Binance ${params.source} [${targetAcc.name}] (${log.action} بالسعر الحالي • ${orderAmountUsdt}$ × ${userLeverage}x)`,
+          });
         }
+      }
+
+      if (batchOrders.length > 0) {
+        executeKuCoinOrder(batchOrders)
+          .then((executedOrders) => {
+            if (executedOrders.length === 0) return;
+            const newIds = new Set(executedOrders.map((o) => o.id));
+            setKucoinConnectionState((prev) => ({
+              ...prev,
+              recentOrders: [
+                ...executedOrders,
+                ...prev.recentOrders.filter((r) => !newIds.has(r.id)),
+              ].slice(0, 50),
+            }));
+          })
+          .catch((err) => {
+            console.warn('KuCoin batch order execution error:', err);
+          });
       }
 
       return logs;
@@ -532,6 +539,7 @@ export const App: React.FC = () => {
   );
 
   const routeSyncedLogsToKuCoin = useCallback((logs: CopiedSyncLog[]) => {
+    const batchOrders: KuCoinOrderRequestParams[] = [];
     for (const log of logs) {
       if (
         (log.action === 'POSITION_SYNC' ||
@@ -561,7 +569,7 @@ export const App: React.FC = () => {
             ? Number((userTradeValue * (Math.abs(log.volumePercent || 30) / 100)).toFixed(2))
             : userTradeValue;
 
-        executeKuCoinOrder({
+        batchOrders.push({
           config: {
             ...kucoinConfigRef.current,
             enableLiveExecution: currentSettings.mode === 'REAL',
@@ -573,20 +581,26 @@ export const App: React.FC = () => {
           leverage: userLeverage,
           sourceTraderName: `${log.traderName} (${targetAcc.name})`,
           sourceSignal: `Binance ${log.source} [${targetAcc.name}] (${log.action} بالسعر الحالي • ${orderAmountUsdt}$ × ${userLeverage}x)`,
-        })
-          .then((ord) => {
-            setKucoinConnectionState((prev) => ({
-              ...prev,
-              recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(
-                0,
-                50
-              ),
-            }));
-          })
-          .catch((err) => {
-            console.warn('KuCoin order execution error:', err);
-          });
+        });
       }
+    }
+
+    if (batchOrders.length > 0) {
+      executeKuCoinOrder(batchOrders)
+        .then((executedOrders) => {
+          if (executedOrders.length === 0) return;
+          const newIds = new Set(executedOrders.map((o) => o.id));
+          setKucoinConnectionState((prev) => ({
+            ...prev,
+            recentOrders: [
+              ...executedOrders,
+              ...prev.recentOrders.filter((r) => !newIds.has(r.id)),
+            ].slice(0, 50),
+          }));
+        })
+        .catch((err) => {
+          console.warn('KuCoin batch order execution error:', err);
+        });
     }
   }, []);
 
@@ -642,9 +656,9 @@ export const App: React.FC = () => {
         return copyResult;
       }
 
-      // 2. If the trade is already copied and had uncopied partial exits or scale-ins, route ONLY those deltas to KuCoin
+      // 2. If the trade is already copied and had uncopied partial exits or scale-ins, route ONLY those deltas simultaneously to KuCoin via Promise.all
       if (copyResult.status === 'SYNCED_DELTAS_ONLY') {
-        for (const delta of copyResult.appliedDeltas) {
+        const deltaOrders: KuCoinOrderRequestParams[] = copyResult.appliedDeltas.map((delta) => {
           const orderSide: 'LONG' | 'SHORT' =
             delta.actionType === 'PARTIAL_EXIT'
               ? pos.side === 'LONG'
@@ -656,7 +670,7 @@ export const App: React.FC = () => {
               ? `Manual Delta Sync Partial Exit -${delta.volumePercent}% [${targetAcc.name}] (${pos.symbol})`
               : `Manual Delta Sync Scale-In +${delta.volumePercent}% [${targetAcc.name}] (${pos.symbol})`;
 
-          executeKuCoinOrder({
+          return {
             config: {
               ...kucoinConfig,
               enableLiveExecution: currentSettings.mode === 'REAL',
@@ -668,18 +682,24 @@ export const App: React.FC = () => {
             leverage: delta.leverage || effectiveLeverage,
             sourceTraderName: `${traderName} (${targetAcc.name})`,
             sourceSignal: signalLabel,
-          })
-            .then((ord) => {
+          };
+        });
+
+        if (deltaOrders.length > 0) {
+          executeKuCoinOrder(deltaOrders)
+            .then((executedOrders) => {
+              if (executedOrders.length === 0) return;
+              const newIds = new Set(executedOrders.map((o) => o.id));
               setKucoinConnectionState((prev) => ({
                 ...prev,
-                recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(
-                  0,
-                  50
-                ),
+                recentOrders: [
+                  ...executedOrders,
+                  ...prev.recentOrders.filter((r) => !newIds.has(r.id)),
+                ].slice(0, 50),
               }));
             })
             .catch((err) => {
-              console.warn('KuCoin delta execution failed:', err);
+              console.warn('KuCoin delta batch execution failed:', err);
             });
         }
         return copyResult;
@@ -983,18 +1003,29 @@ export const App: React.FC = () => {
     [refreshCopiedTradersList, updatePaperSnapshot]
   );
 
-  // Manual trade action (Always executes at Current Live Market Price)
+  // Manual trade action (Supports Market or Custom Entry Price, Stop-Loss, Take-Profit, Leverage, and Account Selection)
   const handleOpenPaperOrder = (
     symbol: string,
     side: 'LONG' | 'SHORT',
     quantity: number,
     entryPrice: number,
-    leverage: number
+    leverage: number,
+    options?: {
+      stopLossPrice?: number;
+      takeProfitPrice?: number;
+      accountId?: string;
+      useCustomPrice?: boolean;
+    }
   ) => {
     const sym = symbol.toUpperCase();
+    const targetAccId = options?.accountId || paperEngine.getActiveAccountId();
+    const targetAcc = paperEngine.getAccount(targetAccId);
     const liveMarketPrice =
-      pricesMap[sym] && pricesMap[sym] > 0 ? pricesMap[sym] : entryPrice;
-    const currentSettings = paperEngine.getSettings();
+      options?.useCustomPrice && entryPrice > 0
+        ? entryPrice
+        : pricesMap[sym] && pricesMap[sym] > 0
+        ? pricesMap[sym]
+        : entryPrice;
     const effectiveNotional = quantity * entryPrice;
     const liveQty = liveMarketPrice > 0 ? effectiveNotional / liveMarketPrice : quantity;
 
@@ -1005,22 +1036,38 @@ export const App: React.FC = () => {
       liveMarketPrice,
       leverage,
       undefined,
-      'MANUAL'
+      'MANUAL',
+      undefined,
+      undefined,
+      undefined,
+      100,
+      effectiveNotional / Math.max(1, leverage),
+      targetAcc.id,
+      liveMarketPrice,
+      options?.stopLossPrice,
+      options?.takeProfitPrice
     );
     updatePaperSnapshot();
+
+    const slNote =
+      options?.stopLossPrice && options.stopLossPrice > 0 ? ` • SL: ${options.stopLossPrice}` : '';
+    const tpNote =
+      options?.takeProfitPrice && options.takeProfitPrice > 0
+        ? ` • TP: ${options.takeProfitPrice}`
+        : '';
 
     executeKuCoinOrder({
       config: {
         ...kucoinConfig,
-        enableLiveExecution: currentSettings.mode === 'REAL',
+        enableLiveExecution: targetAcc.settings.mode === 'REAL',
       },
       binanceSymbol: sym,
       side,
       amountUsdt: (liveQty * liveMarketPrice) / leverage,
       entryPrice: liveMarketPrice,
       leverage,
-      sourceTraderName: 'صفقة يدوية (بالسعر الحالي)',
-      sourceSignal: 'Manual Market Execution (بالسعر الحالي للسوق)',
+      sourceTraderName: `تداول يدوي (${targetAcc.name})`,
+      sourceSignal: `Manual Execution (${sym} ${side} @ ${liveMarketPrice} × ${leverage}x${slNote}${tpNote})`,
     })
       .then((ord) => {
         setKucoinConnectionState((prev) => ({
@@ -1474,6 +1521,9 @@ export const App: React.FC = () => {
             onRefreshMarket={() => handleTestBinanceConnection(binanceConfig)}
             onRefreshKucoin={() => handleTestKuCoinConnection(kucoinConfig)}
             onFetchRealKucoinBalance={() => handleTestKuCoinConnection(kucoinConfig, true)}
+            onOpenOrder={handleOpenPaperOrder}
+            onSelectAccount={handleSelectVirtualAccount}
+            onNavigateToTrading={() => setSelectedTab('Simulation')}
           />
         )}
 
@@ -1642,6 +1692,8 @@ export const App: React.FC = () => {
               else setSelectedTab(tab);
             }}
             onOpenTraderStats={handleOpenTraderStats}
+            onCopySinglePosition={handleCopySinglePosition}
+            onSyncTraderToEngine={handleSyncTraderToEngine}
             notificationSettings={notificationSettings}
             onUpdateNotificationSettings={(partial) => mobileNotifications.updateSettings(partial)}
             onOpenNotificationsCenter={handleOpenNotificationsCenter}

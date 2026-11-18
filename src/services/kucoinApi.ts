@@ -181,14 +181,20 @@ export function loadKuCoinOrderHistory(): KuCoinOrderRecord[] {
   }
 }
 
-export function saveKuCoinOrderRecord(record: KuCoinOrderRecord): void {
+export function saveKuCoinOrderRecordsBatch(records: KuCoinOrderRecord[]): void {
+  if (!records || records.length === 0) return;
   try {
     const existing = loadKuCoinOrderHistory();
-    const updated = [record, ...existing.filter((r) => r.id !== record.id)].slice(0, 50);
+    const newIds = new Set(records.map((r) => r.id));
+    const updated = [...records, ...existing.filter((r) => !newIds.has(r.id))].slice(0, 50);
     localStorage.setItem(KUCOIN_ORDERS_STORAGE_KEY, JSON.stringify(updated));
   } catch (e) {
-    console.warn('Failed to save KuCoin order record:', e);
+    console.warn('Failed to save KuCoin order records batch:', e);
   }
+}
+
+export function saveKuCoinOrderRecord(record: KuCoinOrderRecord): void {
+  saveKuCoinOrderRecordsBatch([record]);
 }
 
 export function clearKuCoinOrderHistory(): KuCoinOrderRecord[] {
@@ -945,10 +951,7 @@ export async function testKuCoinConnectionAndFetchData(
   };
 }
 
-/**
- * Execute an Order on KuCoin based on Binance Signal / Copy Trader
- */
-export async function executeKuCoinOrder(params: {
+export interface KuCoinOrderRequestParams {
   config: KuCoinConfig;
   binanceSymbol: string;
   side: 'LONG' | 'SHORT';
@@ -957,13 +960,31 @@ export async function executeKuCoinOrder(params: {
   leverage: number;
   sourceTraderName?: string;
   sourceSignal?: string;
-}): Promise<KuCoinOrderRecord> {
+}
+
+export interface ExecuteKuCoinOrderOptions {
+  /**
+   * Optional custom endpoint fetcher (used for deterministic parallel latency unit tests)
+   */
+  customEndpointFetcher?: typeof fetchSignedKuCoinEndpoint;
+}
+
+/**
+ * Internal helper that dispatches a single KuCoin order without blocking on localStorage I/O,
+ * allowing multiple orders to execute concurrently inside Promise.all.
+ */
+async function dispatchSingleKuCoinOrderInternal(
+  params: KuCoinOrderRequestParams,
+  batchIndex: number = 0,
+  options?: ExecuteKuCoinOrderOptions
+): Promise<KuCoinOrderRecord> {
   const kucoinSymbol = convertToKuCoinSymbol(
     params.binanceSymbol,
     params.config.marketType === 'FUTURES'
   );
   const kucoinSide = params.side === 'LONG' ? 'buy' : 'sell';
-  const clientOid = `kc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  const nowTs = Date.now();
+  const clientOid = `kc_${nowTs}_${batchIndex}_${Math.random().toString(36).substring(2, 6)}`;
   const notionalUsdt = Math.max(1, params.amountUsdt * (params.leverage || 1));
   const orderSize = Math.max(1, Math.round(notionalUsdt / (params.entryPrice || 100)));
 
@@ -977,9 +998,110 @@ export async function executeKuCoinOrder(params: {
     params.config.apiType === 'SANDBOX' ||
     !cleanApiKey
   ) {
-    const simulatedRecord: KuCoinOrderRecord = {
+    return {
       id: clientOid,
-      orderId: `SIM_${Date.now()}`,
+      orderId: `SIM_${nowTs}_${batchIndex}`,
+      clientOid,
+      symbol: kucoinSymbol,
+      side: kucoinSide,
+      type: 'market',
+      price: params.entryPrice,
+      size: orderSize,
+      dealSize: orderSize,
+      status: 'SIMULATED',
+      createdAt: nowTs,
+      sourceTraderName: params.sourceTraderName,
+      sourceSignal: params.sourceSignal || 'Binance Copy Signal',
+      isRealKuCoin: false,
+    };
+  }
+
+  const endpointFetcher = options?.customEndpointFetcher || fetchSignedKuCoinEndpoint;
+  const isFutures = params.config.marketType === 'FUTURES';
+  const endpoint = '/api/v1/orders';
+
+  try {
+    if (isFutures) {
+      const bodyObj = {
+        clientOid,
+        side: kucoinSide,
+        symbol: kucoinSymbol,
+        leverage: String(params.leverage || params.config.defaultLeverage || 5),
+        type: 'market',
+        size: orderSize,
+      };
+      const bodyStr = JSON.stringify(bodyObj);
+      const res = await endpointFetcher({
+        basePrefix: '/kucoin-futures',
+        endpoint,
+        method: 'POST',
+        apiKey: cleanApiKey,
+        apiSecret: cleanApiSecret,
+        passphrase: cleanPassphrase,
+        bodyStr,
+      });
+
+      return {
+        id: clientOid,
+        orderId: (res.ok && res.data?.orderId) || `KC_LIVE_${Date.now()}_${batchIndex}`,
+        clientOid,
+        symbol: kucoinSymbol,
+        side: kucoinSide,
+        type: 'market',
+        price: params.entryPrice,
+        size: orderSize,
+        dealSize: orderSize,
+        status: res.ok ? 'DONE' : 'SIMULATED',
+        createdAt: Date.now(),
+        sourceTraderName: params.sourceTraderName,
+        sourceSignal: res.ok
+          ? params.sourceSignal || 'Binance Signal -> KuCoin Live Execution'
+          : `${params.sourceSignal || 'KuCoin Order'} (محاكاة — ${res.msg || res.code || 'Demo'})`,
+        isRealKuCoin: res.ok,
+      };
+    } else {
+      const bodyObj = {
+        clientOid,
+        side: kucoinSide,
+        symbol: kucoinSymbol,
+        type: 'market',
+        funds: String(Number(params.amountUsdt.toFixed(2))),
+      };
+      const bodyStr = JSON.stringify(bodyObj);
+      const res = await endpointFetcher({
+        basePrefix: '/kucoin',
+        endpoint,
+        method: 'POST',
+        apiKey: cleanApiKey,
+        apiSecret: cleanApiSecret,
+        passphrase: cleanPassphrase,
+        bodyStr,
+      });
+
+      return {
+        id: clientOid,
+        orderId: (res.ok && res.data?.orderId) || `KC_SPOT_${Date.now()}_${batchIndex}`,
+        clientOid,
+        symbol: kucoinSymbol,
+        side: kucoinSide,
+        type: 'market',
+        price: params.entryPrice,
+        size: orderSize,
+        dealSize: orderSize,
+        status: res.ok ? 'DONE' : 'SIMULATED',
+        createdAt: Date.now(),
+        sourceTraderName: params.sourceTraderName,
+        sourceSignal: res.ok
+          ? params.sourceSignal || 'Binance Spot Signal -> KuCoin Live'
+          : `${params.sourceSignal || 'KuCoin Spot'} (محاكاة — ${res.msg || res.code || 'Demo'})`,
+        isRealKuCoin: res.ok,
+      };
+    }
+  } catch (err: any) {
+    // Resilience guard so one network failure inside Promise.all never aborts sibling orders in the same batch
+    return {
+      id: clientOid,
+      orderId: `KC_FALLBACK_${Date.now()}_${batchIndex}`,
       clientOid,
       symbol: kucoinSymbol,
       side: kucoinSide,
@@ -990,94 +1112,51 @@ export async function executeKuCoinOrder(params: {
       status: 'SIMULATED',
       createdAt: Date.now(),
       sourceTraderName: params.sourceTraderName,
-      sourceSignal: params.sourceSignal || 'Binance Copy Signal',
+      sourceSignal: `${params.sourceSignal || 'KuCoin Order'} (محاكاة — ${err?.message || 'Network Fallback'})`,
       isRealKuCoin: false,
     };
-    saveKuCoinOrderRecord(simulatedRecord);
-    return simulatedRecord;
-  }
-
-  const isFutures = params.config.marketType === 'FUTURES';
-  const endpoint = '/api/v1/orders';
-
-  if (isFutures) {
-    const bodyObj = {
-      clientOid,
-      side: kucoinSide,
-      symbol: kucoinSymbol,
-      leverage: String(params.leverage || params.config.defaultLeverage || 5),
-      type: 'market',
-      size: orderSize,
-    };
-    const bodyStr = JSON.stringify(bodyObj);
-    const res = await fetchSignedKuCoinEndpoint({
-      basePrefix: '/kucoin-futures',
-      endpoint,
-      method: 'POST',
-      apiKey: cleanApiKey,
-      apiSecret: cleanApiSecret,
-      passphrase: cleanPassphrase,
-      bodyStr,
-    });
-
-    const record: KuCoinOrderRecord = {
-      id: clientOid,
-      orderId: (res.ok && res.data?.orderId) || `KC_LIVE_${Date.now()}`,
-      clientOid,
-      symbol: kucoinSymbol,
-      side: kucoinSide,
-      type: 'market',
-      price: params.entryPrice,
-      size: orderSize,
-      dealSize: orderSize,
-      status: res.ok ? 'DONE' : 'SIMULATED',
-      createdAt: Date.now(),
-      sourceTraderName: params.sourceTraderName,
-      sourceSignal: res.ok
-        ? params.sourceSignal || 'Binance Signal -> KuCoin Live Execution'
-        : `${params.sourceSignal || 'KuCoin Order'} (محاكاة — ${res.msg || res.code || 'Demo'})`,
-      isRealKuCoin: res.ok,
-    };
-    saveKuCoinOrderRecord(record);
-    return record;
-  } else {
-    const bodyObj = {
-      clientOid,
-      side: kucoinSide,
-      symbol: kucoinSymbol,
-      type: 'market',
-      funds: String(Number(params.amountUsdt.toFixed(2))),
-    };
-    const bodyStr = JSON.stringify(bodyObj);
-    const res = await fetchSignedKuCoinEndpoint({
-      basePrefix: '/kucoin',
-      endpoint,
-      method: 'POST',
-      apiKey: cleanApiKey,
-      apiSecret: cleanApiSecret,
-      passphrase: cleanPassphrase,
-      bodyStr,
-    });
-
-    const record: KuCoinOrderRecord = {
-      id: clientOid,
-      orderId: (res.ok && res.data?.orderId) || `KC_SPOT_${Date.now()}`,
-      clientOid,
-      symbol: kucoinSymbol,
-      side: kucoinSide,
-      type: 'market',
-      price: params.entryPrice,
-      size: orderSize,
-      dealSize: orderSize,
-      status: res.ok ? 'DONE' : 'SIMULATED',
-      createdAt: Date.now(),
-      sourceTraderName: params.sourceTraderName,
-      sourceSignal: res.ok
-        ? params.sourceSignal || 'Binance Spot Signal -> KuCoin Live'
-        : `${params.sourceSignal || 'KuCoin Spot'} (محاكاة — ${res.msg || res.code || 'Demo'})`,
-      isRealKuCoin: res.ok,
-    };
-    saveKuCoinOrderRecord(record);
-    return record;
   }
 }
+
+/**
+ * Execute one or multiple orders on KuCoin based on Binance Signal / Copy Trader.
+ * When multiple orders are provided (e.g. modifying/opening multiple trades for the same trader),
+ * all orders are dispatched simultaneously using `Promise.all` to minimize total latency.
+ */
+export async function executeKuCoinOrder(
+  params: KuCoinOrderRequestParams,
+  options?: ExecuteKuCoinOrderOptions
+): Promise<KuCoinOrderRecord>;
+export async function executeKuCoinOrder(
+  params: KuCoinOrderRequestParams[],
+  options?: ExecuteKuCoinOrderOptions
+): Promise<KuCoinOrderRecord[]>;
+export async function executeKuCoinOrder(
+  params: KuCoinOrderRequestParams | KuCoinOrderRequestParams[],
+  options?: ExecuteKuCoinOrderOptions
+): Promise<KuCoinOrderRecord | KuCoinOrderRecord[]> {
+  if (Array.isArray(params)) {
+    if (params.length === 0) return [];
+    // Execute all orders concurrently in parallel using Promise.all to reduce total latency
+    const records = await Promise.all(
+      params.map((item, idx) => dispatchSingleKuCoinOrderInternal(item, idx, options))
+    );
+    saveKuCoinOrderRecordsBatch(records);
+    return records;
+  }
+
+  const [record] = await Promise.all([dispatchSingleKuCoinOrderInternal(params, 0, options)]);
+  saveKuCoinOrderRecordsBatch([record]);
+  return record;
+}
+
+/**
+ * Convenience alias for executing a batch of KuCoin orders simultaneously via `Promise.all`.
+ */
+export async function executeKuCoinOrdersBatch(
+  orders: KuCoinOrderRequestParams[],
+  options?: ExecuteKuCoinOrderOptions
+): Promise<KuCoinOrderRecord[]> {
+  return executeKuCoinOrder(orders, options);
+}
+

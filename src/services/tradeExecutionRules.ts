@@ -345,20 +345,22 @@ export function calculateLateEntryNetPositionState(params: {
       if (adj.actionType === 'INITIAL_ENTRY') {
         runningMargin = baseMargin;
         runningScale = 100;
+      } else if (adj.actionType === 'FULL_EXIT') {
+        runningMargin = 0;
+        runningScale = 0;
       } else if (adj.actionType === 'SCALE_IN') {
         const traderPct = Math.max(5, Math.abs(adj.volumePercent || 25));
         if (samePctMode) {
-          const addedMargin = Number((baseMargin * (traderPct / 100)).toFixed(2));
-          runningMargin = Number((runningMargin + addedMargin).toFixed(2));
-          runningScale += traderPct;
+          runningScale = Math.min(300, runningScale + traderPct);
+          runningMargin = Number((baseMargin * (runningScale / 100)).toFixed(2));
         } else {
           const addedMargin = Number(fixedScaleVal.toFixed(2));
           const equivPct = Math.max(1, Math.round((addedMargin / baseMargin) * 100));
           runningMargin = Number((runningMargin + addedMargin).toFixed(2));
-          runningScale += equivPct;
+          runningScale = Math.min(300, runningScale + equivPct);
         }
       } else if (adj.actionType === 'PARTIAL_EXIT') {
-        const withdrawPct = Math.min(95, Math.max(5, Math.abs(adj.volumePercent || 25)));
+        const withdrawPct = Math.min(99, Math.max(1, Math.abs(adj.volumePercent || 25)));
         const withdrawnMargin = Number((runningMargin * (withdrawPct / 100)).toFixed(2));
         runningMargin = Number(Math.max(0.5, runningMargin - withdrawnMargin).toFixed(2));
         runningScale = Math.max(5, Math.round(runningScale * (1 - withdrawPct / 100)));
@@ -370,13 +372,15 @@ export function calculateLateEntryNetPositionState(params: {
   }
 
   // If traderCurrentScalePercent is explicitly set and differs from 100 when no adjustments list changed it
+  // (or when traderCurrentScalePercent reflects a direct partial withdrawal < 100 while adjustments only had entry/scale-ins)
   if (
-    params.traderCurrentScalePercent &&
+    params.traderCurrentScalePercent !== undefined &&
     params.traderCurrentScalePercent > 0 &&
-    netScalePct === 100 &&
-    params.traderCurrentScalePercent !== 100
+    params.traderCurrentScalePercent !== 100 &&
+    (netScalePct === 100 ||
+      (params.traderCurrentScalePercent < 100 && netScalePct >= 100))
   ) {
-    netScalePct = Math.max(5, Math.round(params.traderCurrentScalePercent));
+    netScalePct = Math.min(300, Math.max(5, Math.round(params.traderCurrentScalePercent)));
     netMargin = Number(Math.max(0.5, baseMargin * (netScalePct / 100)).toFixed(2));
   }
 
@@ -425,15 +429,23 @@ export function calculateLateEntryNetPositionState(params: {
 }
 
 /**
- * Ensures that historical trader records (SCALE_IN / PARTIAL_EXIT) that occurred BEFORE or AT
- * the time the user entered the position are NEVER replayed, because the user already entered
- * directly with the net remaining position value.
+ * Ensures that historical trader records (SCALE_IN / PARTIAL_EXIT / EXIT) that occurred BEFORE or AT
+ * the time the user entered the position (or before the trader's current position entryTime) are NEVER replayed,
+ * because the user already verified and entered directly with the net remaining position value.
  */
 export function shouldApplyTraderRecordAfterEntry(params: {
   recordTimestamp: number;
   userPositionOpenTime: number;
+  traderPositionEntryTime?: number;
 }): boolean {
   if (!params.recordTimestamp || !params.userPositionOpenTime) return false;
+  if (
+    params.traderPositionEntryTime &&
+    params.traderPositionEntryTime > 0 &&
+    params.recordTimestamp <= params.traderPositionEntryTime
+  ) {
+    return false;
+  }
   return params.recordTimestamp > params.userPositionOpenTime;
 }
 
@@ -665,6 +677,25 @@ export function isTraderActionAlreadyProcessed(params: {
 }
 
 /**
+ * Infers the effective position direction ('LONG' | 'SHORT') of a trader order record,
+ * handling both Hedge Mode (`positionSide: 'LONG' | 'SHORT'`) and One-Way Mode (`positionSide: 'BOTH'`).
+ * - Opening actions (`ENTRY`, `SCALE_IN`): BUY -> LONG, SELL -> SHORT
+ * - Closing actions (`PARTIAL_EXIT`, `EXIT`): SELL -> LONG, BUY -> SHORT
+ */
+export function inferRecordPositionSide(
+  r: Pick<TraderLatestRecord, 'positionSide' | 'side' | 'actionType'>
+): 'LONG' | 'SHORT' {
+  if (r.positionSide === 'LONG' || r.positionSide === 'SHORT') {
+    return r.positionSide;
+  }
+  const isClosing = r.actionType === 'EXIT' || r.actionType === 'PARTIAL_EXIT';
+  if (isClosing) {
+    return String(r.side || '').toUpperCase() === 'BUY' ? 'SHORT' : 'LONG';
+  }
+  return String(r.side || '').toUpperCase() === 'SELL' ? 'SHORT' : 'LONG';
+}
+
+/**
  * Checks whether a candidate trader position is ALREADY permanently closed
  * according to `latestRecords` (an EXIT without any newer ENTRY) or `positionHistory`.
  * Prevents fetching/deriving/opening old or permanently closed historical trades.
@@ -684,10 +715,7 @@ export function isTraderTradePermanentlyClosed(params: {
   const matchingRecords = records
     .filter((r) => {
       if (String(r.symbol || '').toUpperCase().trim() !== sym) return false;
-      if (r.positionSide === 'LONG' || r.positionSide === 'SHORT') {
-        return r.positionSide === params.side;
-      }
-      return true;
+      return inferRecordPositionSide(r) === params.side;
     })
     .sort((a, b) => (a.exitTime || a.orderTime || 0) - (b.exitTime || b.orderTime || 0));
 
@@ -714,7 +742,20 @@ export function isTraderTradePermanentlyClosed(params: {
     if (String(h.symbol || '').toUpperCase().trim() !== sym) continue;
     if (h.side !== params.side) continue;
     const statusStr = String((h as any).status || '').trim().toLowerCase();
-    if (statusStr === 'partially closed') continue;
+    const maxOi = Number(h.maxOpenInterest || 0);
+    const closedVol = Number(h.closedVolume || 0);
+
+    // Even if marked 'partially closed', if >= 98% of maxOpenInterest has been withdrawn, it is finished
+    if (statusStr === 'partially closed') {
+      if (maxOi > 0 && closedVol >= maxOi * 0.98) {
+        const openedTs = Number(h.opened || 0);
+        if (entryTs <= 0 || (openedTs > 0 && Math.abs(openedTs - entryTs) < 120_000)) {
+          return true;
+        }
+      }
+      continue;
+    }
+
     const closedTs = Number(h.closed || 0);
     const openedTs = Number(h.opened || 0);
     if (closedTs <= 0) continue;
@@ -1036,20 +1077,36 @@ export function evaluateAccountDrawdownAlertDecision(params: {
 
 /**
  * Collects all deterministic deduplication keys for a trader position's existing scaleAdjustments
- * so that when a position is opened for the first time, all historical adjustments already folded
- * into its net entry size are marked as applied and never re-applied on subsequent manual clicks.
+ * AND existing `latestRecords` for that symbol so that when a position is opened for the first time,
+ * all historical operations (scale-ins, partial withdrawals, and prior exits) already verified/folded
+ * into its net entry size are marked as applied and NEVER re-applied on the next sync tick (3s later)
+ * or subsequent manual clicks.
  */
 export function buildInitialAppliedEventKeysForOpenPosition(
   symbol: string,
-  scaleAdjustments?: PositionScaleAdjustment[]
+  scaleAdjustments?: PositionScaleAdjustment[],
+  latestRecords?: TraderLatestRecord[],
+  traderId?: string
 ): string[] {
   const sym = String(symbol || '').toUpperCase().trim();
   const keys = new Set<string>();
+  const cleanTid = String(traderId || '').trim();
+
   for (const adj of scaleAdjustments || []) {
-    if (adj.actionType !== 'SCALE_IN' && adj.actionType !== 'PARTIAL_EXIT') {
+    if (
+      adj.actionType !== 'SCALE_IN' &&
+      adj.actionType !== 'PARTIAL_EXIT' &&
+      adj.actionType !== 'FULL_EXIT'
+    ) {
       continue;
     }
-    const keyAdj = buildStableTraderEventKey({
+    const pct =
+      adj.actionType === 'PARTIAL_EXIT'
+        ? Math.min(95, Math.max(5, Math.abs(adj.volumePercent || 30)))
+        : adj.actionType === 'FULL_EXIT'
+        ? 100
+        : Math.max(5, Math.abs(adj.volumePercent || 30));
+    const keyAdjRaw = buildStableTraderEventKey({
       kind: 'ADJ',
       symbol: sym,
       actionType: adj.actionType,
@@ -1058,7 +1115,16 @@ export function buildInitialAppliedEventKeysForOpenPosition(
       volumePercent: adj.volumePercent,
       quantity: adj.executedQty,
     });
-    const keyRec = buildStableTraderEventKey({
+    const keyAdjNorm = buildStableTraderEventKey({
+      kind: 'ADJ',
+      symbol: sym,
+      actionType: adj.actionType,
+      rawId: adj.id,
+      timestamp: adj.timestamp,
+      volumePercent: pct,
+      quantity: adj.executedQty,
+    });
+    const keyRecRaw = buildStableTraderEventKey({
       kind: 'REC',
       symbol: sym,
       actionType: adj.actionType,
@@ -1066,12 +1132,579 @@ export function buildInitialAppliedEventKeysForOpenPosition(
       volumePercent: adj.volumePercent,
       quantity: adj.executedQty,
     });
-    keys.add(keyAdj);
-    keys.add(keyRec);
-    if (adj.id) keys.add(adj.id);
+    const keyRecNorm = buildStableTraderEventKey({
+      kind: 'REC',
+      symbol: sym,
+      actionType: adj.actionType,
+      timestamp: adj.timestamp,
+      volumePercent: pct,
+      quantity: adj.executedQty,
+    });
+    keys.add(keyAdjRaw);
+    keys.add(keyAdjNorm);
+    keys.add(keyRecRaw);
+    keys.add(keyRecNorm);
+    if (adj.id) {
+      keys.add(adj.id);
+      keys.add(`adj:${adj.id}`);
+    }
     if (adj.sourceEventId) keys.add(adj.sourceEventId);
+    if (cleanTid) {
+      keys.add(
+        buildTraderActionId({
+          traderId: cleanTid,
+          symbol: sym,
+          actionType: adj.actionType,
+          rawId: adj.id,
+          timestamp: adj.timestamp,
+          volumePercent: pct,
+          quantity: adj.executedQty,
+        })
+      );
+    }
   }
+
+  for (const rec of latestRecords || []) {
+    if (String(rec.symbol || '').toUpperCase().trim() !== sym) continue;
+    if (
+      rec.actionType !== 'EXIT' &&
+      rec.actionType !== 'PARTIAL_EXIT' &&
+      rec.actionType !== 'SCALE_IN'
+    ) {
+      continue;
+    }
+    const mappedAction: 'FULL_EXIT' | 'PARTIAL_EXIT' | 'SCALE_IN' =
+      rec.actionType === 'EXIT' ? 'FULL_EXIT' : rec.actionType;
+    const pct =
+      mappedAction === 'FULL_EXIT'
+        ? 100
+        : mappedAction === 'PARTIAL_EXIT'
+        ? Math.min(95, Math.max(5, Math.abs(rec.volumePercent || 30)))
+        : Math.max(5, Math.abs(rec.volumePercent || 30));
+
+    const keyRecNorm = buildStableTraderEventKey({
+      kind: 'REC',
+      symbol: sym,
+      actionType: mappedAction,
+      timestamp: rec.orderTime,
+      volumePercent: mappedAction === 'FULL_EXIT' ? -100 : pct,
+      quantity: rec.executedQty,
+    });
+    const keyRecAlt = buildStableTraderEventKey({
+      kind: 'REC',
+      symbol: sym,
+      actionType: mappedAction,
+      timestamp: rec.orderTime,
+      volumePercent: pct,
+      quantity: rec.executedQty,
+    });
+    keys.add(keyRecNorm);
+    keys.add(keyRecAlt);
+    if (rec.id) {
+      keys.add(`rec_id:${rec.id}`);
+      keys.add(rec.id);
+    }
+    if (cleanTid) {
+      keys.add(
+        buildTraderActionId({
+          traderId: cleanTid,
+          symbol: sym,
+          actionType: mappedAction,
+          rawId: rec.id,
+          timestamp: rec.orderTime,
+          volumePercent: pct,
+          quantity: rec.executedQty,
+        })
+      );
+    }
+  }
+
   return Array.from(keys);
+}
+
+export interface ReconciledTraderPositionResult {
+  /** True if the trader has already closed this trade or withdrawn >= 98% of it (صفقة منتهية) */
+  isFinished: boolean;
+  /** Reconciled open position with accurate net remaining quantity, net remaining scale percent, and active-cycle scaleAdjustments (null if finished) */
+  reconciledPosition: TraderOpenPosition | null;
+  /** Net remaining percentage of the position (0 if finished, e.g. 60 if 40% was withdrawn, 130 if +30% scaled in) */
+  netRemainingScalePercent: number;
+  /** Net remaining quantity of the position after all scale-ins and partial exits */
+  netRemainingQuantity: number;
+  /** Count of scale-in operations verified in the active cycle */
+  scaleInCount: number;
+  /** Count of partial withdrawal operations verified in the active cycle */
+  partialExitCount: number;
+  /** Count of full exit operations detected at/after entry */
+  fullExitCount: number;
+  /** All deduplication event keys for historical records/adjustments up to now on this symbol+side so Tick 2 (3s later) never re-executes them */
+  preCopyFoldedEventKeys: string[];
+  /** Human-readable Arabic explanation of the reconciliation outcome */
+  reasonAr: string;
+}
+
+/**
+ * Verifies all operations performed by the trader (تدعيم SCALE_IN, سحب جزئي PARTIAL_EXIT, أو قفل EXIT)
+ * BEFORE fetching/copying a position (v2.21):
+ * 1) If the trader closed the trade (`EXIT` / `FULL_EXIT` or closed in `positionHistory`) or if the net
+ *    remaining size after partial withdrawals is `<= 2%`, marks `isFinished = true` so the app NEVER
+ *    opens an already-finished trade only to close it 3 seconds later.
+ * 2) Filters out stale adjustments/orders from prior closed cycles on the same symbol so previous trades
+ *    never pollute the active position.
+ * 3) Merges same-moment order fill splits (< 15s of initial entry) into `INITIAL_ENTRY (100%)` so multi-fill
+ *    entries never inflate scale percentages to 950% or 2000%.
+ * 4) Reconciles all active-cycle scale-ins and partial withdrawals with the trader's actual remaining quantity
+ *    (`positionAmount` vs `initialPositionAmount` / `maxOpenInterest`) so only what remains (`ماتبقى منها فقط`) is copied.
+ */
+export function reconcileTraderPositionBeforeCopy(params: {
+  position: TraderOpenPosition;
+  latestRecords?: TraderLatestRecord[];
+  positionHistory?: TraderPositionHistoryItem[];
+  traderId?: string;
+}): ReconciledTraderPositionResult {
+  const { position, latestRecords = [], positionHistory = [], traderId } = params;
+  const sym = String(position?.symbol || '').toUpperCase().trim();
+  const side: 'LONG' | 'SHORT' = position?.side === 'SHORT' ? 'SHORT' : 'LONG';
+  const rawQty = Math.abs(Number(position?.positionAmount || 0));
+  const rawInitialQty = Math.abs(Number(position?.initialPositionAmount || rawQty));
+  const entryTs = Number(position?.entryTime || 0);
+
+  const preCopyFoldedEventKeys = buildInitialAppliedEventKeysForOpenPosition(
+    sym,
+    position?.scaleAdjustments,
+    latestRecords,
+    traderId
+  );
+
+  if (!position || !sym || rawQty <= 0 || Number(position.currentScalePercent ?? 100) <= 0) {
+    return {
+      isFinished: true,
+      reconciledPosition: null,
+      netRemainingScalePercent: 0,
+      netRemainingQuantity: 0,
+      scaleInCount: 0,
+      partialExitCount: 0,
+      fullExitCount: 1,
+      preCopyFoldedEventKeys,
+      reasonAr: 'الصفقة منتهية ومغلقة بالكامل (الحجم المتبقي 0%) — تم استبعادها قبل النسخ',
+    };
+  }
+
+  // 1. Check permanent closure across latestRecords and positionHistory
+  if (
+    isTraderTradePermanentlyClosed({
+      symbol: sym,
+      side,
+      entryTime: entryTs,
+      latestRecords,
+      positionHistory,
+    })
+  ) {
+    return {
+      isFinished: true,
+      reconciledPosition: null,
+      netRemainingScalePercent: 0,
+      netRemainingQuantity: 0,
+      scaleInCount: 0,
+      partialExitCount: 0,
+      fullExitCount: 1,
+      preCopyFoldedEventKeys,
+      reasonAr: `الصفقة على ${sym} (${side}) مغلقة ومنتهية مسبقاً لدى المتداول — تم استبعادها قبل النسخ`,
+    };
+  }
+
+  // 2. Find latest closed timestamp from positionHistory for this symbol+side to isolate the current active cycle
+  let latestClosedHistoryTs = 0;
+  for (const h of positionHistory) {
+    if (String(h.symbol || '').toUpperCase().trim() !== sym) continue;
+    if (h.side !== side) continue;
+    const statusStr = String((h as any).status || '').trim().toLowerCase();
+    if (statusStr === 'partially closed') continue;
+    const closedTs = Number(h.closed || 0);
+    if (closedTs > latestClosedHistoryTs) {
+      latestClosedHistoryTs = closedTs;
+    }
+  }
+
+  // 3. Inspect matching records for this symbol & side in chronological order
+  const matchingRecords = latestRecords
+    .filter((r) => {
+      if (String(r.symbol || '').toUpperCase().trim() !== sym) return false;
+      return inferRecordPositionSide(r) === side;
+    })
+    .sort((a, b) => (a.exitTime || a.orderTime || 0) - (b.exitTime || b.orderTime || 0));
+
+  let latestExitRecordTs = 0;
+  let latestEntryRecordAfterExitTs = 0;
+  for (const r of matchingRecords) {
+    const recTs = Number(r.exitTime || r.orderTime || 0);
+    if (r.actionType === 'EXIT') {
+      if (recTs > latestExitRecordTs) {
+        latestExitRecordTs = recTs;
+      }
+    } else if (r.actionType === 'ENTRY' || r.actionType === 'SCALE_IN') {
+      if (recTs > latestExitRecordTs && recTs > latestEntryRecordAfterExitTs) {
+        latestEntryRecordAfterExitTs = recTs;
+      }
+    }
+  }
+
+  if (
+    latestExitRecordTs > 0 &&
+    latestEntryRecordAfterExitTs <= latestExitRecordTs + 2_000 &&
+    (entryTs <= 0 || latestExitRecordTs >= entryTs - 5_000)
+  ) {
+    return {
+      isFinished: true,
+      reconciledPosition: null,
+      netRemainingScalePercent: 0,
+      netRemainingQuantity: 0,
+      scaleInCount: 0,
+      partialExitCount: 0,
+      fullExitCount: 1,
+      preCopyFoldedEventKeys,
+      reasonAr: `المتداول قام بقفل صفقة ${sym} (${side}) بالكامل — تم استبعادها قبل النسخ`,
+    };
+  }
+
+  // Active cycle start boundary: strictly after any prior closed trade/exit and around/at entryTime
+  const priorClosureBoundary = Math.max(
+    latestClosedHistoryTs > 0 && (entryTs <= 0 || latestClosedHistoryTs <= entryTs + 5_000)
+      ? latestClosedHistoryTs
+      : 0,
+    latestExitRecordTs > 0 && latestEntryRecordAfterExitTs > latestExitRecordTs
+      ? latestExitRecordTs
+      : 0
+  );
+  const cycleStartTs =
+    entryTs > 0
+      ? Math.max(entryTs - 10_000, priorClosureBoundary > 0 ? priorClosureBoundary + 1_000 : 0)
+      : priorClosureBoundary > 0
+      ? priorClosureBoundary + 1_000
+      : 0;
+
+  // 4. Filter and merge active-cycle adjustments from position.scaleAdjustments and matchingRecords
+  const rawAdjustments = [...(position.scaleAdjustments || [])]
+    .filter((adj) => {
+      if (adj.actionType === 'INITIAL_ENTRY') return true;
+      if (!adj.timestamp || adj.timestamp <= 0) return true;
+      if (priorClosureBoundary > 0 && adj.timestamp <= priorClosureBoundary + 1_000) {
+        return false;
+      }
+      if (entryTs > 0 && adj.timestamp < entryTs - 10_000) {
+        return false;
+      }
+      return true;
+    })
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+  // Also check if matchingRecords in the active cycle contain any SCALE_IN / PARTIAL_EXIT / EXIT not yet in rawAdjustments
+  for (const r of matchingRecords) {
+    const recTs = Number(r.exitTime || r.orderTime || 0);
+    if (recTs <= 0 || recTs < cycleStartTs) continue;
+    if (r.actionType === 'ENTRY') continue;
+
+    const mappedType: 'SCALE_IN' | 'PARTIAL_EXIT' | 'FULL_EXIT' =
+      r.actionType === 'EXIT' ? 'FULL_EXIT' : r.actionType;
+
+    const alreadyInAdjs = rawAdjustments.some(
+      (adj) =>
+        adj.id === r.id ||
+        adj.id.endsWith(`_${r.id}`) ||
+        (adj.actionType === mappedType && Math.abs((adj.timestamp || 0) - recTs) < 5_000)
+    );
+    if (!alreadyInAdjs) {
+      const pct =
+        mappedType === 'FULL_EXIT'
+          ? -100
+          : mappedType === 'PARTIAL_EXIT'
+          ? -Math.min(95, Math.max(5, Math.abs(r.volumePercent || 30)))
+          : Math.max(5, Math.abs(r.volumePercent || 25));
+      rawAdjustments.push({
+        id: `${position.id}_rec_${r.id}`,
+        actionType: mappedType,
+        actionLabelAr:
+          r.actionLabelAr ||
+          (mappedType === 'SCALE_IN'
+            ? `تدعيم الصفقة (+${Math.abs(pct)}%)`
+            : mappedType === 'PARTIAL_EXIT'
+            ? `انسحاب جزئي (-${Math.abs(pct)}%)`
+            : 'خروج كامل (-100%)'),
+        timestamp: recTs,
+        volumePercent: pct,
+        remainingPercentAfter: mappedType === 'FULL_EXIT' ? 0 : 100,
+        executedQty: r.executedQty,
+        price: r.avgPrice > 0 ? r.avgPrice : position.markPrice || position.entryPrice,
+        realizedPnlDelta: r.totalPnl || undefined,
+      });
+    }
+  }
+
+  rawAdjustments.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+  // 5. Reconcile operations chronologically
+  const sideLabel = side === 'LONG' ? 'شراء Long' : 'بيع Short';
+  const effectiveEntryTs =
+    entryTs > 0 ? entryTs : rawAdjustments[0]?.timestamp || Date.now();
+  const initialAdj = rawAdjustments.find((a) => a.actionType === 'INITIAL_ENTRY');
+
+  let baseEntryQty =
+    initialAdj?.executedQty && initialAdj.executedQty > 0
+      ? initialAdj.executedQty
+      : rawInitialQty > 0
+      ? rawInitialQty
+      : rawQty;
+
+  // Fold same-moment order fill splits (< 15 seconds from initial entry) into INITIAL_ENTRY
+  const postEntryAdjustments: PositionScaleAdjustment[] = [];
+  for (const adj of rawAdjustments) {
+    if (adj.actionType === 'INITIAL_ENTRY') continue;
+    if (
+      adj.actionType === 'SCALE_IN' &&
+      effectiveEntryTs > 0 &&
+      adj.timestamp > 0 &&
+      Math.abs(adj.timestamp - effectiveEntryTs) <= 15_000 &&
+      postEntryAdjustments.length === 0
+    ) {
+      if (adj.executedQty && adj.executedQty > 0) {
+        baseEntryQty = Number((baseEntryQty + adj.executedQty).toFixed(5));
+      }
+      continue;
+    }
+    postEntryAdjustments.push(adj);
+  }
+
+  let runningScalePct = 100;
+  let runningTraderQty = baseEntryQty > 0 ? baseEntryQty : rawQty;
+  let scaleInCount = 0;
+  let partialExitCount = 0;
+  let fullExitCount = 0;
+  let lastUpdateTs = Math.max(effectiveEntryTs, Number(position.lastUpdateTime || 0));
+
+  const reconciledAdjustments: PositionScaleAdjustment[] = [
+    {
+      id: initialAdj?.id || `${position.id}_adj_entry_${effectiveEntryTs}`,
+      actionType: 'INITIAL_ENTRY',
+      actionLabelAr: initialAdj?.actionLabelAr || `فتح الصفقة الأولي (${sideLabel} 100%)`,
+      timestamp: effectiveEntryTs,
+      volumePercent: 100,
+      remainingPercentAfter: 100,
+      executedQty: Number(runningTraderQty.toFixed(4)),
+      price:
+        initialAdj?.price && initialAdj.price > 0 ? initialAdj.price : position.entryPrice,
+    },
+  ];
+
+  for (const adj of postEntryAdjustments) {
+    if (adj.actionType === 'FULL_EXIT') {
+      fullExitCount += 1;
+      runningScalePct = 0;
+      runningTraderQty = 0;
+    } else if (adj.actionType === 'SCALE_IN') {
+      scaleInCount += 1;
+      const rawPct = Math.max(5, Math.abs(Math.round(Number(adj.volumePercent || 25))));
+      const nextScale = Math.min(300, runningScalePct + rawPct);
+      const effectiveAddedPct = Math.max(5, nextScale - runningScalePct);
+      runningScalePct = nextScale;
+      if (adj.executedQty && adj.executedQty > 0) {
+        runningTraderQty = Number((runningTraderQty + adj.executedQty).toFixed(5));
+      } else {
+        runningTraderQty = Number(
+          (runningTraderQty * (1 + effectiveAddedPct / 100)).toFixed(5)
+        );
+      }
+      if (adj.timestamp && adj.timestamp > lastUpdateTs) {
+        lastUpdateTs = adj.timestamp;
+      }
+      reconciledAdjustments.push({
+        ...adj,
+        actionType: 'SCALE_IN',
+        volumePercent: effectiveAddedPct,
+        remainingPercentAfter: runningScalePct,
+      });
+    } else if (adj.actionType === 'PARTIAL_EXIT') {
+      partialExitCount += 1;
+      const withdrawPct = Math.min(99, Math.max(1, Math.abs(Math.round(Number(adj.volumePercent || 25)))));
+      if (withdrawPct >= 98 || (adj.remainingPercentAfter !== undefined && adj.remainingPercentAfter <= 2)) {
+        fullExitCount += 1;
+        runningScalePct = 0;
+        runningTraderQty = 0;
+      } else {
+        runningScalePct = Math.max(0, Math.round(runningScalePct * (1 - withdrawPct / 100)));
+        if (adj.executedQty && adj.executedQty > 0 && runningTraderQty > adj.executedQty) {
+          runningTraderQty = Number(Math.max(0, runningTraderQty - adj.executedQty).toFixed(5));
+        } else {
+          runningTraderQty = Number(
+            Math.max(0, runningTraderQty * (1 - withdrawPct / 100)).toFixed(5)
+          );
+        }
+        if (adj.timestamp && adj.timestamp > lastUpdateTs) {
+          lastUpdateTs = adj.timestamp;
+        }
+        reconciledAdjustments.push({
+          ...adj,
+          actionType: 'PARTIAL_EXIT',
+          volumePercent: -withdrawPct,
+          remainingPercentAfter: runningScalePct,
+        });
+      }
+    }
+  }
+
+  if (fullExitCount > 0 || runningScalePct <= 2) {
+    return {
+      isFinished: true,
+      reconciledPosition: null,
+      netRemainingScalePercent: 0,
+      netRemainingQuantity: 0,
+      scaleInCount,
+      partialExitCount,
+      fullExitCount: Math.max(1, fullExitCount),
+      preCopyFoldedEventKeys: buildInitialAppliedEventKeysForOpenPosition(
+        sym,
+        reconciledAdjustments,
+        latestRecords,
+        traderId
+      ),
+      reasonAr: `تم التحقق من عمليات المتداول على ${sym}: الصفقة مقفولة/مسحوبة بالكامل — تم استبعادها قبل النسخ`,
+    };
+  }
+
+  // 6. Reconcile against explicit quantity reduction (e.g. maxOpenInterest = 0.17, positionAmount = 0.11 -> 65% remaining)
+  // or explicit currentScalePercent when postEntryAdjustments did not capture an earlier partial withdrawal
+  if (rawInitialQty > 0 && rawQty < rawInitialQty * 0.96) {
+    const qtyRatioPct = Math.round((rawQty / rawInitialQty) * 100);
+    if (qtyRatioPct <= 2) {
+      return {
+        isFinished: true,
+        reconciledPosition: null,
+        netRemainingScalePercent: 0,
+        netRemainingQuantity: 0,
+        scaleInCount,
+        partialExitCount: partialExitCount + 1,
+        fullExitCount: 1,
+        preCopyFoldedEventKeys,
+        reasonAr: `تم سحب كامل كمية الصفقة على ${sym} — تم استبعادها قبل النسخ`,
+      };
+    }
+
+    // If adjustments didn't already reduce runningScalePct down to qtyRatioPct, add/reconcile the partial withdrawal
+    if (runningScalePct > qtyRatioPct + 5) {
+      const missingWithdrawPct = Math.min(
+        95,
+        Math.max(5, Math.round(((runningScalePct - qtyRatioPct) / runningScalePct) * 100))
+      );
+      const withdrawnQty = Number(Math.max(0.0001, rawInitialQty - rawQty).toFixed(4));
+      runningScalePct = Math.max(5, qtyRatioPct);
+      partialExitCount += 1;
+      reconciledAdjustments.push({
+        id: `${position.id}_reconciled_partial_${effectiveEntryTs}`,
+        actionType: 'PARTIAL_EXIT',
+        actionLabelAr: `انسحاب جزئي للمتداول (-${missingWithdrawPct}% • الصافي المتبقي ${runningScalePct}%)`,
+        timestamp: lastUpdateTs,
+        volumePercent: -missingWithdrawPct,
+        remainingPercentAfter: runningScalePct,
+        executedQty: withdrawnQty,
+        price: position.markPrice > 0 ? position.markPrice : position.entryPrice,
+      });
+    }
+  } else if (
+    postEntryAdjustments.length === 0 &&
+    position.currentScalePercent &&
+    position.currentScalePercent > 0 &&
+    position.currentScalePercent !== 100
+  ) {
+    runningScalePct = Math.min(300, Math.max(5, Math.round(position.currentScalePercent)));
+  }
+
+  // Compute accurate netRemainingQuantity:
+  // If rawQty equals rawInitialQty (e.g. positionAmount was not yet reduced after a PARTIAL_EXIT record),
+  // scale netRemainingQuantity proportionally; otherwise rawQty is already the live remaining amount.
+  let netRemainingQuantity = rawQty;
+  if (
+    partialExitCount > 0 &&
+    runningScalePct < 100 &&
+    Math.abs(rawQty - rawInitialQty) < 0.000001
+  ) {
+    netRemainingQuantity = Number(
+      Math.max(0.00001, rawInitialQty * (runningScalePct / 100)).toFixed(5)
+    );
+  }
+
+  const finalFoldedKeys = buildInitialAppliedEventKeysForOpenPosition(
+    sym,
+    reconciledAdjustments,
+    latestRecords,
+    traderId
+  );
+
+  const reconciledPosition: TraderOpenPosition = {
+    ...position,
+    positionAmount: netRemainingQuantity,
+    initialPositionAmount: Math.max(rawInitialQty, baseEntryQty),
+    entryTime: effectiveEntryTs,
+    lastUpdateTime: lastUpdateTs,
+    currentScalePercent: runningScalePct,
+    scaleAdjustments: reconciledAdjustments,
+  };
+
+  return {
+    isFinished: false,
+    reconciledPosition,
+    netRemainingScalePercent: runningScalePct,
+    netRemainingQuantity,
+    scaleInCount,
+    partialExitCount,
+    fullExitCount: 0,
+    preCopyFoldedEventKeys: finalFoldedKeys,
+    reasonAr:
+      scaleInCount > 0 || partialExitCount > 0
+        ? `تم التحقق من عمليات المتداول على ${sym} (تدعيم: ${scaleInCount}، سحب جزئي: ${partialExitCount}) — الصافي المتبقي للنسخ ${runningScalePct}% فقط`
+        : `صفقة ${sym} مفتوحة ونشطة بالكامل (100%)`,
+  };
+}
+
+/**
+ * Reconciles an entire list of candidate trader/whale positions before returning or copying them (v2.21).
+ * Automatically discards any position that has been closed/finished (`isFinished === true`) and
+ * returns only genuinely open positions with their exact net remaining size (`ماتبقى منها فقط`).
+ */
+export function reconcileAllTraderPositionsBeforeCopy(params: {
+  positions: TraderOpenPosition[];
+  latestRecords?: TraderLatestRecord[];
+  positionHistory?: TraderPositionHistoryItem[];
+  traderId?: string;
+}): {
+  openPositions: TraderOpenPosition[];
+  discardedFinishedPositions: TraderOpenPosition[];
+  resultsBySymbolSide: Record<string, ReconciledTraderPositionResult>;
+} {
+  const openPositions: TraderOpenPosition[] = [];
+  const discardedFinishedPositions: TraderOpenPosition[] = [];
+  const resultsBySymbolSide: Record<string, ReconciledTraderPositionResult> = {};
+
+  for (const pos of params.positions || []) {
+    if (!pos) continue;
+    const key = `${String(pos.symbol || '').toUpperCase().trim()}_${pos.side}`;
+    const res = reconcileTraderPositionBeforeCopy({
+      position: pos,
+      latestRecords: params.latestRecords,
+      positionHistory: params.positionHistory,
+      traderId: params.traderId,
+    });
+    resultsBySymbolSide[key] = res;
+    if (res.isFinished || !res.reconciledPosition) {
+      discardedFinishedPositions.push(pos);
+    } else {
+      openPositions.push(res.reconciledPosition);
+    }
+  }
+
+  return {
+    openPositions,
+    discardedFinishedPositions,
+    resultsBySymbolSide,
+  };
 }
 
 export interface ManualSinglePositionCopyPlan {
@@ -1391,4 +2024,182 @@ export function evaluateManualSinglePositionCopyPlan(params: {
     initialAppliedEventKeys,
   };
 }
+
+/**
+ * Checks whether a Take Profit (Target) price has been reached for an open position (v2.20).
+ * - For LONG: triggered when `currentMarketPrice >= takeProfitPrice`
+ * - For SHORT: triggered when `currentMarketPrice <= takeProfitPrice`
+ */
+export function isTakeProfitTriggered(params: {
+  side: 'LONG' | 'SHORT';
+  takeProfitPrice: number;
+  currentMarketPrice: number;
+}): boolean {
+  const { side, takeProfitPrice, currentMarketPrice } = params;
+  if (!takeProfitPrice || takeProfitPrice <= 0 || !currentMarketPrice || currentMarketPrice <= 0) {
+    return false;
+  }
+  if (side === 'LONG') {
+    return currentMarketPrice >= takeProfitPrice;
+  }
+  return currentMarketPrice <= takeProfitPrice;
+}
+
+/**
+ * Calculates Stop-Loss or Take-Profit price from an entry price and a desired price move percentage (v2.20).
+ * - For STOP_LOSS:
+ *   - LONG: `entryPrice * (1 - movePercent / 100)`
+ *   - SHORT: `entryPrice * (1 + movePercent / 100)`
+ * - For TAKE_PROFIT:
+ *   - LONG: `entryPrice * (1 + movePercent / 100)`
+ *   - SHORT: `entryPrice * (1 - movePercent / 100)`
+ */
+export function calculateSlTpPriceByPriceMovePercent(params: {
+  side: 'LONG' | 'SHORT';
+  entryPrice: number;
+  movePercent: number;
+  kind: 'STOP_LOSS' | 'TAKE_PROFIT';
+}): number {
+  const safeEntry = Math.max(0.000001, Number(params.entryPrice) || 0);
+  const pct = Math.max(0.05, Math.min(95, Math.abs(Number(params.movePercent) || 0)));
+  const factor = pct / 100;
+
+  let rawPrice: number;
+  if (params.kind === 'STOP_LOSS') {
+    rawPrice = params.side === 'LONG' ? safeEntry * (1 - factor) : safeEntry * (1 + factor);
+  } else {
+    rawPrice = params.side === 'LONG' ? safeEntry * (1 + factor) : safeEntry * (1 - factor);
+  }
+
+  const decimals = safeEntry >= 1000 ? 2 : safeEntry >= 10 ? 3 : safeEntry >= 1 ? 4 : 6;
+  return Number(Math.max(0.000001, rawPrice).toFixed(decimals));
+}
+
+export interface ManualOrderRiskRewardPreview {
+  entryPrice: number;
+  marginUsdt: number;
+  leverage: number;
+  notionalUsdt: number;
+  quantity: number;
+  commissionUsdt: number;
+  totalRequiredUsdt: number;
+  estimatedLiquidationPrice: number;
+  stopLossValid: boolean;
+  takeProfitValid: boolean;
+  stopLossErrorAr: string | null;
+  takeProfitErrorAr: string | null;
+  estimatedLossAtSlUsdt: number | null;
+  estimatedLossAtSlRoePercent: number | null;
+  estimatedProfitAtTpUsdt: number | null;
+  estimatedProfitAtTpRoePercent: number | null;
+  riskRewardRatio: number | null;
+}
+
+/**
+ * Pure risk/reward and order sizing evaluator for the Advanced Manual Trading Terminal on the Dashboard (v2.20).
+ */
+export function evaluateManualOrderRiskReward(params: {
+  side: 'LONG' | 'SHORT';
+  entryPrice: number;
+  marginUsdt: number;
+  leverage: number;
+  commissionPercent?: number;
+  stopLossPrice?: number | null;
+  takeProfitPrice?: number | null;
+}): ManualOrderRiskRewardPreview {
+  const safeEntry = Math.max(0.000001, Number(params.entryPrice) || 0);
+  const safeMargin = Math.max(0.1, Number(params.marginUsdt) || 0);
+  const safeLeverage = Math.max(1, Math.min(125, Math.round(Number(params.leverage) || 1)));
+  const commPct = Math.max(0, Number(params.commissionPercent ?? 0.05));
+
+  const notionalUsdt = Number((safeMargin * safeLeverage).toFixed(2));
+  const quantity = Number((notionalUsdt / safeEntry).toFixed(5));
+  const commissionUsdt = Number((notionalUsdt * (commPct / 100)).toFixed(4));
+  const totalRequiredUsdt = Number((safeMargin + commissionUsdt).toFixed(2));
+
+  // Approximate isolated liquidation price (~90% margin maintenance threshold)
+  const liqDistanceRatio = (0.9 / safeLeverage);
+  const rawLiq =
+    params.side === 'LONG'
+      ? Math.max(0.000001, safeEntry * (1 - liqDistanceRatio))
+      : safeEntry * (1 + liqDistanceRatio);
+  const decimals = safeEntry >= 1000 ? 2 : safeEntry >= 10 ? 3 : safeEntry >= 1 ? 4 : 6;
+  const estimatedLiquidationPrice = Number(rawLiq.toFixed(decimals));
+
+  const sl = Number(params.stopLossPrice || 0);
+  const tp = Number(params.takeProfitPrice || 0);
+
+  let stopLossValid = true;
+  let stopLossErrorAr: string | null = null;
+  let estimatedLossAtSlUsdt: number | null = null;
+  let estimatedLossAtSlRoePercent: number | null = null;
+
+  if (sl > 0) {
+    if (params.side === 'LONG' && sl >= safeEntry) {
+      stopLossValid = false;
+      stopLossErrorAr = 'في صفقة الشراء (LONG) يجب أن يكون سعر وقف الخسارة أقل من سعر الدخول';
+    } else if (params.side === 'SHORT' && sl <= safeEntry) {
+      stopLossValid = false;
+      stopLossErrorAr = 'في صفقة البيع (SHORT) يجب أن يكون سعر وقف الخسارة أعلى من سعر الدخول';
+    } else {
+      const dir = params.side === 'LONG' ? 1 : -1;
+      const rawPnl = (sl - safeEntry) * quantity * dir - commissionUsdt;
+      estimatedLossAtSlUsdt = Number(rawPnl.toFixed(2));
+      estimatedLossAtSlRoePercent = Number(((rawPnl / safeMargin) * 100).toFixed(2));
+    }
+  }
+
+  let takeProfitValid = true;
+  let takeProfitErrorAr: string | null = null;
+  let estimatedProfitAtTpUsdt: number | null = null;
+  let estimatedProfitAtTpRoePercent: number | null = null;
+
+  if (tp > 0) {
+    if (params.side === 'LONG' && tp <= safeEntry) {
+      takeProfitValid = false;
+      takeProfitErrorAr = 'في صفقة الشراء (LONG) يجب أن يكون سعر الهدف (TP) أعلى من سعر الدخول';
+    } else if (params.side === 'SHORT' && tp >= safeEntry) {
+      takeProfitValid = false;
+      takeProfitErrorAr = 'في صفقة البيع (SHORT) يجب أن يكون سعر الهدف (TP) أقل من سعر الدخول';
+    } else {
+      const dir = params.side === 'LONG' ? 1 : -1;
+      const rawPnl = (tp - safeEntry) * quantity * dir - commissionUsdt;
+      estimatedProfitAtTpUsdt = Number(rawPnl.toFixed(2));
+      estimatedProfitAtTpRoePercent = Number(((rawPnl / safeMargin) * 100).toFixed(2));
+    }
+  }
+
+  let riskRewardRatio: number | null = null;
+  if (
+    stopLossValid &&
+    takeProfitValid &&
+    estimatedLossAtSlUsdt !== null &&
+    estimatedProfitAtTpUsdt !== null &&
+    Math.abs(estimatedLossAtSlUsdt) > 0 &&
+    estimatedProfitAtTpUsdt > 0
+  ) {
+    riskRewardRatio = Number((estimatedProfitAtTpUsdt / Math.abs(estimatedLossAtSlUsdt)).toFixed(2));
+  }
+
+  return {
+    entryPrice: safeEntry,
+    marginUsdt: safeMargin,
+    leverage: safeLeverage,
+    notionalUsdt,
+    quantity,
+    commissionUsdt,
+    totalRequiredUsdt,
+    estimatedLiquidationPrice,
+    stopLossValid,
+    takeProfitValid,
+    stopLossErrorAr,
+    takeProfitErrorAr,
+    estimatedLossAtSlUsdt,
+    estimatedLossAtSlRoePercent,
+    estimatedProfitAtTpUsdt,
+    estimatedProfitAtTpRoePercent,
+    riskRewardRatio,
+  };
+}
+
 

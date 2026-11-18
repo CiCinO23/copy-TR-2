@@ -14,8 +14,10 @@ import {
   calculatePositionQuantityIncreaseScaleInPct,
   hasSyncEventBeenApplied,
   hasTraderEntryAlreadyBeenSynced,
+  inferRecordPositionSide,
   isTraderActionAlreadyProcessed,
   isTraderTradePermanentlyClosed,
+  reconcileAllTraderPositionsBeforeCopy,
   shouldApplyTraderRecordAfterEntry,
 } from './tradeExecutionRules';
 
@@ -166,6 +168,16 @@ export function computeWorkerSyncPlanBatch(
         (p.sourceTraderId === task.traderId || p.sourceTraderName === task.traderName)
     );
 
+    // Pre-reconcile all incoming trader positions against latestRecords and positionHistory (v2.21)
+    // so finished trades are discarded before copying and open trades carry only their net remaining size
+    const preReconciled = reconcileAllTraderPositionsBeforeCopy({
+      positions: rawPositions,
+      latestRecords: rawRecords,
+      positionHistory: rawHistory,
+      traderId: task.traderId,
+    });
+    const reconciledOpenPositions = preReconciled.openPositions;
+
     // 2. Pre-filter `latestRecords` in chronological order (keep only unapplied records matching an open position)
     const sortedRecords = [...rawRecords.slice(0, 40)].sort(
       (a, b) => (a.orderTime || 0) - (b.orderTime || 0)
@@ -181,19 +193,16 @@ export function computeWorkerSyncPlanBatch(
         continue;
       }
 
-      const recSide: 'LONG' | 'SHORT' | null =
-        rec.positionSide === 'LONG' || rec.positionSide === 'SHORT'
-          ? rec.positionSide
-          : null;
+      const recSide = inferRecordPositionSide(rec);
 
       const matchingOpen = openTraderPositionsInAcc.find(
         (p) =>
           p.symbol.toUpperCase() === String(rec.symbol || '').toUpperCase() &&
-          (!recSide || p.side === recSide)
+          p.side === recSide
       );
       if (!matchingOpen) continue;
 
-      const traderPos = rawPositions.find(
+      const traderPos = reconciledOpenPositions.find(
         (tp) =>
           tp.symbol.toUpperCase() === matchingOpen.symbol.toUpperCase() &&
           tp.side === matchingOpen.side
@@ -202,10 +211,14 @@ export function computeWorkerSyncPlanBatch(
       const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
         recordTimestamp: rec.orderTime,
         userPositionOpenTime: matchingOpen.openTime,
+        traderPositionEntryTime: matchingOpen.traderEntryTime,
       });
 
       if (rec.actionType === 'EXIT') {
-        if (!isAfterOurEntry && traderPos) continue;
+        const isAfterTraderEntry =
+          !matchingOpen.traderEntryTime ||
+          rec.orderTime >= matchingOpen.traderEntryTime - 5_000;
+        if ((!isAfterOurEntry && traderPos) || !isAfterTraderEntry) continue;
         const eventKey = buildStableTraderEventKey({
           kind: 'REC',
           symbol: rec.symbol,
@@ -328,7 +341,14 @@ export function computeWorkerSyncPlanBatch(
     const staleChoiceIdsToRemove: string[] = [];
     let hasPositionLevelChanges = false;
 
-    for (const pos of rawPositions) {
+    for (const discarded of preReconciled.discardedFinishedPositions) {
+      const symUpper = String(discarded.symbol || '').toUpperCase().trim();
+      staleChoiceIdsToRemove.push(
+        `choice_${task.accountId || 'acc_default'}_${task.traderId}_${symUpper}_${discarded.side}`
+      );
+    }
+
+    for (const pos of reconciledOpenPositions) {
       const symUpper = String(pos.symbol || '').toUpperCase().trim();
       const matchingUserOpen = openTraderPositionsInAcc.find(
         (p) => p.symbol.toUpperCase() === symUpper && p.side === pos.side
@@ -345,6 +365,7 @@ export function computeWorkerSyncPlanBatch(
           const isAfterOurEntry = shouldApplyTraderRecordAfterEntry({
             recordTimestamp: adj.timestamp,
             userPositionOpenTime: matchingUserOpen.openTime,
+            traderPositionEntryTime: matchingUserOpen.traderEntryTime,
           });
           if (!isAfterOurEntry) continue;
 
@@ -422,21 +443,6 @@ export function computeWorkerSyncPlanBatch(
 
       // Position is NOT currently open in user's account -> verify inside worker if permanently closed or already synced
       if (
-        isTraderTradePermanentlyClosed({
-          symbol: symUpper,
-          side: pos.side,
-          entryTime: pos.entryTime,
-          latestRecords: rawRecords,
-          positionHistory: rawHistory,
-        })
-      ) {
-        staleChoiceIdsToRemove.push(
-          `choice_${task.accountId || 'acc_default'}_${task.traderId}_${symUpper}_${pos.side}`
-        );
-        continue;
-      }
-
-      if (
         hasTraderEntryAlreadyBeenSynced({
           traderId: task.traderId,
           traderName: task.traderName,
@@ -459,15 +465,24 @@ export function computeWorkerSyncPlanBatch(
     // 4. Check if any userOpenPos is missing from trader's open positions (indicating full exit)
     if (!task.isPartialOrRateLimited) {
       const isTransientEmpty =
-        rawPositions.length === 0 && rawRecords.length === 0 && rawHistory.length === 0;
+        reconciledOpenPositions.length === 0 && rawRecords.length === 0 && rawHistory.length === 0;
       if (!isTransientEmpty) {
         for (const userOpenPos of openTraderPositionsInAcc) {
-          const stillOpen = rawPositions.some(
+          const stillOpen = reconciledOpenPositions.some(
             (tp) =>
               tp.symbol.toUpperCase() === userOpenPos.symbol.toUpperCase() &&
               tp.side === userOpenPos.side
           );
-          if (!stillOpen && !(rawPositions.length === 0 && now - userOpenPos.openTime < 5000)) {
+          const hasExplicitCloseSignal = isTraderTradePermanentlyClosed({
+            symbol: userOpenPos.symbol,
+            side: userOpenPos.side,
+            entryTime: userOpenPos.traderEntryTime || userOpenPos.openTime,
+            latestRecords: rawRecords,
+            positionHistory: rawHistory,
+          });
+          const withinInitialOpenGraceWindow =
+            now - userOpenPos.openTime < 15_000 && !hasExplicitCloseSignal;
+          if (!stillOpen && !withinInitialOpenGraceWindow) {
             hasPositionLevelChanges = true;
           }
         }

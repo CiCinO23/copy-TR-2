@@ -57,6 +57,10 @@ import {
   ActiveCopiedTrader,
   MobileNotificationSettings,
   KuCoinSecurityLockConfig,
+  TraderOpenPosition,
+  TraderLatestRecord,
+  TraderPositionHistoryItem,
+  ManualSingleCopyResult,
 } from '../types';
 import { getCachedPrice, fetchSymbolPrice } from '../services/binanceApi';
 import { mobileNotifications } from '../services/mobileNotifications';
@@ -67,6 +71,10 @@ import {
 import { KuCoinSecurityLockScreen } from './KuCoinSecurityLockGuard';
 import { DEFAULT_KUCOIN_SECURITY_CONFIG } from '../services/kucoinSecurityLock';
 import { Lock } from 'lucide-react';
+import {
+  CopiedTraderInlineInspector,
+  SelectedInlineTraderTarget,
+} from './CopiedTraderInlineInspector';
 
 interface SimulationTabProps {
   connectionState: BinanceConnectionState;
@@ -122,6 +130,22 @@ interface SimulationTabProps {
     source: 'COPY_TRADING' | 'SMART_MONEY',
     traderName?: string
   ) => void;
+  onCopySinglePosition?: (
+    pos: TraderOpenPosition,
+    traderName: string,
+    marginUsdt: number,
+    accountId?: string
+  ) => ManualSingleCopyResult | undefined;
+  onSyncTraderToEngine?: (params: {
+    traderId: string;
+    traderName: string;
+    source: 'COPY_TRADING' | 'SMART_MONEY';
+    positions: TraderOpenPosition[];
+    latestRecords: TraderLatestRecord[];
+    positionHistory?: TraderPositionHistoryItem[];
+    marginPerTradeUsdt: number;
+    accountId?: string;
+  }) => any;
   notificationSettings?: MobileNotificationSettings;
   onUpdateNotificationSettings?: (partial: Partial<MobileNotificationSettings>) => void;
   onOpenNotificationsCenter?: () => void;
@@ -158,6 +182,8 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   onRemoveCopiedTrader,
   onNavigateToTab,
   onOpenTraderStats,
+  onCopySinglePosition,
+  onSyncTraderToEngine,
   notificationSettings,
   onUpdateNotificationSettings,
   onOpenNotificationsCenter,
@@ -192,6 +218,8 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   const [isRenamingAccount, setIsRenamingAccount] = useState<boolean>(false);
   const [renameAccountInput, setRenameAccountInput] = useState<string>(activeAccountName);
   const [copiedTradersScope, setCopiedTradersScope] = useState<'ACTIVE' | 'ALL'>('ACTIVE');
+  const [selectedInlineTrader, setSelectedInlineTrader] =
+    useState<SelectedInlineTraderTarget | null>(null);
 
   // Virtual Balance Editor State
   const [balanceInput, setBalanceInput] = useState<string>(
@@ -407,7 +435,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
     notifyOnDrawdown,
   ]);
 
-  // Navigate to Trader / Whale statistics page when clicked
+  // Expand Trader / Whale inline inspector below the Open Positions window without hiding user's open positions
   const handleTraderClick = (
     traderName?: string,
     traderId?: string,
@@ -453,11 +481,14 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       }
     }
 
-    if (onOpenTraderStats) {
-      onOpenTraderStats(finalId, finalSource, traderName || copied?.nickname);
-    } else {
-      onNavigateToTab(finalSource === 'SMART_MONEY' ? 'Whales' : 'Copy Trading');
-    }
+    setSimSubTab('ACTIVE');
+    setSelectedInlineTrader({
+      traderId: finalId,
+      traderName: traderName || copied?.nickname || finalId,
+      source: finalSource,
+      avatarUrl: copied?.avatarUrl,
+      accountId: copied?.accountId || activeAccountId,
+    });
   };
 
   // Compute Portfolio Statistics, Equity Curve, and Win/Loss Metrics
@@ -3220,189 +3251,6 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
       </div>
       )}
 
-      {/* Multi-Trader Copy Management Section (Inside ACCOUNTS_SETTINGS tab) */}
-      {simSubTab === 'ACCOUNTS_SETTINGS' && (
-      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Users className="w-5 h-5 text-[#01BC8D]" />
-            <div>
-              <h3 className="font-bold text-sm sm:text-base text-white">
-                المتداولون والحيتان المنسوخون ({copiedTraders.length})
-              </h3>
-              <p className="text-[11px] text-[#8A99AD]">
-                يمكنك نسخ كل متداول أو حوت إلى حساب افتراضي معين، وسيتم فتح صفقاته وفق إعدادات الحساب المخصص له.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {accounts.length > 1 && (
-              <div className="flex items-center bg-[#0B0E11] border border-[#232E3A] rounded-xl p-1 text-[11px]">
-                <button
-                  type="button"
-                  onClick={() => setCopiedTradersScope('ACTIVE')}
-                  className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer transition-colors ${
-                    copiedTradersScope === 'ACTIVE'
-                      ? 'bg-[#01BC8D] text-[#0B0E11]'
-                      : 'text-[#8A99AD] hover:text-white'
-                  }`}
-                >
-                  حساب «{activeAccountName}» (
-                  {
-                    copiedTraders.filter(
-                      (ct) => (ct.accountId || 'acc_default') === activeAccountId
-                    ).length
-                  }
-                  )
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCopiedTradersScope('ALL')}
-                  className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer transition-colors ${
-                    copiedTradersScope === 'ALL'
-                      ? 'bg-[#01BC8D] text-[#0B0E11]'
-                      : 'text-[#8A99AD] hover:text-white'
-                  }`}
-                >
-                  جميع الحسابات ({copiedTraders.length})
-                </button>
-              </div>
-            )}
-
-            {copiedTraders.length > 0 && (
-              <button
-                onClick={onSyncAllCopiedTraders}
-                disabled={isSyncingAll}
-                className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingAll ? 'animate-spin' : ''}`} />
-                <span>مزامنة جميع المنسوخين الآن</span>
-              </button>
-            )}
-            <button
-              onClick={() => onNavigateToTab('Copy Trading')}
-              className="bg-[#1A222B] hover:bg-[#212C37] text-[#01BC8D] border border-[#01BC8D]/40 px-3 py-2 rounded-xl text-xs font-bold cursor-pointer"
-            >
-              + إضافة متداول
-            </button>
-            <button
-              onClick={() => onNavigateToTab('Whales')}
-              className="bg-[#1A222B] hover:bg-[#212C37] text-[#01BC8D] border border-[#01BC8D]/40 px-3 py-2 rounded-xl text-xs font-bold cursor-pointer"
-            >
-              + إضافة حوت
-            </button>
-          </div>
-        </div>
-
-        {(() => {
-          const displayedTraders =
-            copiedTradersScope === 'ACTIVE' && accounts.length > 1
-              ? copiedTraders.filter(
-                  (ct) => (ct.accountId || 'acc_default') === activeAccountId
-                )
-              : copiedTraders;
-
-          if (displayedTraders.length === 0) {
-            return (
-              <div className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-4 text-center text-xs text-[#8A99AD]">
-                لا يوجد متداولون منسوخون في «{activeAccountName}» حالياً. اضغط على{' '}
-                <strong className="text-[#01BC8D]">+ إضافة متداول</strong> أو{' '}
-                <strong className="text-[#01BC8D]">+ إضافة حوت</strong> واختر الحساب عند الضغط على زر النسخ.
-              </div>
-            );
-          }
-
-          return (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {displayedTraders.map((ct) => {
-                const targetAccId = ct.accountId || 'acc_default';
-                const targetAccObj = accounts.find((a) => a.id === targetAccId);
-                const targetAccName =
-                  targetAccObj?.name || ct.accountName || activeAccountName;
-                const targetAccSettings = targetAccObj?.settings || settings;
-
-                return (
-                  <div
-                    key={`${ct.source}_${ct.traderId}_${targetAccId}`}
-                    className="bg-[#1A222B] border border-[#232E3A] hover:border-[#01BC8D]/50 rounded-xl p-3 flex items-center justify-between gap-2 transition-all shadow-sm"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      {/* Trader Avatar / Photo - Clickable to open trader statistics */}
-                      <button
-                        type="button"
-                        onClick={() => handleTraderClick(ct.nickname, ct.traderId, ct.source)}
-                        className="relative group shrink-0 cursor-pointer focus:outline-none"
-                        title={`اضغط للدخول إلى صفحة إحصائيات المتداول ${ct.nickname}`}
-                      >
-                        <TraderAvatar
-                          src={ct.avatarUrl}
-                          name={ct.nickname}
-                          size="md"
-                        />
-                        <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-[#0B0E11] border border-[#01BC8D] flex items-center justify-center text-[9px] text-[#01BC8D]">
-                          <ExternalLink className="w-2.5 h-2.5" />
-                        </span>
-                      </button>
-
-                      <div>
-                        {/* Trader Name - Clickable to open trader statistics */}
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() => handleTraderClick(ct.nickname, ct.traderId, ct.source)}
-                            className="font-bold text-xs sm:text-sm text-white hover:text-[#01BC8D] flex items-center gap-1 cursor-pointer transition-colors text-right group"
-                            title={`اضغط للدخول إلى صفحة إحصائيات المتداول ${ct.nickname}`}
-                          >
-                            <span className="group-hover:underline">{ct.nickname}</span>
-                            <ExternalLink className="w-3 h-3 text-[#01BC8D] opacity-70 group-hover:opacity-100" />
-                          </button>
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#0B0E11] text-[#01BC8D] font-mono">
-                            {ct.source === 'SMART_MONEY' ? 'WHALE' : 'COPY'}
-                          </span>
-                          <span className="text-[9px] px-2 py-0.5 rounded bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 font-bold">
-                            حساب: {targetAccName}
-                          </span>
-                        </div>
-
-                        <div className="text-[10px] text-[#8A99AD] mt-0.5">
-                          حجم صفقتك المخصص:{' '}
-                          <strong className="text-white font-mono">
-                            {targetAccSettings.tradeValueUsdt}$
-                          </strong>{' '}
-                          • رافعتك:{' '}
-                          <strong className="text-[#01BC8D] font-mono">
-                            {targetAccSettings.leverage}x
-                          </strong>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => handleTraderClick(ct.nickname, ct.traderId, ct.source)}
-                          className="text-[10px] text-[#01BC8D] hover:underline font-semibold flex items-center gap-1 mt-1 cursor-pointer"
-                          title={`عرض صفحة إحصائيات المتداول ${ct.nickname}`}
-                        >
-                          <span>عرض صفحة الإحصائيات ↗</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <button
-                      onClick={() => onRemoveCopiedTrader(ct.traderId, ct.source, targetAccId)}
-                      className="bg-[#F6465D]/15 hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/30 p-2 rounded-lg text-xs cursor-pointer shrink-0"
-                      title="إلغاء نسخ هذا المتداول من هذا الحساب"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })()}
-      </div>
-      )}
-
       {/* قسم معالجة الصفقات السابقة بعد انقطاع الاتصال (Inside ACTIVE tab) */}
       {simSubTab === 'ACTIVE' && (() => {
         const copiedTradersOnThisPage = copiedTraders.filter(
@@ -3760,11 +3608,22 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                           {p.stopLossPrice && p.stopLossPrice > 0 && (
                             <span
                               data-testid={`secured_sl_badge_${p.id}`}
-                              className="text-[10px] px-2 py-0.5 rounded font-mono font-bold bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/60 flex items-center gap-1"
+                              className="text-[10px] px-2 py-0.5 rounded font-mono font-bold bg-[#2B1216] text-[#F6465D] border border-[#F6465D]/50 flex items-center gap-1"
                             >
                               <ShieldCheck className="w-3 h-3" />
                               <span>
-                                مؤمّنة بوقف خسارة قرب السعر الحالي: SL @ {p.stopLossPrice.toFixed(4)}
+                                SL @ {p.stopLossPrice.toFixed(4)}
+                              </span>
+                            </span>
+                          )}
+                          {p.takeProfitPrice && p.takeProfitPrice > 0 && (
+                            <span
+                              data-testid={`tp_badge_${p.id}`}
+                              className="text-[10px] px-2 py-0.5 rounded font-mono font-bold bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/60 flex items-center gap-1"
+                            >
+                              <TrendingUp className="w-3 h-3" />
+                              <span>
+                                TP @ {p.takeProfitPrice.toFixed(4)}
                               </span>
                             </span>
                           )}
@@ -3773,7 +3632,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                               type="button"
                               onClick={() => handleTraderClick(p.sourceTraderName, p.sourceTraderId, p.sourceType)}
                               className="bg-[#0B0E11] hover:bg-[#0D2B24] text-[#01BC8D] hover:text-[#00D49F] border border-[#01BC8D]/30 hover:border-[#01BC8D] px-2 py-0.5 rounded text-[10px] flex items-center gap-1 cursor-pointer transition-all shadow-sm group"
-                              title={`اضغط للدخول إلى صفحة إحصائيات المتداول ${p.sourceTraderName}`}
+                              title={`اضغط لعرض كل معلومات المتداول ${p.sourceTraderName} (المراكز المفتوحة والمغلقة) أسفل نافذة المراكز دون إخفاء صفقاتك`}
                             >
                               {p.sourceType === 'SMART_MONEY' ? (
                                 <WhaleIcon className="w-3.5 h-3.5" />
@@ -4010,6 +3869,29 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
           </div>
         )}
       </div>
+      )}
+
+      {/* معلومات المتداولين والحيتان المنسوخين (أسفل نافذة المراكز مباشرة مع عرض كل المعلومات عند الاختيار دون إخفاء صفقاتي المنسوخة في الأعلى) */}
+      {simSubTab === 'ACTIVE' && (
+        <CopiedTraderInlineInspector
+          copiedTraders={copiedTraders}
+          accounts={accounts}
+          activeAccountId={activeAccountId}
+          activeAccountName={activeAccountName}
+          settings={settings}
+          tickers={connectionState.tickers}
+          userOpenPositions={openPositions}
+          userClosedPositions={closedPositions}
+          isSyncingAll={isSyncingAll}
+          selectedTrader={selectedInlineTrader}
+          onSelectTrader={setSelectedInlineTrader}
+          onSyncAllCopiedTraders={onSyncAllCopiedTraders}
+          onRemoveCopiedTrader={onRemoveCopiedTrader}
+          onNavigateToTab={onNavigateToTab}
+          onOpenExternalTraderPage={onOpenTraderStats}
+          onCopySinglePosition={onCopySinglePosition}
+          onSyncTraderToEngine={onSyncTraderToEngine}
+        />
       )}
 
       {/* لوحة البيانات الإحصائية لسجل الصفقات المغلقة (Inside STATS_HISTORY tab) */}
@@ -4854,83 +4736,6 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             </table>
           </div>
         )}
-      </div>
-      )}
-
-      {/* Quick Manual Trade Form (Inside ACTIVE tab) */}
-      {simSubTab === 'ACTIVE' && (
-      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5">
-        <h3 className="font-bold text-sm text-[#01BC8D] mb-3 flex items-center gap-2">
-          <PlusCircle className="w-4 h-4" />
-          <span>
-            فتح صفقة فورية بإعداداتك الحالية ({settings.tradeValueUsdt}$ × رافعة {settings.leverage}x • عمولة {settings.commissionPercent}%)
-          </span>
-        </h3>
-
-        <form onSubmit={handlePlaceOrder} className="space-y-3">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-[11px] text-[#8A99AD] mb-1">الزوج</label>
-              <select
-                value={selectedSymbol}
-                onChange={(e) => setSelectedSymbol(e.target.value)}
-                className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] focus:outline-none rounded-xl px-3 py-2 text-xs text-white font-mono"
-              >
-                <option value="BTCUSDT">BTCUSDT</option>
-                <option value="ETHUSDT">ETHUSDT</option>
-                <option value="SOLUSDT">SOLUSDT</option>
-                <option value="BNBUSDT">BNBUSDT</option>
-                <option value="XRPUSDT">XRPUSDT</option>
-                <option value="DOGEUSDT">DOGEUSDT</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-[11px] text-[#8A99AD] mb-1">الاتجاه</label>
-              <div className="grid grid-cols-2 gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setOrderSide('LONG')}
-                  className={`py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
-                    orderSide === 'LONG'
-                      ? 'bg-[#01BC8D] text-[#0B0E11]'
-                      : 'bg-[#0B0E11] text-[#8A99AD] border border-[#232E3A]'
-                  }`}
-                >
-                  LONG (شراء)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setOrderSide('SHORT')}
-                  className={`py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
-                    orderSide === 'SHORT'
-                      ? 'bg-[#F6465D] text-[#0B0E11]'
-                      : 'bg-[#0B0E11] text-[#8A99AD] border border-[#232E3A]'
-                  }`}
-                >
-                  SHORT (بيع)
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {orderError && (
-            <p className="text-xs text-[#F6465D] bg-[#2B1216] p-2.5 rounded-lg">{orderError}</p>
-          )}
-
-          <button
-            type="submit"
-            className={`w-full font-bold py-2.5 rounded-xl text-xs sm:text-sm transition-colors cursor-pointer ${
-              isRealMode
-                ? 'bg-[#01BC8D] hover:bg-[#00D49F] text-white'
-                : 'bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11]'
-            }`}
-          >
-            {isRealMode
-              ? `تنفيذ صفقة حقيقية على KuCoin (${selectedSymbol} • بقيمة ${settings.tradeValueUsdt}$ × ${settings.leverage}x)`
-              : `فتح صفقة افتراضية (${selectedSymbol} • بقيمة ${settings.tradeValueUsdt}$ × ${settings.leverage}x)`}
-          </button>
-        </form>
       </div>
       )}
     </div>

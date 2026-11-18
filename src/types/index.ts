@@ -115,6 +115,7 @@ export interface PaperPosition {
   entryPrice: number;
   traderEntryPrice?: number;
   stopLossPrice?: number;
+  takeProfitPrice?: number;
   isSecuredNearCurrent?: boolean;
   securedBufferPercent?: number;
   leverage: number;
