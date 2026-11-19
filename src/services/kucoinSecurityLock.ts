@@ -1,16 +1,8 @@
 import { KuCoinSecurityLockConfig } from '../types';
 
 export const KUCOIN_SECURITY_STORAGE_KEY = 'whale_kucoin_security_lock_v1';
-
-export const DEFAULT_KUCOIN_SECURITY_CONFIG: KuCoinSecurityLockConfig = {
-  enabled: true,
-  pinCode: '1234',
-  biometricEnabled: true,
-  biometricCredentialId: null,
-  lockScope: 'ALWAYS_ON_TAB_OPEN',
-  sessionTimeoutMinutes: 5,
-  protectRealTradingSwitch: true,
-};
+const PIN_HASH_SALT = 'CopyTR_v223_PIN_SALT_#9182';
+const PIN_HASH_PREFIX = 'h1:';
 
 /**
  * Normalizes Arabic-Indic (٠-٩) and Extended Arabic-Indic (۰-۹) digits to standard ASCII digits (0-9)
@@ -32,25 +24,88 @@ export function isValidPinFormat(pin: string): boolean {
 }
 
 /**
- * Verifies if the user-entered PIN matches the stored PIN code.
+ * Deterministic salted synchronous hash for PIN storage so plaintext PINs are never persisted to localStorage.
+ * Uses multi-round dual-lane 32-bit FNV-1a / Murmur-style avalanche mixing.
  */
-export function verifyPinCode(inputPin: string, storedPin: string): boolean {
+export function hashPinSync(pin: string): string {
+  const clean = normalizePinDigits(pin);
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  const input = `${PIN_HASH_SALT}:${clean}:${clean.length}`;
+
+  for (let round = 0; round < 64; round++) {
+    for (let i = 0; i < input.length; i++) {
+      const ch = input.charCodeAt(i) ^ (round & 0xff);
+      h1 ^= ch;
+      h1 = Math.imul(h1, 0x01000193);
+      h2 ^= ch + ((h1 >>> 13) & 0xff);
+      h2 = Math.imul(h2, 0x85ebca6b);
+    }
+    h1 ^= h2 >>> 16;
+    h2 ^= h1 >>> 13;
+  }
+
+  const hex1 = (h1 >>> 0).toString(16).padStart(8, '0');
+  const hex2 = (h2 >>> 0).toString(16).padStart(8, '0');
+  return `${PIN_HASH_PREFIX}${hex1}${hex2}`;
+}
+
+export function isPinHashed(value?: string | null): boolean {
+  return typeof value === 'string' && value.startsWith(PIN_HASH_PREFIX) && value.length > 12;
+}
+
+const DEFAULT_PIN_PLAIN = '1234';
+export const DEFAULT_PIN_HASH = hashPinSync(DEFAULT_PIN_PLAIN);
+
+export const DEFAULT_KUCOIN_SECURITY_CONFIG: KuCoinSecurityLockConfig = {
+  enabled: true,
+  pinCode: '',
+  pinHash: DEFAULT_PIN_HASH,
+  biometricEnabled: false,
+  biometricCredentialId: null,
+  lockScope: 'ALWAYS_ON_TAB_OPEN',
+  sessionTimeoutMinutes: 5,
+  protectRealTradingSwitch: true,
+};
+
+/**
+ * Helper to detect if the security config is still using the default 1234 PIN.
+ */
+export function isDefaultPinActive(config: KuCoinSecurityLockConfig): boolean {
+  if (isPinHashed(config.pinHash)) {
+    return config.pinHash === DEFAULT_PIN_HASH;
+  }
+  return verifyPinCode(DEFAULT_PIN_PLAIN, config.pinCode || DEFAULT_PIN_HASH);
+}
+
+/**
+ * Verifies if the user-entered PIN matches either a salted pinHash or a legacy stored plaintext PIN.
+ */
+export function verifyPinCode(inputPin: string, storedPinOrHash: string): boolean {
   const cleanInput = normalizePinDigits(inputPin);
-  const cleanStored = normalizePinDigits(storedPin || DEFAULT_KUCOIN_SECURITY_CONFIG.pinCode);
-  if (!cleanInput || !cleanStored) return false;
+  if (!cleanInput) return false;
+
+  const target = (storedPinOrHash || '').trim() || DEFAULT_PIN_HASH;
+  if (isPinHashed(target)) {
+    return hashPinSync(cleanInput) === target;
+  }
+
+  const cleanStored = normalizePinDigits(target);
+  if (!cleanStored) return false;
   return cleanInput === cleanStored;
 }
 
 /**
  * Validates changing the PIN code from `currentInput` to `newPin` & `confirmPin`.
+ * Accepts either a hashed `storedPinOrHash` or plaintext `storedPinOrHash`.
  */
 export function validatePinChange(
   currentInput: string,
-  storedPin: string,
+  storedPinOrHash: string,
   newPin: string,
   confirmPin: string
-): { valid: boolean; errorAr?: string; normalizedNewPin?: string } {
-  if (!verifyPinCode(currentInput, storedPin)) {
+): { valid: boolean; errorAr?: string; normalizedNewPin?: string; newPinHash?: string } {
+  if (!verifyPinCode(currentInput, storedPinOrHash)) {
     return {
       valid: false,
       errorAr: 'رمز PIN الحالي غير صحيح. يرجى إدخال الرمز الحالي بشكل صحيح.',
@@ -77,6 +132,7 @@ export function validatePinChange(
   return {
     valid: true,
     normalizedNewPin: cleanNew,
+    newPinHash: hashPinSync(cleanNew),
   };
 }
 
@@ -115,15 +171,25 @@ export function loadKuCoinSecurityConfig(): KuCoinSecurityLockConfig {
       return { ...DEFAULT_KUCOIN_SECURITY_CONFIG };
     }
     const parsed = JSON.parse(raw);
-    const cleanPin = normalizePinDigits(parsed.pinCode || DEFAULT_KUCOIN_SECURITY_CONFIG.pinCode);
-    return {
+
+    // Transparently migrate legacy plaintext `pinCode` into salted `pinHash`
+    let resolvedHash = isPinHashed(parsed.pinHash) ? parsed.pinHash : '';
+    let migrated = false;
+    if (!resolvedHash) {
+      const legacyPlain = normalizePinDigits(parsed.pinCode || '');
+      resolvedHash = isValidPinFormat(legacyPlain) ? hashPinSync(legacyPlain) : DEFAULT_PIN_HASH;
+      migrated = true;
+    }
+
+    const loaded: KuCoinSecurityLockConfig = {
       enabled:
         typeof parsed.enabled === 'boolean'
           ? parsed.enabled
           : DEFAULT_KUCOIN_SECURITY_CONFIG.enabled,
-      pinCode: isValidPinFormat(cleanPin) ? cleanPin : DEFAULT_KUCOIN_SECURITY_CONFIG.pinCode,
-      biometricEnabled: false,
-      biometricCredentialId: null,
+      pinCode: '', // Never retain plaintext PIN in memory/storage once hashed
+      pinHash: resolvedHash,
+      biometricEnabled: Boolean(parsed.biometricEnabled),
+      biometricCredentialId: parsed.biometricCredentialId || null,
       lockScope:
         parsed.lockScope === 'SESSION_TIMEOUT' ? 'SESSION_TIMEOUT' : 'ALWAYS_ON_TAB_OPEN',
       sessionTimeoutMinutes:
@@ -135,6 +201,12 @@ export function loadKuCoinSecurityConfig(): KuCoinSecurityLockConfig {
           ? parsed.protectRealTradingSwitch
           : DEFAULT_KUCOIN_SECURITY_CONFIG.protectRealTradingSwitch,
     };
+
+    if (migrated || parsed.pinCode) {
+      localStorage.setItem(KUCOIN_SECURITY_STORAGE_KEY, JSON.stringify(loaded));
+    }
+
+    return loaded;
   } catch {
     return { ...DEFAULT_KUCOIN_SECURITY_CONFIG };
   }
@@ -144,13 +216,24 @@ export function saveKuCoinSecurityConfig(
   partial: Partial<KuCoinSecurityLockConfig>
 ): KuCoinSecurityLockConfig {
   const current = loadKuCoinSecurityConfig();
-  const nextPin =
-    partial.pinCode !== undefined ? normalizePinDigits(partial.pinCode) : current.pinCode;
+
+  let nextHash = current.pinHash || DEFAULT_PIN_HASH;
+  if (partial.pinHash && isPinHashed(partial.pinHash)) {
+    nextHash = partial.pinHash;
+  } else if (partial.pinCode !== undefined) {
+    const cleanNew = normalizePinDigits(partial.pinCode);
+    if (isValidPinFormat(cleanNew)) {
+      nextHash = hashPinSync(cleanNew);
+    }
+  }
+
   const updated: KuCoinSecurityLockConfig = {
     ...current,
     ...partial,
-    pinCode: isValidPinFormat(nextPin) ? nextPin : current.pinCode,
+    pinCode: '', // Never store plaintext PIN in localStorage
+    pinHash: nextHash,
   };
+
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(KUCOIN_SECURITY_STORAGE_KEY, JSON.stringify(updated));
@@ -159,15 +242,6 @@ export function saveKuCoinSecurityConfig(
     // ignore storage errors
   }
   return updated;
-}
-
-function bufferToBase64Url(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 function base64UrlToBuffer(base64url: string): ArrayBuffer {
@@ -201,31 +275,26 @@ export async function isPlatformBiometricSupported(): Promise<boolean> {
 }
 
 /**
- * Registers or verifies a biometric fingerprint using native Android bridge, WebAuthn (with a fast timeout),
- * or instant interactive biometric sensor verification with haptic feedback.
- * Never blocks or hangs on mobile WebViews or synthetic credential IDs.
+ * Performs genuine biometric verification using native Android BiometricPrompt bridge or WebAuthn.
+ * Security hardening (v2.23): Never auto-succeeds when hardware biometrics are unavailable or cancelled —
+ * returns `{ success: false }` so the user must authenticate with their real PIN.
  */
 export async function performBiometricAuthentication(
   existingCredentialId?: string | null
 ): Promise<{
   success: boolean;
   credentialId?: string | null;
-  methodUsed: 'WEBAUTHN_NATIVE' | 'BIOMETRIC_SENSOR';
+  methodUsed: 'WEBAUTHN_NATIVE' | 'BIOMETRIC_SENSOR' | 'BIOMETRIC_UNAVAILABLE';
   messageAr: string;
 }> {
+  // 1. Native Android WebView biometric bridge (BiometricPrompt)
   try {
-    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
-      navigator.vibrate(35);
-    }
-  } catch {
-    // ignore vibration errors
-  }
-
-  // 1. Check native Android WebView biometric bridge if present
-  try {
-    const win = typeof window !== 'undefined' ? (window as unknown as {
-      AndroidBiometric?: { authenticate?: () => boolean | Promise<boolean> };
-    }) : null;
+    const win =
+      typeof window !== 'undefined'
+        ? (window as unknown as {
+            AndroidBiometric?: { authenticate?: () => boolean | Promise<boolean> };
+          })
+        : null;
     if (win?.AndroidBiometric && typeof win.AndroidBiometric.authenticate === 'function') {
       const ok = await Promise.resolve(win.AndroidBiometric.authenticate());
       if (ok) {
@@ -236,13 +305,18 @@ export async function performBiometricAuthentication(
           messageAr: 'تم التحقق من بصمة الإصبع بنجاح عبر مستشعر الأندرويد.',
         };
       }
+      return {
+        success: false,
+        credentialId: existingCredentialId || null,
+        methodUsed: 'BIOMETRIC_SENSOR',
+        messageAr: 'لم يتم التحقق من البصمة أو تم الإلغاء — يرجى إدخال رمز PIN.',
+      };
     }
   } catch {
-    // fall through to sensor verification
+    // fall through to WebAuthn
   }
 
-  // 2. Only attempt WebAuthn assertion if a genuine 'webauthn:' credential was previously registered
-  // and wrap in a strict 1000ms race timeout so it never hangs on mobile WebView or iframe
+  // 2. Genuine WebAuthn platform assertion if registered
   const isGenuineWebAuthnCred =
     typeof existingCredentialId === 'string' && existingCredentialId.startsWith('webauthn:');
 
@@ -258,7 +332,7 @@ export async function performBiometricAuthentication(
       const challenge = new Uint8Array(32);
       crypto.getRandomValues(challenge);
 
-      const webauthnPromise = navigator.credentials.get({
+      const assertion = await navigator.credentials.get({
         publicKey: {
           challenge,
           allowCredentials: [
@@ -268,16 +342,11 @@ export async function performBiometricAuthentication(
               transports: ['internal'],
             },
           ],
-          userVerification: 'preferred',
-          timeout: 1000,
+          userVerification: 'required',
+          timeout: 15_000,
         },
       });
 
-      const timeoutPromise = new Promise<null>((resolve) =>
-        setTimeout(() => resolve(null), 1000)
-      );
-
-      const assertion = await Promise.race([webauthnPromise, timeoutPromise]);
       if (assertion) {
         return {
           success: true,
@@ -287,29 +356,20 @@ export async function performBiometricAuthentication(
         };
       }
     } catch {
-      // Fall through to instant biometric sensor verification
+      return {
+        success: false,
+        credentialId: existingCredentialId,
+        methodUsed: 'WEBAUTHN_NATIVE',
+        messageAr: 'فشل التحقق البيومتري أو تم إلغاؤه — يرجى إدخال رمز PIN.',
+      };
     }
   }
 
-  // 3. Fast, reliable interactive biometric sensor verification (works on all Android APKs, WebViews & browsers)
-  await new Promise((resolve) => setTimeout(resolve, 220));
-  try {
-    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
-      navigator.vibrate([25, 40, 35]);
-    }
-  } catch {
-    // ignore
-  }
-
-  const finalCredId =
-    existingCredentialId && existingCredentialId.trim().length > 0
-      ? existingCredentialId
-      : `bio_${Date.now()}`;
-
+  // 3. No genuine biometric authenticator available — fail closed and require real PIN
   return {
-    success: true,
-    credentialId: finalCredId,
-    methodUsed: 'BIOMETRIC_SENSOR',
-    messageAr: 'تم التأكيد ببصمة الإصبع بنجاح وفتح تبويب التنفيذ المباشر (KuCoin).',
+    success: false,
+    credentialId: existingCredentialId || null,
+    methodUsed: 'BIOMETRIC_UNAVAILABLE',
+    messageAr: 'التحقق البيومتري غير متوفر في هذه البيئة — يرجى إدخال رمز PIN لفتح القفل.',
   };
 }

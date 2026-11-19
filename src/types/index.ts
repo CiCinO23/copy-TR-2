@@ -85,6 +85,16 @@ export interface TradeExecutionSettings {
   scaleInSamePercentAsTrader?: boolean; // خيار قابل للتفعيل أو الإلغاء: التدعيم آلياً بنفس النسبة المئوية للمتداول من قيمة الصفقة الأصلية
   partialExitSamePercentAsTrader?: boolean; // سحب نفس النسبة المئوية تلقائياً عندما يسحب المتداول جزءاً من الصفقة
   promptOnUnfavorableLateEntry?: boolean; // خيار اختياري: عند التفعيل يطلب قرار الدخول أو الرفض إذا كان السعر أسوأ؛ وعند شطبه يصبح الدخول آلياً بسعر السوق حتى مع التأخر
+  // Pro Risk Engine & Smart Copy Controls (v2.23)
+  trailingStopPercent?: number; // وقف الخسارة المتحرك الافتراضي % (0 = معطّل)
+  maxSlippagePercent?: number; // أقصى انزلاق سعري مسموح به عند النسخ % (0 = غير محدود)
+  dailyLossLimitPercent?: number; // قاطع الدائرة للخسارة اليومية % (0 = معطّل)
+  dailyCircuitBreakerPaused?: boolean; // حالة توقف النسخ اليومي بسبب تجاوز الحد
+  allowedSymbols?: string[]; // قائمة السماح للعملات (Whitelist — فارغة = السماح بالكل)
+  blockedSymbols?: string[]; // قائمة حظر العملات (Blacklist)
+  reverseCopyMode?: boolean; // النسخ العكسي (Anti-Copy: عكس LONG <-> SHORT)
+  proportionalCopyMode?: boolean; // النسخ النسبي حسب حجم صفقة المتداول مقارنة برصيد الحساب
+  proportionalCopyMultiplier?: number; // معامل التحجيم النسبي (مثلاً 1.0)
 }
 
 export type ScaleActionType = 'INITIAL_ENTRY' | 'SCALE_IN' | 'PARTIAL_EXIT' | 'FULL_EXIT';
@@ -138,6 +148,34 @@ export interface PaperPosition {
   appliedSyncEventIds?: string[];
   lastSyncedTraderQty?: number;
   lastSyncedTraderUpdateTime?: number;
+  // Pro Risk & Accurate Accounting fields (v2.23)
+  trailingStopPercent?: number;
+  highestPriceSinceOpen?: number;
+  lowestPriceSinceOpen?: number;
+  liquidationPrice?: number;
+  closeReason?: 'MANUAL' | 'TRADER_EXIT' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TAKE_PROFIT' | 'LIQUIDATION';
+  /** Entry + scale-in commissions not yet deducted from realizedPnl (prevents double-counting partial exit fees) */
+  unaccountedCommissionUsdt?: number;
+}
+
+export interface PendingLimitOrder {
+  id: string;
+  accountId: string;
+  accountName?: string;
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  limitPrice: number;
+  marginUsdt: number;
+  quantity: number;
+  leverage: number;
+  stopLossPrice?: number;
+  takeProfitPrice?: number;
+  trailingStopPercent?: number;
+  createdAt: number;
+  status: 'PENDING' | 'FILLED' | 'CANCELLED';
+  filledAt?: number;
+  filledPrice?: number;
+  sourceType?: 'MANUAL' | 'COPY_TRADING' | 'SMART_MONEY';
 }
 
 export interface PendingReconnectTradeChoice {
@@ -185,8 +223,12 @@ export interface PaperAccountSnapshot {
   unrealizedPnl: number;
   totalCommissionsPaid: number;
   positions: PaperPosition[];
+  pendingLimitOrders?: PendingLimitOrder[];
   settings: TradeExecutionSettings;
   pendingReconnectChoices?: PendingReconnectTradeChoice[];
+  dailyPnlUsdt?: number;
+  dailyPnlPercent?: number;
+  isDailyCircuitBreakerTripped?: boolean;
 }
 
 export interface TraderSymbolSyncAction {
@@ -564,7 +606,10 @@ export type KuCoinLockScope = 'ALWAYS_ON_TAB_OPEN' | 'SESSION_TIMEOUT';
 
 export interface KuCoinSecurityLockConfig {
   enabled: boolean;
+  /** Legacy fallback kept empty when pinHash is set; hashed verification is always preferred */
   pinCode: string;
+  /** Salted hash of the user's PIN so plaintext PIN is never stored in localStorage */
+  pinHash?: string;
   biometricEnabled: boolean;
   biometricCredentialId?: string | null;
   lockScope: KuCoinLockScope;

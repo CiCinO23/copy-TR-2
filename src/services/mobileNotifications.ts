@@ -57,7 +57,7 @@ interface AndroidAppControlBridge {
 declare global {
   interface Window {
     AndroidAppControl?: AndroidAppControlBridge;
-    __copyTrNativeHeartbeat?: () => void;
+    __copyTrNativeHeartbeat?: (source?: string) => void;
     __copyTrHandleBackPress?: () => boolean;
     __copyTrSubViewBackHandler?: (() => boolean) | null;
   }
@@ -566,10 +566,42 @@ class MobileNotificationService {
   public acknowledgeServiceWorkerHeartbeat(): void {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
     try {
+      const visibilityState =
+        typeof document !== 'undefined' && document.visibilityState === 'hidden'
+          ? 'hidden'
+          : 'visible';
       navigator.serviceWorker.controller?.postMessage({
         type: 'SW_HEARTBEAT_ACK',
+        visibilityState,
         timestamp: Date.now(),
       });
+    } catch {
+      // ignore
+    }
+  }
+
+  public notifyServiceWorkerVisibility(visibilityState: 'visible' | 'hidden'): void {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+    try {
+      navigator.serviceWorker.getRegistration().then((reg) => {
+        const target = reg?.active || navigator.serviceWorker.controller;
+        target?.postMessage({
+          type: 'CLIENT_VISIBILITY_CHANGED',
+          visibilityState,
+          timestamp: Date.now(),
+        });
+        // Register Periodic Background Sync on supported Chromium Android PWAs for deep-sleep resilience
+        const periodicSync = (reg as unknown as {
+          periodicSync?: { register?: (tag: string, opts: { minInterval: number }) => Promise<void> };
+        })?.periodicSync;
+        if (
+          visibilityState === 'hidden' &&
+          this.settings.appExitBehavior === 'KEEP_ALIVE_BACKGROUND' &&
+          periodicSync?.register
+        ) {
+          periodicSync.register('copytr-bg-sync', { minInterval: 60 * 1000 }).catch(() => {});
+        }
+      }).catch(() => {});
     } catch {
       // ignore
     }

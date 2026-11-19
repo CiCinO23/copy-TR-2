@@ -270,21 +270,20 @@ export const CopiedTraderInlineInspector: React.FC<CopiedTraderInlineInspectorPr
       data-testid="copied_traders_below_positions_section"
       className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4"
     >
-      {/* Header & Controls */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-[#1E2733] pb-3.5">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-[#1C232D] pb-3">
         <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-xl bg-[#0D2B24] border border-[#01BC8D]/40 flex items-center justify-center text-[#01BC8D] shrink-0">
-            <Users className="w-5 h-5" />
+          <div className="w-8 h-8 rounded-lg bg-[#0D2B24] border border-[#01BC8D]/30 flex items-center justify-center text-[#01BC8D] shrink-0">
+            <Users className="w-4 h-4" />
           </div>
           <div>
-            <h3 className="font-bold text-sm sm:text-base text-white flex items-center gap-2 flex-wrap">
-              <span>المتداولون والحيتان المنسوخون ({copiedTraders.length})</span>
-              <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/30">
-                اضغط على أي متداول لعرض كافة صفقاته هنا دون إخفاء صفقاتك بالأعلى
+            <h3 className="font-bold text-sm text-white flex items-center gap-2">
+              <span>المتداولون المنسوخون</span>
+              <span dir="ltr" className="text-[11px] font-mono text-[#01BC8D] tabular-nums">
+                ({copiedTraders.length})
               </span>
             </h3>
-            <p className="text-[11px] text-[#8A99AD] mt-0.5">
-              اختر أي متداول منسوخ بالأسفل لاستعراض صفقاته المفتوحة والمغلقة وسجل عملياته وإحصائياته مباشرة أسفل نافذة المراكز.
+            <p className="text-[11px] text-[#848E9C] mt-0.5">
+              اختر أي متداول لعرض صفقاته المفتوحة والمغلقة هنا دون إخفاء مراكزك بالأعلى
             </p>
           </div>
         </div>

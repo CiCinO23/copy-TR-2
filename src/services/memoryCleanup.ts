@@ -9,6 +9,7 @@ import {
 import { paperEngine } from './paperTrading';
 import { mobileNotifications } from './mobileNotifications';
 import { purgeExpiredKuCoinOrderHistory } from './kucoinApi';
+import { tradeSyncWorkerClient } from './tradeSyncWorkerClient';
 import { ActiveCopiedTrader } from '../types';
 
 export const MEMORY_CLEANUP_STORAGE_KEY = 'whale_memory_cleanup_config_v1';
@@ -501,6 +502,22 @@ class MemoryCleanupService {
     const maxAgeMs = retentionDays * 24 * 60 * 60 * 1000;
     const cutoffTimestamp = nowMs - maxAgeMs;
 
+    if (!options?.force && this.startupCleanupExecuted) {
+      return {
+        executed: false,
+        retentionDays,
+        cutoffTimestamp,
+        removedClosedPositions: 0,
+        removedCheckpoints: 0,
+        removedStaleChoices: 0,
+        removedNotifications: 0,
+        removedKuCoinOrders: 0,
+        totalExpiredLogsRemoved: 0,
+        timestamp: this.lastStartupCleanupAt || nowMs,
+        reasonAr: 'تم تنفيذ فحص وتنظيف بدء التشغيل مسبقاً في هذه الجلسة',
+      };
+    }
+
     if (!options?.force && this.config.autoCleanExpiredLogsOnStartup === false) {
       return {
         executed: false,
@@ -715,7 +732,12 @@ class MemoryCleanupService {
     // 5. Purge >30-day KuCoin order history logs
     const freedKuCoinOrders = purgeExpiredKuCoinOrderHistory(maxHistoryAgeMs, now);
 
-    // 6. Notify Android Native APK bridge if available to clear WebView transient cache & run GC
+    // 6. Recycle idle background Trade Sync Web Worker during deep/manual cleanup to free worker heap
+    if (isDeep) {
+      tradeSyncWorkerClient.recycleIdleWorker();
+    }
+
+    // 7. Notify Android Native APK bridge if available to clear WebView transient cache & run GC
     try {
       const win = typeof window !== 'undefined' ? (window as unknown as {
         AndroidAppControl?: { performNativeMemoryCleanup?: () => void };

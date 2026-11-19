@@ -50,6 +50,7 @@ import {
   fetchCopyTradersList,
   fetchCopyTraderFullData,
 } from '../services/copyAndSmartMoneyApi';
+import { calculateTraderQualityScore } from '../services/proRiskAndAnalytics';
 
 interface CopyTradingTabProps {
   connectionState: BinanceConnectionState;
@@ -1338,6 +1339,21 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                 );
                 const isCopied = traderCopiedEntries.length > 0;
                 const isPositiveRoi = trader.roi >= 0;
+                const quality = calculateTraderQualityScore({
+                  roi: trader.roi,
+                  winRate: trader.winRate,
+                  mdd: trader.mdd,
+                  sharpRatio: trader.sharpRatio,
+                  leadingDays: trader.leadingDays,
+                });
+                const scoreBadgeCls =
+                  quality.tier === 'ELITE'
+                    ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/50'
+                    : quality.tier === 'STRONG'
+                    ? 'bg-[#10253A] text-[#38BDF8] border-[#38BDF8]/40'
+                    : quality.tier === 'MODERATE'
+                    ? 'bg-[#2B2210] text-[#F59E0B] border-[#F59E0B]/40'
+                    : 'bg-[#2B1216] text-[#F6465D] border-[#F6465D]/40';
 
                 return (
                   <div
@@ -1379,19 +1395,29 @@ export const CopyTradingTab: React.FC<CopyTradingTabProps> = ({
                         </div>
                       </div>
 
-                      {/* Left Side: Filter Days + Copy Status */}
+                      {/* Left Side: Quality Score + Filter Days + Copy Status */}
                       <div className="flex flex-col items-end gap-1.5 shrink-0">
-                        <span
-                          className="text-[#01BC8D] bg-[#0D2B24]/80 border border-[#01BC8D]/30 px-2.5 py-0.5 rounded-lg font-mono font-bold text-[11px]"
-                          title="الفترة الزمنية"
-                        >
-                          {TIME_RANGES.find((t) => t.key === timeRange)?.labelAr || timeRange}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            dir="ltr"
+                            data-testid={`trader_quality_score_${trader.leadPortfolioId}`}
+                            title={`تقييم جودة المتداول: ${quality.gradeAr} (${quality.score}/100)`}
+                            className={`px-2 py-0.5 rounded-lg border font-mono font-extrabold text-[10px] tabular-nums ${scoreBadgeCls}`}
+                          >
+                            Score {quality.score}/100
+                          </span>
+                          <span
+                            className="text-[#01BC8D] bg-[#0D2B24]/80 border border-[#01BC8D]/30 px-2.5 py-0.5 rounded-lg font-mono font-bold text-[11px]"
+                            title="الفترة الزمنية"
+                          >
+                            {TIME_RANGES.find((t) => t.key === timeRange)?.labelAr || timeRange}
+                          </span>
+                        </div>
                         {isCopied && (
-                          <span className="bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center gap-1.5">
+                          <span className="bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-[#01BC8D]" />
                             <span>
-                              منسوخ ({traderCopiedEntries.length > 1 ? `${traderCopiedEntries.length} حسابات` : traderCopiedEntries[0]?.accountName || 'يتم النسخ'})
+                              منسوخ ({traderCopiedEntries.length > 1 ? `${traderCopiedEntries.length} حسابات` : traderCopiedEntries[0]?.accountName || 'نشط'})
                             </span>
                           </span>
                         )}

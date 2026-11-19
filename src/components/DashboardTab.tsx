@@ -15,6 +15,8 @@ import {
   Target,
   CheckCircle2,
   AlertTriangle,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -33,6 +35,7 @@ import {
   KuCoinConnectionState,
   PaperAccountSnapshot,
   FuturesKlinePoint,
+  PendingLimitOrder,
 } from '../types';
 import {
   addWatchedFuturesSymbol,
@@ -46,11 +49,15 @@ import {
   calculateSlTpPriceByPriceMovePercent,
   evaluateManualOrderRiskReward,
 } from '../services/tradeExecutionRules';
+import type { WebSocketStreamStatus } from '../services/binanceWebSocket';
+import { PendingLimitOrdersCard } from './PendingLimitOrdersCard';
 
 interface DashboardTabProps {
   connectionState: BinanceConnectionState;
   kucoinConnectionState: KuCoinConnectionState;
   paperSnapshot?: PaperAccountSnapshot;
+  pendingLimitOrders?: PendingLimitOrder[];
+  wsStatus?: WebSocketStreamStatus;
   config: BinanceConfig;
   onOpenKucoinSetup: () => void;
   onRefreshMarket: () => void;
@@ -65,10 +72,23 @@ interface DashboardTabProps {
     options?: {
       stopLossPrice?: number;
       takeProfitPrice?: number;
+      trailingStopPercent?: number;
       accountId?: string;
       useCustomPrice?: boolean;
     }
   ) => void;
+  onCreatePendingLimitOrder?: (params: {
+    symbol: string;
+    side: 'LONG' | 'SHORT';
+    limitPrice: number;
+    marginUsdt: number;
+    leverage: number;
+    stopLossPrice?: number;
+    takeProfitPrice?: number;
+    trailingStopPercent?: number;
+    accountId?: string;
+  }) => PendingLimitOrder;
+  onCancelPendingLimitOrder?: (orderId: string) => void;
   onSelectAccount?: (accountId: string) => void;
   onNavigateToTrading?: () => void;
 }
@@ -96,12 +116,16 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   connectionState,
   kucoinConnectionState,
   paperSnapshot,
+  pendingLimitOrders,
+  wsStatus,
   config,
   onOpenKucoinSetup,
   onRefreshMarket,
   onRefreshKucoin,
   onFetchRealKucoinBalance,
   onOpenOrder,
+  onCreatePendingLimitOrder,
+  onCancelPendingLimitOrder,
   onSelectAccount,
   onNavigateToTrading,
 }) => {
@@ -204,6 +228,8 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const [manualLeverage, setManualLeverage] = useState<number>(defaultLeverage);
   const [stopLossInput, setStopLossInput] = useState<string>('');
   const [takeProfitInput, setTakeProfitInput] = useState<string>('');
+  const [trailingStopInput, setTrailingStopInput] = useState<string>('');
+  const [showRiskControls, setShowRiskControls] = useState<boolean>(false);
   const [manualOrderError, setManualOrderError] = useState<string | null>(null);
   const [manualOrderSuccess, setManualOrderSuccess] = useState<string | null>(null);
 
@@ -249,6 +275,17 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const parsedMarginUsdt = Math.max(0.5, parseFloat(manualMarginInput) || defaultTradeValue);
   const parsedSlPrice = parseFloat(stopLossInput) > 0 ? parseFloat(stopLossInput) : undefined;
   const parsedTpPrice = parseFloat(takeProfitInput) > 0 ? parseFloat(takeProfitInput) : undefined;
+  const parsedTrailingStopPct =
+    parseFloat(trailingStopInput) > 0 ? Math.min(50, parseFloat(trailingStopInput)) : undefined;
+
+  // Determine whether a custom price order should queue as a real Pending Limit Order
+  const willQueueAsPendingLimit =
+    priceMode === 'CUSTOM' &&
+    Boolean(onCreatePendingLimitOrder) &&
+    effectiveEntryPrice > 0 &&
+    liveSymbolPrice > 0 &&
+    ((manualSide === 'LONG' && effectiveEntryPrice < liveSymbolPrice * 0.9995) ||
+      (manualSide === 'SHORT' && effectiveEntryPrice > liveSymbolPrice * 1.0005));
 
   const orderPreview = React.useMemo(
     () =>
@@ -307,7 +344,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     setManualOrderError(null);
     setManualOrderSuccess(null);
 
-    if (!onOpenOrder) return;
+    if (!onOpenOrder && !onCreatePendingLimitOrder) return;
 
     if (!orderPreview.stopLossValid && orderPreview.stopLossErrorAr) {
       setManualOrderError(orderPreview.stopLossErrorAr);
@@ -319,6 +356,30 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
     }
 
     try {
+      const slBadge = parsedSlPrice ? ` • وقف الخسارة: ${parsedSlPrice}$` : '';
+      const tpBadge = parsedTpPrice ? ` • الهدف: ${parsedTpPrice}$` : '';
+      const trailBadge = parsedTrailingStopPct ? ` • تتبع: ${parsedTrailingStopPct}%` : '';
+
+      if (willQueueAsPendingLimit && onCreatePendingLimitOrder) {
+        onCreatePendingLimitOrder({
+          symbol: selectedChartSymbol,
+          side: manualSide,
+          limitPrice: orderPreview.entryPrice,
+          marginUsdt: orderPreview.marginUsdt,
+          leverage: orderPreview.leverage,
+          stopLossPrice: parsedSlPrice,
+          takeProfitPrice: parsedTpPrice,
+          trailingStopPercent: parsedTrailingStopPct,
+          accountId: activeAccountId,
+        });
+        setManualOrderSuccess(
+          `تم إنشاء أمر معلق (Pending Limit) ${manualSide === 'LONG' ? 'شراء LONG' : 'بيع SHORT'} على ${selectedChartSymbol} عند السعر ${orderPreview.entryPrice}$ — سينفذ تلقائياً فور ملامسة السعر${slBadge}${tpBadge}${trailBadge}`
+        );
+        setTimeout(() => setManualOrderSuccess(null), 6500);
+        return;
+      }
+
+      if (!onOpenOrder) return;
       onOpenOrder(
         selectedChartSymbol,
         manualSide,
@@ -328,15 +389,14 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         {
           stopLossPrice: parsedSlPrice,
           takeProfitPrice: parsedTpPrice,
+          trailingStopPercent: parsedTrailingStopPct,
           accountId: activeAccountId,
           useCustomPrice: priceMode === 'CUSTOM',
         }
       );
 
-      const slBadge = parsedSlPrice ? ` • وقف الخسارة: ${parsedSlPrice}$` : '';
-      const tpBadge = parsedTpPrice ? ` • الهدف: ${parsedTpPrice}$` : '';
       setManualOrderSuccess(
-        `تم فتح صفقة ${manualSide === 'LONG' ? 'شراء (LONG)' : 'بيع (SHORT)'} على ${selectedChartSymbol} بقيمة ${orderPreview.marginUsdt}$ × ${orderPreview.leverage}x بالسعر ${orderPreview.entryPrice}$${slBadge}${tpBadge}`
+        `تم فتح صفقة ${manualSide === 'LONG' ? 'شراء (LONG)' : 'بيع (SHORT)'} على ${selectedChartSymbol} بقيمة ${orderPreview.marginUsdt}$ × ${orderPreview.leverage}x بالسعر ${orderPreview.entryPrice}$${slBadge}${tpBadge}${trailBadge}`
       );
       setTimeout(() => setManualOrderSuccess(null), 6500);
     } catch (err: any) {
@@ -435,76 +495,63 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const displayedCandle = hoveredCandle || (klineData.length > 0 ? klineData[klineData.length - 1] : null);
 
   return (
-    <div className="space-y-4 sm:space-y-5 animate-in fade-in duration-200 w-full overflow-hidden">
-      {/* 1. رصيد كوكوين الإجمالي وتفاصيل المحفظة */}
-      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4 overflow-hidden">
-        {/* Top Row: Header & Total Balance */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#1E2733] pb-4">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="w-11 h-11 rounded-xl bg-[#161D26] border border-[#1E2733] flex items-center justify-center text-[#01BC8D] shrink-0">
-              <Wallet className="w-5 h-5" />
+    <div className="space-y-3.5 sm:space-y-4 animate-in fade-in duration-200 w-full overflow-hidden">
+      {/* 1. شريط الأصول المدمج بأسلوب KuCoin */}
+      <div className="bg-[#12161C] border border-[#1C232D] rounded-xl p-3.5 sm:p-4 space-y-3 overflow-hidden">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 text-xs text-[#848E9C]">
+              <Wallet className="w-3.5 h-3.5 text-[#01BC8D] shrink-0" />
+              <span className="font-semibold">إجمالي الأصول</span>
+              <span aria-hidden="true">·</span>
+              <span className={isKucoinAuth ? 'text-[#01BC8D] font-semibold' : 'text-[#848E9C]'}>
+                {isKucoinAuth ? 'حقيقي KuCoin' : 'افتراضي'}
+              </span>
             </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-xs sm:text-sm text-[#8A99AD] font-semibold">
-                  رصيد كوكوين الإجمالي
-                </span>
-                <span
-                  className={`text-[11px] font-semibold shrink-0 ${
-                    isKucoinAuth ? 'text-[#01BC8D]' : 'text-[#8A99AD]'
-                  }`}
-                >
-                  · {isKucoinAuth ? 'حساب KuCoin حقيقي' : 'وضع التداول الافتراضي'}
-                </span>
-              </div>
-              <div className="flex items-baseline gap-2.5 mt-1 flex-wrap">
-                <span
-                  dir="ltr"
-                  className="text-2xl sm:text-3xl font-bold text-white font-mono tabular-nums tracking-tight"
-                >
-                  {totalKucoinUsdt.toLocaleString('en-US', {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}{' '}
-                  <span className="text-sm text-[#01BC8D] font-bold">USDT</span>
-                </span>
-                <span
-                  dir="ltr"
-                  className={`text-xs font-mono font-bold px-2 py-0.5 rounded-lg shrink-0 ${
-                    unrealizedPnl >= 0
-                      ? 'bg-[#0D2B24] text-[#01BC8D]'
-                      : 'bg-[#2B1216] text-[#F6465D]'
-                  }`}
-                >
-                  PNL {unrealizedPnl >= 0 ? '+' : '-'}
-                  ${Math.abs(unrealizedPnl).toFixed(2)}
-                </span>
-              </div>
+            <div className="flex items-baseline gap-2.5 mt-1 flex-wrap">
+              <span
+                dir="ltr"
+                className="text-2xl sm:text-[28px] font-bold text-white font-mono tabular-nums tracking-tight"
+              >
+                {totalKucoinUsdt.toLocaleString('en-US', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}{' '}
+                <span className="text-xs sm:text-sm text-[#848E9C] font-semibold">USDT</span>
+              </span>
+              <span
+                dir="ltr"
+                className={`text-xs font-mono font-bold tabular-nums ${
+                  unrealizedPnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F65454]'
+                }`}
+              >
+                {unrealizedPnl >= 0 ? '+' : '-'}${Math.abs(unrealizedPnl).toFixed(2)} PNL
+              </span>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-start sm:self-center shrink-0 flex-wrap">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={handleFetchRealBalanceClick}
               disabled={kucoinConnectionState.isTesting}
               data-testid="fetch_real_kucoin_balance_btn"
-              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3.5 py-2.5 rounded-xl text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-2 rounded-lg text-xs flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
             >
               <RefreshCw
                 className={`w-3.5 h-3.5 shrink-0 ${
                   kucoinConnectionState.isTesting ? 'animate-spin' : ''
                 }`}
               />
-              <span>جلب الرصيد الحقيقي</span>
+              <span>تحديث الرصيد</span>
             </button>
 
             <button
               type="button"
               onClick={onOpenKucoinSetup}
-              className="bg-[#161D26] hover:bg-[#1E2733] border border-[#1E2733] text-[#F0F4F8] font-semibold px-3.5 py-2.5 rounded-xl text-xs transition-colors cursor-pointer"
+              className="bg-[#161C24] hover:bg-[#1C232D] border border-[#1C232D] text-[#F0F4F8] font-semibold px-3 py-2 rounded-lg text-xs transition-colors cursor-pointer whitespace-nowrap"
             >
-              إعدادات كوكوين
+              كوكوين
             </button>
           </div>
         </div>
@@ -512,7 +559,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         {realBalanceFeedback && (
           <div
             data-testid="real_kucoin_balance_feedback"
-            className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl px-3.5 py-2.5 text-xs text-[#01BC8D] font-bold flex items-center justify-between gap-2 animate-in fade-in duration-150"
+            className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-lg px-3 py-2 text-xs text-[#01BC8D] font-semibold flex items-center justify-between gap-2"
           >
             <span>{realBalanceFeedback}</span>
             <span dir="ltr" className="font-mono text-white shrink-0 tabular-nums">
@@ -525,149 +572,89 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           </div>
         )}
 
-        {/* Detailed KuCoin Balance Breakdown */}
-        <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 sm:p-3.5 space-y-3">
-          <div className="flex items-center justify-between gap-2 text-xs">
-            <div className="flex items-center gap-2 min-w-0">
-              <Layers className="w-4 h-4 text-[#01BC8D] shrink-0" />
-              <h3 className="font-bold text-white truncate">
-                تفصيل أرصدة محفظة كوكوين
-              </h3>
+        {/* Compact Hairline Balance Breakdown */}
+        {isKucoinAuth ? (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2.5 border-t border-[#1C232D] text-xs">
+            <div>
+              <span className="text-[11px] text-[#848E9C] block">الفيوتشر</span>
+              <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
+                {futuresBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
+              </span>
             </div>
-            <span className="text-[11px] text-[#8A99AD] font-mono whitespace-nowrap shrink-0 tabular-nums">
-              المراكز النشطة: <strong className="text-white">{kucoinConnectionState.positions.length}</strong>
+            <div>
+              <span className="text-[11px] text-[#848E9C] block">السبوت</span>
+              <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
+                {spotBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
+              </span>
+            </div>
+            <div>
+              <span className="text-[11px] text-[#848E9C] block">التمويل</span>
+              <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
+                {mainBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
+              </span>
+            </div>
+            <div>
+              <span className="text-[11px] text-[#848E9C] block">المتاح</span>
+              <span dir="ltr" className="font-mono font-bold text-[#01BC8D] tabular-nums">
+                {availableKucoinUsdt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-[#1C232D] text-xs">
+            <div>
+              <span className="text-[11px] text-[#848E9C] block">المتاح للتداول</span>
+              <span dir="ltr" className="font-mono font-bold text-[#01BC8D] tabular-nums">
+                {availableKucoinUsdt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $
+              </span>
+            </div>
+            <div>
+              <span className="text-[11px] text-[#848E9C] block">الهامش المحجوز</span>
+              <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
+                ${inOrderOrMargin.toFixed(2)}
+              </span>
+            </div>
+            <div>
+              <span className="text-[11px] text-[#848E9C] block">المراكز النشطة</span>
+              <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
+                {openPositionsCount} / {paperSnapshot?.settings?.maxConcurrentTrades ?? 5}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 2. أسعار العقود الآجلة */}
+      <div className="bg-[#12161C] border border-[#1C232D] rounded-xl p-3.5 sm:p-4 space-y-3 overflow-hidden">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Activity className="w-4 h-4 text-[#01BC8D] shrink-0" />
+            <h3 className="font-bold text-sm text-white truncate">أسعار العقود الآجلة</h3>
+            <span className="text-[11px] text-[#01BC8D] font-medium flex items-center gap-1 shrink-0 whitespace-nowrap">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#01BC8D]" />
+              <span>{wsStatus === 'CONNECTED' ? 'بث فوري' : 'مباشر'}</span>
             </span>
           </div>
 
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
-            {/* 1. Futures Balance */}
-            <div className="bg-[#12171D] border border-[#1E2733] rounded-xl p-3 flex flex-col justify-between">
-              <div className="flex items-center justify-between text-[11px] text-[#8A99AD]">
-                <span className="truncate">حساب الفيوتشر</span>
-                <span className="text-[10px] text-[#01BC8D] font-mono font-semibold">Futures</span>
-              </div>
-              <div
-                dir="ltr"
-                className="text-sm sm:text-base font-bold text-white font-mono tabular-nums mt-1 text-right truncate"
-              >
-                {futuresBalance.toLocaleString('en-US', {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}{' '}
-                <span className="text-[10px] text-[#8A99AD]">USDT</span>
-              </div>
-              <span className="text-[10px] text-[#8A99AD] block mt-0.5 truncate">
-                مخصص للعقود والنسخ
-              </span>
-            </div>
-
-            {/* 2. Spot Balance */}
-            <div className="bg-[#12171D] border border-[#1E2733] rounded-xl p-3 flex flex-col justify-between">
-              <div className="flex items-center justify-between text-[11px] text-[#8A99AD]">
-                <span className="truncate">حساب السبوت</span>
-                <span className="text-[10px] text-[#8A99AD] font-mono font-semibold">Spot</span>
-              </div>
-              <div
-                dir="ltr"
-                className="text-sm sm:text-base font-bold text-white font-mono tabular-nums mt-1 text-right truncate"
-              >
-                {spotBalance.toLocaleString('en-US', {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}{' '}
-                <span className="text-[10px] text-[#8A99AD]">USDT</span>
-              </div>
-              <span className="text-[10px] text-[#8A99AD] block mt-0.5 truncate">
-                التداول الفوري
-              </span>
-            </div>
-
-            {/* 3. Main / Funding */}
-            <div className="bg-[#12171D] border border-[#1E2733] rounded-xl p-3 flex flex-col justify-between">
-              <div className="flex items-center justify-between text-[11px] text-[#8A99AD]">
-                <span className="truncate">حساب التمويل</span>
-                <span className="text-[10px] text-[#38BDF8] font-mono font-semibold">Funding</span>
-              </div>
-              <div
-                dir="ltr"
-                className="text-sm sm:text-base font-bold text-white font-mono tabular-nums mt-1 text-right truncate"
-              >
-                {mainBalance.toLocaleString('en-US', {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}{' '}
-                <span className="text-[10px] text-[#8A99AD]">USDT</span>
-              </div>
-              <span className="text-[10px] text-[#8A99AD] block mt-0.5 truncate">
-                الإيداع والسحب
-              </span>
-            </div>
-
-            {/* 4. Available */}
-            <div className="bg-[#12171D] border border-[#1E2733] rounded-xl p-3 flex flex-col justify-between">
-              <div className="flex items-center justify-between text-[11px] text-[#8A99AD]">
-                <span className="truncate">المتاح للتداول</span>
-                <span className="text-[10px] text-[#01BC8D] font-mono font-semibold">Available</span>
-              </div>
-              <div
-                dir="ltr"
-                className="text-sm sm:text-base font-bold text-[#01BC8D] font-mono tabular-nums mt-1 text-right truncate"
-              >
-                {availableKucoinUsdt.toLocaleString('en-US', {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}{' '}
-                <span className="text-[10px] text-[#8A99AD]">USDT</span>
-              </div>
-              <span className="text-[10px] text-[#8A99AD] font-mono block mt-0.5 truncate">
-                محجوز:{' '}
-                <span dir="ltr" className="inline-block tabular-nums">
-                  ${inOrderOrMargin.toFixed(2)}
-                </span>
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 2. أسعار العقود الآجلة الحية */}
-      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-3.5 overflow-hidden">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-          <div className="flex items-center gap-2.5">
-            <Activity className="w-5 h-5 text-[#01BC8D] shrink-0" />
-            <div>
-              <h3 className="font-bold text-sm sm:text-base text-white flex items-center gap-2 flex-wrap">
-                <span>أسعار العقود الآجلة الحية</span>
-                <span className="text-[11px] text-[#01BC8D] font-semibold flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#01BC8D]" />
-                  <span>مباشر 24س</span>
-                </span>
-              </h3>
-              <p className="text-[11px] text-[#8A99AD]">
-                اضغط على أي عملة لعرض الشارت بالشموع اليابانية.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 self-start sm:self-center shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
               onClick={() => setShowAddCoinPanel(!showAddCoinPanel)}
               data-testid="toggle_add_coin_btn"
-              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+              className="bg-[#161C24] hover:bg-[#1C232D] border border-[#1C232D] text-[#01BC8D] font-bold px-2.5 py-1.5 rounded-lg text-xs flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
             >
-              <Plus className="w-4 h-4" />
-              <span>{showAddCoinPanel ? 'إغلاق الإضافة' : 'إضافة عملة'}</span>
+              <Plus className="w-3.5 h-3.5" />
+              <span>{showAddCoinPanel ? 'إغلاق' : 'عملة'}</span>
             </button>
             <button
               type="button"
               onClick={onRefreshMarket}
               data-testid="refresh_market_button"
-              className="p-2 rounded-xl bg-[#161D26] hover:bg-[#1E2733] border border-[#1E2733] text-[#01BC8D] transition-colors cursor-pointer"
+              className="p-1.5 rounded-lg bg-[#161C24] hover:bg-[#1C232D] border border-[#1C232D] text-[#848E9C] hover:text-white transition-colors cursor-pointer"
               title="تحديث الأسعار"
             >
               <RefreshCw
-                className={`w-4 h-4 ${connectionState.isTesting ? 'animate-spin' : ''}`}
+                className={`w-3.5 h-3.5 ${connectionState.isTesting ? 'animate-spin' : ''}`}
               />
             </button>
           </div>
@@ -1355,49 +1342,31 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
         data-testid="dashboard_manual_trading_terminal"
         className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4 overflow-hidden"
       >
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#1E2733] pb-3.5">
-          <div className="flex items-center gap-2.5">
-            <div className="w-10 h-10 rounded-xl bg-[#0D2B24] border border-[#01BC8D]/40 flex items-center justify-center text-[#01BC8D] shrink-0">
-              <Sliders className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="font-bold text-sm sm:text-base text-white">
-                  منصة التداول اليدوي المتقدم
-                </h3>
-                <span
-                  className={`text-[10px] font-bold px-2 py-0.5 rounded-md font-mono ${
-                    isRealMode
-                      ? 'bg-[#01BC8D]/20 text-[#01BC8D] border border-[#01BC8D]/40'
-                      : 'bg-[#161D26] text-[#8A99AD] border border-[#232E3A]'
-                  }`}
-                >
-                  {isRealMode ? 'تنفيذ حقيقي KuCoin' : 'محاكاة وتداول افتراضي'}
-                </span>
-              </div>
-              <p className="text-[11px] text-[#8A99AD] mt-0.5">
-                تحكم كامل في السعر (سوق/مخصص)، وقف الخسارة (SL)، الهدف وجني الأرباح (TP)، الرافعة المالية، وقيمة الهامش
-              </p>
-            </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1C232D] pb-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <Sliders className="w-4 h-4 text-[#01BC8D] shrink-0" />
+            <h3 className="font-bold text-sm sm:text-base text-white whitespace-nowrap">
+              التداول اليدوي
+            </h3>
+            <span className="text-[11px] text-[#848E9C] whitespace-nowrap">
+              · {isRealMode ? 'حقيقي' : 'افتراضي'}
+            </span>
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 flex-wrap">
             {accounts.length > 0 && onSelectAccount && (
-              <div className="flex items-center gap-1.5 bg-[#0B0E11] border border-[#232E3A] rounded-xl px-2.5 py-1.5 text-xs">
-                <span className="text-[#8A99AD] text-[11px]">الحساب:</span>
-                <select
-                  data-testid="dashboard_manual_account_select"
-                  value={activeAccountId}
-                  onChange={(e) => onSelectAccount(e.target.value)}
-                  className="bg-transparent text-white font-bold focus:outline-none cursor-pointer text-xs"
-                >
-                  {accounts.map((acc) => (
-                    <option key={acc.id} value={acc.id} className="bg-[#12171D] text-white">
-                      {acc.name} ({acc.availableBalance.toFixed(1)} USDT)
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <select
+                data-testid="dashboard_manual_account_select"
+                value={activeAccountId}
+                onChange={(e) => onSelectAccount(e.target.value)}
+                className="bg-[#0B0E11] border border-[#1C232D] text-white font-semibold focus:outline-none focus:border-[#01BC8D] cursor-pointer text-xs rounded-lg px-2.5 py-1.5"
+              >
+                {accounts.map((acc) => (
+                  <option key={acc.id} value={acc.id} className="bg-[#12161C] text-white">
+                    {acc.name} ({acc.availableBalance.toFixed(0)}$)
+                  </option>
+                ))}
+              </select>
             )}
 
             {onNavigateToTrading && (
@@ -1405,66 +1374,63 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 type="button"
                 data-testid="dashboard_go_to_positions_btn"
                 onClick={onNavigateToTrading}
-                className="bg-[#161D26] hover:bg-[#1E2733] border border-[#232E3A] text-[#01BC8D] font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                className="bg-[#161C24] hover:bg-[#1C232D] border border-[#1C232D] text-[#01BC8D] font-bold px-2.5 py-1.5 rounded-lg text-xs flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap"
               >
                 <Layers className="w-3.5 h-3.5" />
-                <span>المراكز المفتوحة ({openPositionsCount})</span>
+                <span>المراكز ({openPositionsCount})</span>
               </button>
             )}
           </div>
         </div>
 
-        <form onSubmit={handleExecuteManualTrade} className="space-y-4">
-          {/* Row 1: Symbol Selection & Direction (LONG / SHORT) */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-            {/* Symbol Picker */}
-            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-[#8A99AD] font-semibold">زوج العملة (مرتبط بالشارت)</span>
+        <form onSubmit={handleExecuteManualTrade} className="space-y-3">
+          {/* Row 1: Symbol & Side (KuCoin Futures Segmented Tabs) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[#848E9C]">الزوج</span>
                 <span dir="ltr" className="text-[#01BC8D] font-mono font-bold tabular-nums">
-                  السعر الحي: {liveSymbolPrice.toLocaleString('en-US', { maximumFractionDigits: 6 })} USDT
+                  {liveSymbolPrice.toLocaleString('en-US', { maximumFractionDigits: 6 })} USDT
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <RealCoinIcon symbol={selectedChartSymbol} size="md" />
-                <select
-                  data-testid="dashboard_manual_symbol_select"
-                  value={selectedChartSymbol}
-                  onChange={(e) => setSelectedChartSymbol(e.target.value)}
-                  className="flex-1 bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] focus:outline-none rounded-xl px-3 py-2 text-xs sm:text-sm text-white font-mono font-bold cursor-pointer"
-                >
-                  {Array.from(
-                    new Set([
-                      ...connectionState.tickers.map((t) => t.symbol),
-                      'BTCUSDT',
-                      'ETHUSDT',
-                      'SOLUSDT',
-                      'BNBUSDT',
-                      'XRPUSDT',
-                      'DOGEUSDT',
-                      'ADAUSDT',
-                      'SUIUSDT',
-                      'AVAXUSDT',
-                      'LINKUSDT',
-                    ])
-                  ).map((sym) => (
-                    <option key={sym} value={sym} className="bg-[#12171D] text-white">
-                      {sym}
-                    </option>
-                  ))}
-                </select>
+                <RealCoinIcon symbol={selectedChartSymbol} size="sm" />
+                <div className="relative flex-1" dir="ltr">
+                  <select
+                    data-testid="dashboard_manual_symbol_select"
+                    dir="ltr"
+                    value={selectedChartSymbol}
+                    onChange={(e) => setSelectedChartSymbol(e.target.value)}
+                    className="w-full appearance-none bg-[#0B0E11] border border-[#1C232D] focus:border-[#01BC8D] focus:outline-none rounded-lg pl-3 pr-8 py-2 text-xs sm:text-sm text-white font-sans font-bold tracking-normal cursor-pointer text-left"
+                  >
+                    {Array.from(
+                      new Set([
+                        ...connectionState.tickers.map((t) => t.symbol),
+                        'BTCUSDT',
+                        'ETHUSDT',
+                        'SOLUSDT',
+                        'BNBUSDT',
+                        'XRPUSDT',
+                        'DOGEUSDT',
+                        'ADAUSDT',
+                        'SUIUSDT',
+                        'AVAXUSDT',
+                        'LINKUSDT',
+                      ])
+                    ).map((sym) => (
+                      <option key={sym} value={sym} className="bg-[#12161C] text-white">
+                        {sym}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="w-4 h-4 text-[#848E9C] pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2" />
+                </div>
               </div>
             </div>
 
-            {/* Side Selector (LONG / SHORT) */}
-            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-[#8A99AD] font-semibold">اتجاه الصفقة (Side)</span>
-                <span className="text-[11px] text-[#8A99AD] font-mono">
-                  {manualSide === 'LONG' ? 'ربح عند صعود السعر ↑' : 'ربح عند هبوط السعر ↓'}
-                </span>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-1.5">
+              <span className="text-[11px] text-[#848E9C] block">الاتجاه</span>
+              <div className="grid grid-cols-2 gap-1.5 p-0.5 bg-[#0B0E11] border border-[#1C232D] rounded-lg">
                 <button
                   type="button"
                   data-testid="dashboard_manual_side_long"
@@ -1472,14 +1438,14 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                     setManualSide('LONG');
                     setManualOrderError(null);
                   }}
-                  className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  className={`py-2 px-3 rounded-md text-xs font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
                     manualSide === 'LONG'
-                      ? 'bg-[#01BC8D] text-[#0B0E11] shadow-[0_0_14px_rgba(1,188,141,0.3)]'
-                      : 'bg-[#12171D] text-[#8A99AD] hover:text-white border border-[#232E3A]'
+                      ? 'bg-[#01BC8D] text-[#0B0E11]'
+                      : 'text-[#848E9C] hover:text-white'
                   }`}
                 >
-                  <ArrowUpRight className="w-4 h-4" />
-                  <span>شراء / LONG</span>
+                  <ArrowUpRight className="w-3.5 h-3.5" />
+                  <span>شراء Long</span>
                 </button>
                 <button
                   type="button"
@@ -1488,28 +1454,26 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                     setManualSide('SHORT');
                     setManualOrderError(null);
                   }}
-                  className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  className={`py-2 px-3 rounded-md text-xs font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
                     manualSide === 'SHORT'
-                      ? 'bg-[#F6465D] text-white shadow-[0_0_14px_rgba(246,70,93,0.3)]'
-                      : 'bg-[#12171D] text-[#8A99AD] hover:text-white border border-[#232E3A]'
+                      ? 'bg-[#F65454] text-white'
+                      : 'text-[#848E9C] hover:text-white'
                   }`}
                 >
-                  <ArrowDownRight className="w-4 h-4" />
-                  <span>بيع / SHORT</span>
+                  <ArrowDownRight className="w-3.5 h-3.5" />
+                  <span>بيع Short</span>
                 </button>
               </div>
             </div>
           </div>
 
-          {/* Row 2: Entry Price Control (Market vs Custom Price) & Leverage Control */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+          {/* Row 2: Price Mode, Margin & Leverage */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             {/* Price Control */}
-            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3.5 space-y-2.5">
+            <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2">
-                <label className="text-xs font-bold text-white">
-                  تحكم السعر (Entry Price)
-                </label>
-                <div className="flex items-center bg-[#12171D] border border-[#232E3A] rounded-lg p-0.5 text-[11px]">
+                <span className="text-[11px] text-[#848E9C]">السعر</span>
+                <div className="flex items-center bg-[#0B0E11] border border-[#1C232D] rounded-md p-0.5 text-[10px]">
                   <button
                     type="button"
                     data-testid="dashboard_price_mode_market"
@@ -1517,13 +1481,13 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                       setPriceMode('MARKET');
                       setCustomPriceInput(String(liveSymbolPrice));
                     }}
-                    className={`px-2.5 py-1 rounded-md font-bold cursor-pointer transition-colors ${
+                    className={`px-2 py-0.5 rounded font-bold cursor-pointer transition-colors whitespace-nowrap ${
                       priceMode === 'MARKET'
                         ? 'bg-[#01BC8D] text-[#0B0E11]'
-                        : 'text-[#8A99AD] hover:text-white'
+                        : 'text-[#848E9C] hover:text-white'
                     }`}
                   >
-                    سعر السوق الحي
+                    سوق
                   </button>
                   <button
                     type="button"
@@ -1532,13 +1496,13 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                       setPriceMode('CUSTOM');
                       if (!customPriceInput) setCustomPriceInput(String(liveSymbolPrice));
                     }}
-                    className={`px-2.5 py-1 rounded-md font-bold cursor-pointer transition-colors ${
+                    className={`px-2 py-0.5 rounded font-bold cursor-pointer transition-colors whitespace-nowrap ${
                       priceMode === 'CUSTOM'
                         ? 'bg-[#01BC8D] text-[#0B0E11]'
-                        : 'text-[#8A99AD] hover:text-white'
+                        : 'text-[#848E9C] hover:text-white'
                     }`}
                   >
-                    سعر مخصص
+                    محدد
                   </button>
                 </div>
               </div>
@@ -1554,25 +1518,12 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                     setPriceMode('CUSTOM');
                     setCustomPriceInput(e.target.value);
                   }}
-                  className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-sm text-white font-mono font-bold focus:outline-none"
+                  className="w-full bg-[#0B0E11] border border-[#1C232D] focus:border-[#01BC8D] rounded-lg px-2.5 py-2 text-xs sm:text-sm text-white font-mono font-bold focus:outline-none tabular-nums"
                 />
-                <span className="absolute left-3 text-[11px] font-mono text-[#8A99AD]">
-                  USDT
-                </span>
+                <span className="absolute left-2.5 text-[10px] font-mono text-[#848E9C]">USDT</span>
               </div>
 
-              <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-                <span className="text-[#8A99AD]">تعديل سريع للسعر:</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPriceMode('MARKET');
-                    setCustomPriceInput(String(liveSymbolPrice));
-                  }}
-                  className="px-2 py-0.5 rounded bg-[#12171D] hover:bg-[#1E2733] text-[#01BC8D] border border-[#232E3A] font-mono cursor-pointer"
-                >
-                  سعر السوق ({liveSymbolPrice})
-                </button>
+              <div className="flex flex-wrap items-center gap-1 text-[10px]">
                 {[-1, -0.5, 0.5, 1].map((deltaPct) => (
                   <button
                     key={deltaPct}
@@ -1584,7 +1535,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                       const nextP = Number((base * (1 + deltaPct / 100)).toFixed(decimals));
                       setCustomPriceInput(String(nextP));
                     }}
-                    className="px-2 py-0.5 rounded bg-[#12171D] hover:bg-[#1E2733] text-[#8A99AD] hover:text-white border border-[#232E3A] font-mono cursor-pointer"
+                    className="px-1.5 py-0.5 rounded bg-[#0B0E11] hover:bg-[#1C232D] text-[#848E9C] hover:text-white border border-[#1C232D] font-mono cursor-pointer tabular-nums"
                   >
                     {deltaPct > 0 ? `+${deltaPct}%` : `${deltaPct}%`}
                   </button>
@@ -1592,13 +1543,70 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
               </div>
             </div>
 
+            {/* Margin Control */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[#848E9C]">الهامش</span>
+                <span dir="ltr" className="font-mono text-[#848E9C] tabular-nums">
+                  متاح {(activeAccountSummary?.availableBalance ?? availableKucoinUsdt).toFixed(0)}$
+                </span>
+              </div>
+
+              <div className="relative flex items-center">
+                <input
+                  type="number"
+                  min="1"
+                  step="any"
+                  data-testid="dashboard_manual_margin_input"
+                  value={manualMarginInput}
+                  onChange={(e) => setManualMarginInput(e.target.value)}
+                  className="w-full bg-[#0B0E11] border border-[#1C232D] focus:border-[#01BC8D] rounded-lg px-2.5 py-2 text-xs sm:text-sm text-white font-mono font-bold focus:outline-none tabular-nums"
+                />
+                <span className="absolute left-2.5 text-[10px] font-mono text-[#01BC8D] font-bold">
+                  USDT
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1 text-[10px]">
+                {[10, 25, 50, 100].map((amt) => (
+                  <button
+                    key={amt}
+                    type="button"
+                    onClick={() => setManualMarginInput(String(amt))}
+                    className={`px-1.5 py-0.5 rounded font-mono font-bold cursor-pointer tabular-nums ${
+                      parsedMarginUsdt === amt
+                        ? 'bg-[#01BC8D] text-[#0B0E11]'
+                        : 'bg-[#0B0E11] text-[#848E9C] hover:text-white border border-[#1C232D]'
+                    }`}
+                  >
+                    {amt}$
+                  </button>
+                ))}
+                {[25, 50].map((pct) => (
+                  <button
+                    key={`bal_${pct}`}
+                    type="button"
+                    onClick={() => {
+                      const avail = Math.max(
+                        1,
+                        activeAccountSummary?.availableBalance ?? availableKucoinUsdt
+                      );
+                      const target = Math.max(1, Number(((avail * (pct / 100)) * 0.98).toFixed(1)));
+                      setManualMarginInput(String(target));
+                    }}
+                    className="px-1.5 py-0.5 rounded bg-[#0B0E11] hover:bg-[#1C232D] text-[#01BC8D] border border-[#1C232D] font-mono cursor-pointer tabular-nums"
+                  >
+                    {pct}%
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Leverage Control */}
-            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <label className="text-xs font-bold text-white">
-                  الرافعة المالية (Leverage)
-                </label>
-                <div className="flex items-center gap-1.5">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[#848E9C]">الرافعة</span>
+                <div className="flex items-center gap-1">
                   <input
                     type="number"
                     min={1}
@@ -1611,7 +1619,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                         Math.max(1, Math.min(125, Math.round(Number(e.target.value) || 1)))
                       )
                     }
-                    className="w-16 bg-[#12171D] border border-[#01BC8D]/50 rounded-lg px-2 py-1 text-xs font-mono font-bold text-[#01BC8D] text-center focus:outline-none"
+                    className="w-12 bg-[#0B0E11] border border-[#01BC8D]/40 rounded px-1.5 py-0.5 text-xs font-mono font-bold text-[#01BC8D] text-center focus:outline-none tabular-nums"
                   />
                   <span className="text-xs font-mono font-bold text-[#01BC8D]">x</span>
                 </div>
@@ -1623,20 +1631,20 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 max={125}
                 value={manualLeverage}
                 onChange={(e) => setManualLeverage(Number(e.target.value))}
-                className="w-full accent-[#01BC8D] cursor-pointer h-1.5 bg-[#12171D] rounded-lg"
+                className="w-full accent-[#01BC8D] cursor-pointer h-1.5 bg-[#0B0E11] rounded-lg my-2"
               />
 
-              <div className="flex flex-wrap items-center gap-1.5">
-                {[2, 5, 10, 20, 30, 50, 75, 100, 125].map((lev) => (
+              <div className="flex flex-wrap items-center gap-1">
+                {[2, 5, 10, 20, 50, 100].map((lev) => (
                   <button
                     key={lev}
                     type="button"
                     data-testid={`dashboard_leverage_preset_${lev}`}
                     onClick={() => setManualLeverage(lev)}
-                    className={`px-2 py-0.5 rounded-lg text-[11px] font-mono font-bold cursor-pointer transition-colors ${
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold cursor-pointer transition-colors tabular-nums ${
                       manualLeverage === lev
                         ? 'bg-[#01BC8D] text-[#0B0E11]'
-                        : 'bg-[#12171D] text-[#8A99AD] hover:text-white border border-[#232E3A]'
+                        : 'bg-[#0B0E11] text-[#848E9C] hover:text-white border border-[#1C232D]'
                     }`}
                   >
                     {lev}x
@@ -1646,228 +1654,226 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
             </div>
           </div>
 
-          {/* Row 3: Margin Size (USDT), Stop Loss (SL), and Take Profit (Target TP) */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
-            {/* 1. Margin Size Control */}
-            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-white">قيمة الهامش (Margin USDT)</span>
-                <span dir="ltr" className="text-[11px] font-mono text-[#8A99AD] tabular-nums">
-                  المتاح: {(activeAccountSummary?.availableBalance ?? availableKucoinUsdt).toFixed(2)}$
-                </span>
-              </div>
-
-              <div className="relative flex items-center">
-                <input
-                  type="number"
-                  min="1"
-                  step="any"
-                  data-testid="dashboard_manual_margin_input"
-                  value={manualMarginInput}
-                  onChange={(e) => setManualMarginInput(e.target.value)}
-                  className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-xl px-3 py-2 text-sm text-white font-mono font-bold focus:outline-none"
-                />
-                <span className="absolute left-3 text-[11px] font-mono text-[#01BC8D] font-bold">
-                  USDT
-                </span>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-1 text-[10px]">
-                {[10, 25, 50, 100, 250].map((amt) => (
-                  <button
-                    key={amt}
-                    type="button"
-                    onClick={() => setManualMarginInput(String(amt))}
-                    className={`px-2 py-0.5 rounded font-mono font-bold cursor-pointer ${
-                      parsedMarginUsdt === amt
-                        ? 'bg-[#01BC8D] text-[#0B0E11]'
-                        : 'bg-[#12171D] text-[#8A99AD] hover:text-white border border-[#232E3A]'
-                    }`}
-                  >
-                    {amt}$
-                  </button>
-                ))}
-                {[25, 50, 100].map((pct) => (
-                  <button
-                    key={`bal_${pct}`}
-                    type="button"
-                    onClick={() => {
-                      const avail = Math.max(
-                        1,
-                        activeAccountSummary?.availableBalance ?? availableKucoinUsdt
-                      );
-                      const target = Math.max(1, Number(((avail * (pct / 100)) * 0.98).toFixed(1)));
-                      setManualMarginInput(String(target));
-                    }}
-                    className="px-2 py-0.5 rounded bg-[#161D26] hover:bg-[#1E2733] text-[#01BC8D] border border-[#01BC8D]/30 font-mono cursor-pointer"
-                  >
-                    {pct}% رصيد
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* 2. Stop Loss (وقف الخسارة SL) */}
-            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-white flex items-center gap-1.5">
-                  <ShieldAlert className="w-3.5 h-3.5 text-[#F6465D]" />
-                  <span>وقف الخسارة (Stop Loss)</span>
-                </span>
-                {orderPreview.estimatedLossAtSlUsdt !== null && (
-                  <span dir="ltr" className="text-[11px] font-mono font-bold text-[#F6465D] tabular-nums">
-                    {orderPreview.estimatedLossAtSlUsdt.toFixed(2)}$ ({orderPreview.estimatedLossAtSlRoePercent}%)
+          {/* Collapsible TP / SL / Trailing Stop Section (KuCoin Futures Style) */}
+          <div className="border-t border-[#1C232D] pt-2.5">
+            <button
+              type="button"
+              data-testid="dashboard_toggle_tpsl_btn"
+              onClick={() => setShowRiskControls(!showRiskControls)}
+              className="w-full flex items-center justify-between text-xs text-[#D1D9E6] hover:text-white cursor-pointer py-1"
+            >
+              <span className="flex items-center gap-2 font-semibold">
+                <Target className="w-3.5 h-3.5 text-[#01BC8D]" />
+                <span>إعداد TP / SL / Trailing</span>
+                {(parsedSlPrice || parsedTpPrice || parsedTrailingStopPct) && (
+                  <span dir="ltr" className="text-[11px] font-mono text-[#01BC8D] tabular-nums">
+                    {[
+                      parsedSlPrice ? `SL ${parsedSlPrice}` : null,
+                      parsedTpPrice ? `TP ${parsedTpPrice}` : null,
+                      parsedTrailingStopPct ? `Trail ${parsedTrailingStopPct}%` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
                   </span>
                 )}
-              </div>
+              </span>
+              {showRiskControls ? (
+                <ChevronUp className="w-4 h-4 text-[#848E9C]" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-[#848E9C]" />
+              )}
+            </button>
 
-              <div className="relative flex items-center">
-                <input
-                  type="number"
-                  step="any"
-                  min="0"
-                  placeholder={
-                    manualSide === 'LONG'
-                      ? `أقل من ${effectiveEntryPrice} (اختياري)`
-                      : `أعلى من ${effectiveEntryPrice} (اختياري)`
-                  }
-                  data-testid="dashboard_manual_sl_input"
-                  value={stopLossInput}
-                  onChange={(e) => {
-                    setStopLossInput(e.target.value);
-                    setManualOrderError(null);
-                  }}
-                  className={`w-full bg-[#12171D] border rounded-xl px-3 py-2 text-sm text-white font-mono font-bold focus:outline-none ${
-                    !orderPreview.stopLossValid
-                      ? 'border-[#F6465D]'
-                      : stopLossInput
-                      ? 'border-[#F6465D]/60 focus:border-[#F6465D]'
-                      : 'border-[#232E3A] focus:border-[#F6465D]'
-                  }`}
-                />
-                {stopLossInput && (
-                  <button
-                    type="button"
-                    onClick={() => setStopLossInput('')}
-                    className="absolute left-2 text-[10px] text-[#8A99AD] hover:text-white bg-[#1A222B] px-1.5 py-0.5 rounded cursor-pointer"
-                  >
-                    مسح
-                  </button>
-                )}
-              </div>
+            {showRiskControls && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-2.5 pt-2.5 border-t border-[#1C232D]/70">
+                {/* Stop Loss */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-semibold text-[#F65454] flex items-center gap-1">
+                      <ShieldAlert className="w-3 h-3" />
+                      <span>وقف الخسارة (SL)</span>
+                    </span>
+                    {orderPreview.estimatedLossAtSlUsdt !== null && (
+                      <span dir="ltr" className="font-mono font-bold text-[#F65454] tabular-nums">
+                        {orderPreview.estimatedLossAtSlUsdt.toFixed(1)}$
+                      </span>
+                    )}
+                  </div>
+                  <div className="relative flex items-center">
+                    <input
+                      type="number"
+                      step="any"
+                      min="0"
+                      placeholder={manualSide === 'LONG' ? `< ${effectiveEntryPrice}` : `> ${effectiveEntryPrice}`}
+                      data-testid="dashboard_manual_sl_input"
+                      value={stopLossInput}
+                      onChange={(e) => {
+                        setStopLossInput(e.target.value);
+                        setManualOrderError(null);
+                      }}
+                      className={`w-full bg-[#0B0E11] border rounded-lg px-2.5 py-1.5 text-xs text-white font-mono font-bold focus:outline-none tabular-nums ${
+                        !orderPreview.stopLossValid
+                          ? 'border-[#F65454]'
+                          : 'border-[#1C232D] focus:border-[#F65454]'
+                      }`}
+                    />
+                    {stopLossInput && (
+                      <button
+                        type="button"
+                        onClick={() => setStopLossInput('')}
+                        className="absolute left-2 text-[10px] text-[#848E9C] hover:text-white cursor-pointer"
+                      >
+                        مسح
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1 text-[10px]">
+                    {[1, 2, 3, 5].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        data-testid={`dashboard_sl_preset_${pct}`}
+                        onClick={() => handleApplySlMovePreset(pct)}
+                        className="px-1.5 py-0.5 rounded bg-[#2B1216] text-[#F65454] font-mono font-bold cursor-pointer tabular-nums"
+                      >
+                        -{pct}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
-              <div className="flex flex-wrap items-center gap-1 text-[10px]">
-                <span className="text-[#8A99AD]">تحديد سريع:</span>
-                {[1, 2, 3, 5, 10].map((pct) => (
-                  <button
-                    key={pct}
-                    type="button"
-                    data-testid={`dashboard_sl_preset_${pct}`}
-                    onClick={() => handleApplySlMovePreset(pct)}
-                    className="px-2 py-0.5 rounded bg-[#2B1216] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/30 font-mono font-bold cursor-pointer"
-                  >
-                    -{pct}%
-                  </button>
-                ))}
-              </div>
-            </div>
+                {/* Take Profit */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-semibold text-[#01BC8D] flex items-center gap-1">
+                      <Target className="w-3 h-3" />
+                      <span>جني الأرباح (TP)</span>
+                    </span>
+                    {orderPreview.estimatedProfitAtTpUsdt !== null && (
+                      <span dir="ltr" className="font-mono font-bold text-[#01BC8D] tabular-nums">
+                        +{orderPreview.estimatedProfitAtTpUsdt.toFixed(1)}$
+                      </span>
+                    )}
+                  </div>
+                  <div className="relative flex items-center">
+                    <input
+                      type="number"
+                      step="any"
+                      min="0"
+                      placeholder={manualSide === 'LONG' ? `> ${effectiveEntryPrice}` : `< ${effectiveEntryPrice}`}
+                      data-testid="dashboard_manual_tp_input"
+                      value={takeProfitInput}
+                      onChange={(e) => {
+                        setTakeProfitInput(e.target.value);
+                        setManualOrderError(null);
+                      }}
+                      className={`w-full bg-[#0B0E11] border rounded-lg px-2.5 py-1.5 text-xs text-white font-mono font-bold focus:outline-none tabular-nums ${
+                        !orderPreview.takeProfitValid
+                          ? 'border-[#F65454]'
+                          : 'border-[#1C232D] focus:border-[#01BC8D]'
+                      }`}
+                    />
+                    {takeProfitInput && (
+                      <button
+                        type="button"
+                        onClick={() => setTakeProfitInput('')}
+                        className="absolute left-2 text-[10px] text-[#848E9C] hover:text-white cursor-pointer"
+                      >
+                        مسح
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1 text-[10px]">
+                    {[2, 5, 10, 20].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        data-testid={`dashboard_tp_preset_${pct}`}
+                        onClick={() => handleApplyTpMovePreset(pct)}
+                        className="px-1.5 py-0.5 rounded bg-[#0D2B24] text-[#01BC8D] font-mono font-bold cursor-pointer tabular-nums"
+                      >
+                        +{pct}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
-            {/* 3. Take Profit / Target (الهدف وجني الأرباح TP) */}
-            <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-white flex items-center gap-1.5">
-                  <Target className="w-3.5 h-3.5 text-[#01BC8D]" />
-                  <span>الهدف / جني الأرباح (TP)</span>
-                </span>
-                {orderPreview.estimatedProfitAtTpUsdt !== null && (
-                  <span dir="ltr" className="text-[11px] font-mono font-bold text-[#01BC8D] tabular-nums">
-                    +{orderPreview.estimatedProfitAtTpUsdt.toFixed(2)}$ (+{orderPreview.estimatedProfitAtTpRoePercent}%)
-                  </span>
-                )}
+                {/* Trailing Stop */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-semibold text-[#38BDF8] flex items-center gap-1">
+                      <Activity className="w-3 h-3" />
+                      <span>وقف متحرك (Trailing %)</span>
+                    </span>
+                  </div>
+                  <div className="relative flex items-center">
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="50"
+                      placeholder="مثال: 2%"
+                      data-testid="dashboard_manual_trailing_stop_input"
+                      value={trailingStopInput}
+                      onChange={(e) => setTrailingStopInput(e.target.value)}
+                      className="w-full bg-[#0B0E11] border border-[#1C232D] focus:border-[#38BDF8] rounded-lg px-2.5 py-1.5 text-xs text-white font-mono font-bold focus:outline-none tabular-nums"
+                    />
+                    {trailingStopInput && (
+                      <button
+                        type="button"
+                        onClick={() => setTrailingStopInput('')}
+                        className="absolute left-2 text-[10px] text-[#848E9C] hover:text-white cursor-pointer"
+                      >
+                        مسح
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1 text-[10px]">
+                    {[1, 2, 3].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => setTrailingStopInput(String(pct))}
+                        className={`px-1.5 py-0.5 rounded font-mono font-bold cursor-pointer tabular-nums ${
+                          parsedTrailingStopPct === pct
+                            ? 'bg-[#38BDF8] text-[#0B0E11]'
+                            : 'bg-[#0B0E11] text-[#848E9C] border border-[#1C232D] hover:text-white'
+                        }`}
+                      >
+                        {pct}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
-
-              <div className="relative flex items-center">
-                <input
-                  type="number"
-                  step="any"
-                  min="0"
-                  placeholder={
-                    manualSide === 'LONG'
-                      ? `أعلى من ${effectiveEntryPrice} (اختياري)`
-                      : `أقل من ${effectiveEntryPrice} (اختياري)`
-                  }
-                  data-testid="dashboard_manual_tp_input"
-                  value={takeProfitInput}
-                  onChange={(e) => {
-                    setTakeProfitInput(e.target.value);
-                    setManualOrderError(null);
-                  }}
-                  className={`w-full bg-[#12171D] border rounded-xl px-3 py-2 text-sm text-white font-mono font-bold focus:outline-none ${
-                    !orderPreview.takeProfitValid
-                      ? 'border-[#F6465D]'
-                      : takeProfitInput
-                      ? 'border-[#01BC8D]/60 focus:border-[#01BC8D]'
-                      : 'border-[#232E3A] focus:border-[#01BC8D]'
-                  }`}
-                />
-                {takeProfitInput && (
-                  <button
-                    type="button"
-                    onClick={() => setTakeProfitInput('')}
-                    className="absolute left-2 text-[10px] text-[#8A99AD] hover:text-white bg-[#1A222B] px-1.5 py-0.5 rounded cursor-pointer"
-                  >
-                    مسح
-                  </button>
-                )}
-              </div>
-
-              <div className="flex flex-wrap items-center gap-1 text-[10px]">
-                <span className="text-[#8A99AD]">تحديد سريع:</span>
-                {[2, 5, 10, 20, 50].map((pct) => (
-                  <button
-                    key={pct}
-                    type="button"
-                    data-testid={`dashboard_tp_preset_${pct}`}
-                    onClick={() => handleApplyTpMovePreset(pct)}
-                    className="px-2 py-0.5 rounded bg-[#0D2B24] hover:bg-[#01BC8D]/30 text-[#01BC8D] border border-[#01BC8D]/30 font-mono font-bold cursor-pointer"
-                  >
-                    +{pct}%
-                  </button>
-                ))}
-              </div>
-            </div>
+            )}
           </div>
 
-          {/* Live Order Metrics Summary Bar */}
-          <div className="bg-[#0B0E11] border border-[#1E2733] rounded-xl p-3 grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs font-mono">
+          {/* Compact Order Metrics Strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2.5 border-t border-[#1C232D] text-[11px]">
             <div>
-              <span className="text-[10px] text-[#8A99AD] font-sans block">الحجم الإجمالي بالرافعة</span>
-              <strong dir="ltr" className="text-white tabular-nums">
-                {orderPreview.notionalUsdt.toLocaleString('en-US', { maximumFractionDigits: 2 })} USDT
+              <span className="text-[#848E9C] block">الحجم بالرافعة</span>
+              <strong dir="ltr" className="text-white font-mono tabular-nums">
+                {orderPreview.notionalUsdt.toLocaleString('en-US', { maximumFractionDigits: 1 })} USDT
               </strong>
             </div>
             <div>
-              <span className="text-[10px] text-[#8A99AD] font-sans block">الكمية المقدرة</span>
-              <strong dir="ltr" className="text-[#01BC8D] tabular-nums">
+              <span className="text-[#848E9C] block">الكمية</span>
+              <strong dir="ltr" className="text-[#01BC8D] font-mono tabular-nums">
                 {orderPreview.quantity} {selectedChartSymbol.replace(/USDT$/, '')}
               </strong>
             </div>
             <div>
-              <span className="text-[10px] text-[#8A99AD] font-sans block">سعر التصفية التقريبي</span>
-              <strong dir="ltr" className="text-[#F59E0B] tabular-nums">
-                {orderPreview.estimatedLiquidationPrice} USDT
+              <span className="text-[#848E9C] block">التصفية Liq</span>
+              <strong dir="ltr" className="text-[#F59E0B] font-mono tabular-nums">
+                {orderPreview.estimatedLiquidationPrice}
               </strong>
             </div>
             <div>
-              <span className="text-[10px] text-[#8A99AD] font-sans block">العمولة المقدرة</span>
-              <strong dir="ltr" className="text-[#8A99AD] tabular-nums">
-                {orderPreview.commissionUsdt} USDT
-              </strong>
-            </div>
-            <div>
-              <span className="text-[10px] text-[#8A99AD] font-sans block">نسبة العائد للمخاطرة (R:R)</span>
-              <strong dir="ltr" className="text-[#01BC8D] tabular-nums">
-                {orderPreview.riskRewardRatio !== null ? `1 : ${orderPreview.riskRewardRatio}` : '--'}
+              <span className="text-[#848E9C] block">العمولة / R:R</span>
+              <strong dir="ltr" className="text-[#D1D9E6] font-mono tabular-nums">
+                {orderPreview.commissionUsdt}$ ·{' '}
+                {orderPreview.riskRewardRatio !== null ? `1:${orderPreview.riskRewardRatio}` : '--'}
               </strong>
             </div>
           </div>
@@ -1876,7 +1882,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           {(manualOrderError || !orderPreview.stopLossValid || !orderPreview.takeProfitValid) && (
             <div
               data-testid="dashboard_manual_order_error"
-              className="bg-[#2B1216] border border-[#F6465D]/50 rounded-xl px-3.5 py-2.5 text-xs text-[#F6465D] font-bold flex items-center gap-2"
+              className="bg-[#2B1216] border border-[#F65454]/50 rounded-lg px-3 py-2 text-xs text-[#F65454] font-semibold flex items-center gap-2"
             >
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <span>
@@ -1890,7 +1896,7 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           {manualOrderSuccess && (
             <div
               data-testid="dashboard_manual_order_success"
-              className="bg-[#0D2B24] border border-[#01BC8D]/50 rounded-xl px-3.5 py-2.5 text-xs text-[#01BC8D] font-bold flex items-center justify-between gap-2"
+              className="bg-[#0D2B24] border border-[#01BC8D]/50 rounded-lg px-3 py-2 text-xs text-[#01BC8D] font-semibold flex items-center justify-between gap-2"
             >
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 shrink-0" />
@@ -1900,22 +1906,22 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 <button
                   type="button"
                   onClick={onNavigateToTrading}
-                  className="underline text-white hover:text-[#01BC8D] shrink-0 cursor-pointer"
+                  className="underline text-white hover:text-[#01BC8D] shrink-0 cursor-pointer whitespace-nowrap"
                 >
-                  عرض الصفقة ↗
+                  المراكز ↗
                 </button>
               )}
             </div>
           )}
 
-          {/* Submit Manual Order Button */}
+          {/* Clean Single-Line KuCoin CTA Button */}
           <button
             type="submit"
             data-testid="dashboard_submit_manual_order_btn"
-            className={`w-full font-bold py-3 px-4 rounded-xl text-xs sm:text-sm transition-all cursor-pointer flex items-center justify-center gap-2 shadow-md ${
+            className={`w-full font-bold py-2.5 px-4 rounded-lg text-xs sm:text-sm transition-colors cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap ${
               manualSide === 'LONG'
                 ? 'bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11]'
-                : 'bg-[#F6465D] hover:bg-[#D9384E] text-white'
+                : 'bg-[#F65454] hover:bg-[#E04343] text-white'
             }`}
           >
             {manualSide === 'LONG' ? (
@@ -1924,13 +1930,26 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
               <ArrowDownRight className="w-4 h-4 shrink-0" />
             )}
             <span>
-              {isRealMode
-                ? `تنفيذ صفقة ${manualSide === 'LONG' ? 'شراء LONG' : 'بيع SHORT'} حقيقية على KuCoin (${selectedChartSymbol} • ${orderPreview.marginUsdt}$ × ${orderPreview.leverage}x @ ${orderPreview.entryPrice}$)`
-                : `فتح صفقة ${manualSide === 'LONG' ? 'شراء LONG' : 'بيع SHORT'} (${selectedChartSymbol} • ${orderPreview.marginUsdt}$ × ${orderPreview.leverage}x @ ${orderPreview.entryPrice}$)`}
+              {willQueueAsPendingLimit
+                ? `أمر محدد Limit · ${manualSide === 'LONG' ? 'شراء' : 'بيع'} ${selectedChartSymbol.replace('USDT', '')}`
+                : manualSide === 'LONG'
+                ? `شراء / فتح Long (${selectedChartSymbol.replace('USDT', '')})`
+                : `بيع / فتح Short (${selectedChartSymbol.replace('USDT', '')})`}
             </span>
           </button>
         </form>
       </div>
+
+      {/* Real Pending Limit Orders Card (shown beneath Manual Terminal whenever limit orders are active) */}
+      {(pendingLimitOrders || paperSnapshot?.pendingLimitOrders || []).length > 0 &&
+        onCancelPendingLimitOrder && (
+          <PendingLimitOrdersCard
+            orders={pendingLimitOrders || paperSnapshot?.pendingLimitOrders || []}
+            currentPrices={connectionState.allPrices || {}}
+            onCancelOrder={onCancelPendingLimitOrder}
+            compact
+          />
+        )}
     </div>
   );
 };

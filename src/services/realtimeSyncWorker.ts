@@ -2,20 +2,28 @@
  * Centralized Background Scheduler & Real-Time Sync Worker
  *
  * Manages all periodic synchronization tasks (copied-traders sync, market metadata refresh,
- * Service Worker heartbeats, and Android Native heartbeats) from a single coordinator.
+ * exchange ping probes, Service Worker heartbeats, and Android Native heartbeats) from a single coordinator.
  *
  * Key responsibilities:
  * 1. Properly cleans up (clearInterval) and reconfigures all interval handles whenever
  *    the app's visibilityState changes ('visible' <-> 'hidden'), preventing stacked timers,
  *    queued main-thread timer bursts, and resource conflicts.
  * 2. Pauses foreground-only tasks (such as heavy 24h market metadata polling) while hidden
- *    so background bandwidth and sockets are reserved exclusively for copied-trader execution.
- * 3. Coalesces/debounces wakeup events ('visibilitychange', 'focus', 'pageshow', 'online')
- *    so returning to the app triggers a single clean sync cycle instead of overlapping bursts.
- * 4. Tracks all registered event listeners and interval/worker handles for deterministic cleanup.
+ *    so background bandwidth and sockets are reserved exclusively for copied-trader & whale execution.
+ * 3. Detects OS sleep / Android Doze / iOS background clock drift inside both the dedicated
+ *    Blob Worker and main thread, firing an immediate urgent resync on wakeup.
+ * 4. Coalesces/debounces duplicate wakeup events ('visibilitychange', 'focus', 'pageshow', 'online')
+ *    while honoring urgent trade alerts ('SW_DETECTED_TRADE_UPDATE', 'SW_FORCE_SYNC_NOW', 'native_resume').
  */
 
+import { detectSleepWakeupDrift } from './syncResilience';
+
 export type AppVisibilityState = 'visible' | 'hidden';
+
+export interface SyncTickMeta {
+  reason: string;
+  urgent: boolean;
+}
 
 export interface ScheduledSyncTaskConfig {
   id: string;
@@ -24,13 +32,15 @@ export interface ScheduledSyncTaskConfig {
   runWhenHidden: boolean;
   runOnWakeup?: boolean;
   minDedupGapMs?: number;
-  onTick: () => void | Promise<void>;
+  onTick: (meta?: SyncTickMeta) => void | Promise<void>;
 }
 
 export interface CentralizedSchedulerOptions {
   shouldPauseAll?: () => boolean;
   onServiceWorkerNotificationClick?: (data: { accountId?: string | null; url?: string }) => void;
   onServiceWorkerHeartbeatAck?: () => void;
+  onVisibilityStateChange?: (state: AppVisibilityState) => void;
+  onWakeupSync?: (reason: string) => void;
   wakeupDebounceMs?: number;
   enableBlobWorker?: boolean;
 }
@@ -43,6 +53,7 @@ export interface SchedulerDiagnostics {
   activeListenerCount: number;
   workerActive: boolean;
   wakeupCount: number;
+  sleepDriftCount: number;
 }
 
 interface InternalTaskEntry extends ScheduledSyncTaskConfig {
@@ -59,6 +70,8 @@ export class CentralizedSyncScheduler {
   private visibilityState: AppVisibilityState = 'visible';
   private lastWakeupAt: number = 0;
   private wakeupCount: number = 0;
+  private sleepDriftCount: number = 0;
+  private lastMainClockCheckAt: number = Date.now();
   private options: Required<
     Pick<CentralizedSchedulerOptions, 'wakeupDebounceMs' | 'enableBlobWorker'>
   > &
@@ -66,7 +79,7 @@ export class CentralizedSyncScheduler {
 
   constructor(options: CentralizedSchedulerOptions = {}) {
     this.options = {
-      wakeupDebounceMs: options.wakeupDebounceMs ?? 1200,
+      wakeupDebounceMs: options.wakeupDebounceMs ?? 450,
       enableBlobWorker: options.enableBlobWorker ?? true,
       ...options,
     };
@@ -95,7 +108,7 @@ export class CentralizedSyncScheduler {
       intervalMs: Math.max(1000, config.intervalMs),
       hiddenIntervalMs: Math.max(1000, config.hiddenIntervalMs ?? config.intervalMs),
       runOnWakeup: config.runOnWakeup ?? true,
-      minDedupGapMs: config.minDedupGapMs ?? 850,
+      minDedupGapMs: config.minDedupGapMs ?? 600,
       lastTickAt: existing?.lastTickAt ?? 0,
       intervalHandle: null,
     };
@@ -133,10 +146,12 @@ export class CentralizedSyncScheduler {
     }
 
     this.isRunning = true;
+    this.lastMainClockCheckAt = Date.now();
     this.visibilityState = this.readDocumentVisibility();
     this.initBlobWorkerIfSupported();
     this.attachLifecycleListeners();
     this.reconcileTaskIntervalsForVisibility();
+    this.options.onVisibilityStateChange?.(this.visibilityState);
   }
 
   /**
@@ -160,13 +175,18 @@ export class CentralizedSyncScheduler {
 
     if (!this.isRunning) return;
 
+    // Inform listeners (such as Service Worker) immediately about background/foreground transition
+    if (prevState !== resolvedState) {
+      this.options.onVisibilityStateChange?.(resolvedState);
+    }
+
     // 1. Clean up all existing interval handles before reconfiguring for the new visibility state
     this.clearAllIntervalHandles();
 
     // 2. Establish new non-conflicting interval handles for the current visibility state
     this.reconcileTaskIntervalsForVisibility();
 
-    // 3. If transitioning from hidden -> visible, trigger a single coalesced wakeup sync
+    // 3. If transitioning from hidden -> visible, trigger a single coalesced urgent wakeup sync
     if (prevState === 'hidden' && resolvedState === 'visible') {
       this.triggerWakeupSync('visibilitychange');
     }
@@ -175,7 +195,7 @@ export class CentralizedSyncScheduler {
   /**
    * Coalesced wakeup trigger invoked by 'visibilitychange', 'focus', 'pageshow', or 'online'.
    */
-  public triggerWakeupSync(_reason: string = 'manual'): boolean {
+  public triggerWakeupSync(reason: string = 'manual'): boolean {
     if (!this.isRunning) return false;
     if (this.options.shouldPauseAll?.()) return false;
 
@@ -185,23 +205,44 @@ export class CentralizedSyncScheduler {
     }
     this.lastWakeupAt = now;
     this.wakeupCount += 1;
+    this.lastMainClockCheckAt = now;
+
+    this.options.onWakeupSync?.(reason);
 
     for (const task of this.tasks.values()) {
       if (!task.runOnWakeup) continue;
       if (this.visibilityState === 'hidden' && !task.runWhenHidden) continue;
-      this.executeTaskTick(task, true);
+      this.executeTaskTick(task, true, { reason, urgent: true });
     }
     return true;
   }
 
   /**
+   * Urgent background trigger used when the OS wakes from sleep/Doze (clock drift detected),
+   * when the Service Worker detects a live trader/whale open or close, or when Android Native
+   * background service pulses the WebView. Bypasses stale dedup guards cleanly.
+   */
+  public triggerUrgentBackgroundSync(reason: string = 'urgent_bg'): void {
+    if (!this.isRunning) return;
+    if (this.options.shouldPauseAll?.()) return;
+
+    this.lastMainClockCheckAt = Date.now();
+    this.options.onWakeupSync?.(reason);
+
+    for (const task of this.tasks.values()) {
+      if (!task.runWhenHidden) continue;
+      this.executeTaskTick(task, true, { reason, urgent: true });
+    }
+  }
+
+  /**
    * Trigger a specific task immediately (respecting deduplication unless force=true).
    */
-  public triggerTaskNow(taskId: string, force: boolean = true): void {
+  public triggerTaskNow(taskId: string, force: boolean = true, reason: string = 'manual'): void {
     if (this.options.shouldPauseAll?.()) return;
     const task = this.tasks.get(taskId);
     if (!task) return;
-    this.executeTaskTick(task, force);
+    this.executeTaskTick(task, force, { reason, urgent: force });
   }
 
   public getDiagnostics(): SchedulerDiagnostics {
@@ -223,23 +264,28 @@ export class CentralizedSyncScheduler {
       activeListenerCount: this.listenerCleanups.length,
       workerActive: this.worker !== null,
       wakeupCount: this.wakeupCount,
+      sleepDriftCount: this.sleepDriftCount,
     };
   }
 
-  private executeTaskTick(task: InternalTaskEntry, force: boolean = false): void {
+  private executeTaskTick(
+    task: InternalTaskEntry,
+    force: boolean = false,
+    meta: SyncTickMeta = { reason: 'interval', urgent: false }
+  ): void {
     if (!this.isRunning) return;
     if (this.options.shouldPauseAll?.()) return;
     if (this.visibilityState === 'hidden' && !task.runWhenHidden) return;
 
     const now = Date.now();
-    const minGap = task.minDedupGapMs ?? 850;
+    const minGap = task.minDedupGapMs ?? 600;
     if (!force && now - task.lastTickAt < minGap) {
       return;
     }
     task.lastTickAt = now;
 
     try {
-      const result = task.onTick();
+      const result = task.onTick(meta);
       if (result && typeof (result as Promise<void>).catch === 'function') {
         (result as Promise<void>).catch(() => {});
       }
@@ -269,19 +315,38 @@ export class CentralizedSyncScheduler {
         if (!task.runWhenHidden) {
           continue;
         }
-        // When hidden and a dedicated Blob Worker is active, let the Worker drive background ticks
-        // so the browser does not queue main-thread setInterval callbacks and burst-fire them on wakeup.
-        if (this.worker !== null) {
-          continue;
-        }
         const hiddenMs = task.hiddenIntervalMs ?? task.intervalMs;
+        // When a Blob Worker is active, keep a low-frequency main-thread backup watchdog so
+        // if a mobile OS suspends the Blob Worker thread, background ticks still recover seamlessly.
+        const mainThreadBgIntervalMs =
+          this.worker !== null ? Math.max(hiddenMs * 2, 5000) : hiddenMs;
         task.intervalHandle = setInterval(() => {
-          this.executeTaskTick(task, false);
-        }, hiddenMs);
+          const now = Date.now();
+          const drift = detectSleepWakeupDrift(
+            this.lastMainClockCheckAt,
+            now,
+            mainThreadBgIntervalMs
+          );
+          this.lastMainClockCheckAt = now;
+          if (drift.drifted) {
+            this.sleepDriftCount += 1;
+            this.executeTaskTick(task, true, { reason: 'sleep_drift', urgent: true });
+          } else {
+            this.executeTaskTick(task, false, { reason: 'bg_interval', urgent: false });
+          }
+        }, mainThreadBgIntervalMs);
       } else {
         // App is visible: schedule clean main-thread interval handle for each task
         task.intervalHandle = setInterval(() => {
-          this.executeTaskTick(task, false);
+          const now = Date.now();
+          const drift = detectSleepWakeupDrift(this.lastMainClockCheckAt, now, task.intervalMs);
+          this.lastMainClockCheckAt = now;
+          if (drift.drifted && task.runWhenHidden) {
+            this.sleepDriftCount += 1;
+            this.executeTaskTick(task, true, { reason: 'sleep_drift', urgent: true });
+          } else {
+            this.executeTaskTick(task, false, { reason: 'interval', urgent: false });
+          }
         }, task.intervalMs);
       }
     }
@@ -303,12 +368,22 @@ export class CentralizedSyncScheduler {
     try {
       const workerCode = `
         let timer = null;
-        let currentMs = 4500;
+        let currentMs = 2500;
+        let lastTickTs = Date.now();
         function restartTimer() {
           if (timer) clearInterval(timer);
           if (currentMs <= 0) return;
+          lastTickTs = Date.now();
           timer = setInterval(() => {
-            postMessage({ type: 'WORKER_TICK', ts: Date.now() });
+            const now = Date.now();
+            const elapsed = now - lastTickTs;
+            lastTickTs = now;
+            const driftThreshold = Math.max(currentMs * 2.2, currentMs + 3500);
+            if (elapsed >= driftThreshold) {
+              postMessage({ type: 'WORKER_WAKEUP_DRIFT', ts: now, elapsedMs: elapsed });
+            } else {
+              postMessage({ type: 'WORKER_TICK', ts: now });
+            }
           }, currentMs);
         }
         self.onmessage = function(e) {
@@ -333,7 +408,10 @@ export class CentralizedSyncScheduler {
       const worker = new Worker(blobUrl);
 
       worker.onmessage = (ev) => {
-        if (ev.data?.type === 'WORKER_TICK') {
+        if (ev.data?.type === 'WORKER_WAKEUP_DRIFT') {
+          this.sleepDriftCount += 1;
+          this.triggerUrgentBackgroundSync('sleep_drift');
+        } else if (ev.data?.type === 'WORKER_TICK') {
           this.handleBackgroundWorkerTick();
         }
       };
@@ -350,10 +428,11 @@ export class CentralizedSyncScheduler {
     if (!this.isRunning) return;
     if (this.options.shouldPauseAll?.()) return;
 
+    this.lastMainClockCheckAt = Date.now();
     for (const task of this.tasks.values()) {
       if (!task.runWhenHidden) continue;
       // When visible, the main-thread interval is already active; executeTaskTick deduplicates via minDedupGapMs
-      this.executeTaskTick(task, false);
+      this.executeTaskTick(task, false, { reason: 'worker_tick', urgent: false });
     }
   }
 
@@ -433,11 +512,16 @@ export class CentralizedSyncScheduler {
 
       // Register Android Native background service heartbeat hook centrally
       const prevHeartbeat = window.__copyTrNativeHeartbeat;
-      window.__copyTrNativeHeartbeat = () => {
+      window.__copyTrNativeHeartbeat = (source?: string) => {
         if (this.options.shouldPauseAll?.()) return;
+        const isUrgentResume = source === 'native_resume' || source === 'native_urgent';
+        if (isUrgentResume) {
+          this.triggerUrgentBackgroundSync('native_resume');
+          return;
+        }
         for (const task of this.tasks.values()) {
           if (task.runWhenHidden) {
-            this.executeTaskTick(task, false);
+            this.executeTaskTick(task, true, { reason: source || 'native_heartbeat', urgent: true });
           }
         }
       };
@@ -456,12 +540,17 @@ export class CentralizedSyncScheduler {
       const onSwMessage = (event: MessageEvent) => {
         const data = event.data;
         if (!data || typeof data !== 'object') return;
-        if (data.type === 'SW_BACKGROUND_HEARTBEAT' || data.type === 'SW_DETECTED_TRADE_UPDATE') {
+        if (data.type === 'SW_DETECTED_TRADE_UPDATE' || data.type === 'SW_FORCE_SYNC_NOW') {
+          this.options.onServiceWorkerHeartbeatAck?.();
+          this.triggerUrgentBackgroundSync(
+            data.type === 'SW_DETECTED_TRADE_UPDATE' ? 'sw_trade_detected' : 'sw_force_sync'
+          );
+        } else if (data.type === 'SW_BACKGROUND_HEARTBEAT') {
           this.options.onServiceWorkerHeartbeatAck?.();
           if (!this.options.shouldPauseAll?.()) {
             for (const task of this.tasks.values()) {
               if (task.runWhenHidden) {
-                this.executeTaskTick(task, false);
+                this.executeTaskTick(task, false, { reason: 'sw_heartbeat', urgent: false });
               }
             }
           }

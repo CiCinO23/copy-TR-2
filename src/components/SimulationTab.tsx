@@ -75,6 +75,9 @@ import {
   CopiedTraderInlineInspector,
   SelectedInlineTraderTarget,
 } from './CopiedTraderInlineInspector';
+import { PendingLimitOrdersCard } from './PendingLimitOrdersCard';
+import { ProRiskSettingsPanel } from './ProRiskSettingsPanel';
+import { ProAnalyticsPanel } from './ProAnalyticsPanel';
 
 interface SimulationTabProps {
   connectionState: BinanceConnectionState;
@@ -101,6 +104,16 @@ interface SimulationTabProps {
   ) => void;
   onClosePosition: (positionId: string, exitPrice: number) => void;
   onSecurePosition?: (positionId: string, currentPrice: number, bufferPercent?: number) => void;
+  onUpdatePositionRiskLevels?: (
+    positionId: string,
+    levels: {
+      stopLossPrice?: number | null;
+      takeProfitPrice?: number | null;
+      trailingStopPercent?: number | null;
+    }
+  ) => void;
+  onMoveStopLossToBreakEven?: (positionId: string, currentMarketPrice?: number) => void;
+  onCancelPendingLimitOrder?: (orderId: string) => void;
   onExecutePendingChoice?: (choiceId: string) => void;
   onDismissPendingChoice?: (choiceId: string) => void;
   onTriggerSampleReconnectChoice?: () => void;
@@ -170,6 +183,9 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   onOpenOrder,
   onClosePosition,
   onSecurePosition,
+  onUpdatePositionRiskLevels,
+  onMoveStopLossToBreakEven,
+  onCancelPendingLimitOrder,
   onExecutePendingChoice,
   onDismissPendingChoice,
   onTriggerSampleReconnectChoice,
@@ -258,6 +274,12 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
     settings.promptOnUnfavorableLateEntry ?? true
   );
   const [settingsSavedMsg, setSettingsSavedMsg] = useState<string | null>(null);
+
+  // Inline SL / TP / Trailing Stop Editor State on Open Positions (v2.23)
+  const [editingRiskPositionId, setEditingRiskPositionId] = useState<string | null>(null);
+  const [editSlInput, setEditSlInput] = useState<string>('');
+  const [editTpInput, setEditTpInput] = useState<string>('');
+  const [editTrailingInput, setEditTrailingInput] = useState<string>('');
 
   // Statistics Section Filter State
   const [includeOpenInStats, setIncludeOpenInStats] = useState<boolean>(true);
@@ -1629,67 +1651,63 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
   ];
 
   return (
-    <div className="space-y-5 animate-in fade-in duration-200">
-      {/* Header & Mode Switcher */}
-      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2.5 flex-wrap">
-              <h2 className="text-lg sm:text-xl font-bold text-white tracking-wide">
-                نافذة التداول وإدارة الصفقات
-              </h2>
-              <span
-                data-testid="trading_mode_badge"
-                className={`text-xs px-2.5 py-0.5 rounded-full font-bold font-mono border ${
-                  isRealMode
-                    ? 'bg-[#01BC8D]/15 text-[#01BC8D] border-[#01BC8D]/40'
-                    : 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/30'
-                }`}
-              >
-                {isRealMode ? 'التداول الحقيقي' : 'التداول الافتراضي'}
-              </span>
-            </div>
-            <p className="text-xs text-[#8A99AD] mt-1 leading-relaxed">
-              إدارة المراكز المفتوحة، الحسابات الافتراضية، إعدادات النسخ والرافعة، وسجل الأداء التفصيلي.
-            </p>
+    <div className="space-y-3.5 animate-in fade-in duration-200">
+      {/* Unified KuCoin Futures Compact Account Header */}
+      <div className="bg-[#12161C] border border-[#1C232D] rounded-xl overflow-hidden">
+        {/* Top Row: Title + Compact Segmented Mode Switcher */}
+        <div className="px-3.5 py-3 flex items-center justify-between gap-2.5 flex-wrap border-b border-[#1C232D]">
+          <div className="flex items-center gap-2 min-w-0">
+            <h2 className="text-sm sm:text-base font-bold text-white tracking-tight">
+              العقود الآجلة
+            </h2>
+            <span
+              data-testid="trading_mode_badge"
+              className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                isRealMode
+                  ? 'bg-[#01BC8D]/15 text-[#01BC8D]'
+                  : 'bg-[#1A2029] text-[#848E9C]'
+              }`}
+            >
+              {isRealMode ? 'حقيقي · KuCoin' : 'افتراضي'}
+            </span>
           </div>
-        </div>
 
-        {/* Mode Toggle Bar */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-[#0B0E11] p-1.5 rounded-xl border border-[#1E2733]">
-          <button
-            type="button"
-            onClick={() => handleModeSwitch('VIRTUAL')}
-            data-testid="mode_switch_virtual"
-            className={`py-2.5 px-4 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-              !isRealMode
-                ? 'bg-[#01BC8D] text-[#0B0E11]'
-                : 'text-[#8A99AD] hover:text-white'
-            }`}
-          >
-            <Wallet className="w-4 h-4 shrink-0" />
-            <span>التداول الافتراضي (رصيد قابل للتعديل)</span>
-          </button>
+          {/* Inline Compact Mode Switcher */}
+          <div className="inline-flex items-center bg-[#0B0E11] p-0.5 rounded-lg border border-[#1C232D] shrink-0">
+            <button
+              type="button"
+              onClick={() => handleModeSwitch('VIRTUAL')}
+              data-testid="mode_switch_virtual"
+              className={`px-3 py-1 rounded-md text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                !isRealMode
+                  ? 'bg-[#01BC8D] text-[#0B0E11]'
+                  : 'text-[#848E9C] hover:text-white'
+              }`}
+            >
+              <Wallet className="w-3.5 h-3.5 shrink-0" />
+              <span>افتراضي</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={() => handleModeSwitch('REAL')}
-            data-testid="mode_switch_real"
-            className={`py-2.5 px-4 rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-              isRealMode
-                ? 'bg-[#01BC8D] text-[#0B0E11]'
-                : 'text-[#8A99AD] hover:text-white'
-            }`}
-          >
-            {securityConfig.enabled &&
-            securityConfig.protectRealTradingSwitch &&
-            !isSecurityUnlocked ? (
-              <Lock className="w-4 h-4 shrink-0 text-[#01BC8D]" />
-            ) : (
-              <Zap className="w-4 h-4 shrink-0" />
-            )}
-            <span>التداول الحقيقي (عبر KuCoin API)</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => handleModeSwitch('REAL')}
+              data-testid="mode_switch_real"
+              className={`px-3 py-1 rounded-md text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                isRealMode
+                  ? 'bg-[#01BC8D] text-[#0B0E11]'
+                  : 'text-[#848E9C] hover:text-white'
+              }`}
+            >
+              {securityConfig.enabled &&
+              securityConfig.protectRealTradingSwitch &&
+              !isSecurityUnlocked ? (
+                <Lock className="w-3.5 h-3.5 shrink-0 text-[#01BC8D]" />
+              ) : (
+                <Zap className="w-3.5 h-3.5 shrink-0" />
+              )}
+              <span>حقيقي</span>
+            </button>
+          </div>
         </div>
 
         {/* Security Lock Gate Modal/Panel when switching to Real KuCoin Execution */}
@@ -1698,11 +1716,11 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             securityConfig.enabled &&
             securityConfig.protectRealTradingSwitch &&
             !isSecurityUnlocked)) && (
-          <div className="pt-2">
+          <div className="p-3.5 border-b border-[#1C232D]">
             <KuCoinSecurityLockScreen
               config={securityConfig}
-              titleAr="تأكيد الأمان للتبديل إلى التداول الحقيقي (KuCoin)"
-              subtitleAr="لحماية محفظتك الحقيقية في كوكوين، يرجى إدخال رمز القفل الرقمي (PIN Code) لتفعيل وضع التنفيذ الحقيقي."
+              titleAr="تأكيد التبديل إلى التداول الحقيقي (KuCoin)"
+              subtitleAr="أدخل رمز القفل الرقمي (PIN) لحماية محفظتك الحقيقية قبل تفعيل التنفيذ المباشر."
               onUnlockSuccess={(method, credId) => {
                 if (onUnlockSecurity) {
                   onUnlockSecurity(method, credId);
@@ -1716,171 +1734,276 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                   onUpdateTradeSettings({ mode: 'VIRTUAL' }, activeAccountId, false);
                 }
               }}
-              cancelLabelAr="البقاء في وضع التداول الافتراضي الآمن"
+              cancelLabelAr="العودة للافتراضي"
             />
           </div>
         )}
 
-        {/* Quick Lock Real Mode Bar when unlocked in Real Mode */}
-        {isRealMode && securityConfig.enabled && isSecurityUnlocked && onLockSecurityNow && (
-          <div className="bg-[#0D2B24]/80 border border-[#01BC8D]/40 rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs text-white font-semibold">
-              <ShieldCheck className="w-4 h-4 text-[#01BC8D] shrink-0" />
-              <span>وضع التداول الحقيقي (KuCoin) مفتوح ومؤمّن برمز PIN</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                onLockSecurityNow();
-                onUpdateTradeSettings({ mode: 'VIRTUAL' }, activeAccountId, false);
-              }}
-              data-testid="simulation_lock_real_wallet_btn"
-              className="text-[11px] bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-1 rounded-lg flex items-center gap-1 cursor-pointer transition-colors shrink-0"
-            >
-              <Lock className="w-3 h-3" />
-              <span>قفل المحفظة الحقيقية والعودة للافتراضي</span>
-            </button>
-          </div>
-        )}
-
-        {/* Real Mode Status Notice */}
+        {/* Quick Lock Real Mode Bar & Real Status Notice */}
         {isRealMode && (
-          <div className="bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-            <div className="flex items-center gap-2 text-[#01BC8D]">
-              <ShieldCheck className="w-4 h-4 shrink-0" />
-              <span>
+          <div className="px-3.5 py-2 bg-[#0D2B24]/50 border-b border-[#1C232D] flex flex-wrap items-center justify-between gap-2 text-[11px]">
+            <div className="flex items-center gap-1.5 text-[#01BC8D] min-w-0">
+              <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">
                 {kucoinConnectionState.isAuthenticated
-                  ? (
-                    <>
-                      متصل بحسابك الحقيقي في KuCoin • الرصيد المتاح:{' '}
-                      <strong dir="ltr" className="font-mono tabular-nums inline-block">
-                        {kucoinConnectionState.availableUsdt.toFixed(2)} USDT
-                      </strong>
-                    </>
-                  )
-                  : 'أنت في وضع التداول الحقيقي على KuCoin. يرجى التأكد من إدخال مفاتيح KuCoin API وتفعيل الإرسال الحقيقي.'}
+                  ? `متصل بـ KuCoin · المتاح ${kucoinConnectionState.availableUsdt.toFixed(2)} USDT`
+                  : 'وضع التنفيذ الحقيقي — تأكد من ربط مفاتيح KuCoin API'}
               </span>
             </div>
-            <button
-              onClick={() => onNavigateToTab('KuCoinAPI')}
-              className="bg-[#01BC8D] text-[#0B0E11] font-bold px-3 py-1.5 rounded-lg text-[11px] shrink-0 cursor-pointer"
-            >
-              إعدادات مفاتيح KuCoin
-            </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {securityConfig.enabled && isSecurityUnlocked && onLockSecurityNow && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onLockSecurityNow();
+                    onUpdateTradeSettings({ mode: 'VIRTUAL' }, activeAccountId, false);
+                  }}
+                  data-testid="simulation_lock_real_wallet_btn"
+                  className="text-[11px] bg-[#161B22] hover:bg-[#1E2530] text-white border border-[#1C232D] font-semibold px-2.5 py-1 rounded-md flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap"
+                >
+                  <Lock className="w-3 h-3 text-[#01BC8D]" />
+                  <span>قفل</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => onNavigateToTab('KuCoinAPI')}
+                className="bg-[#01BC8D] text-[#0B0E11] font-bold px-2.5 py-1 rounded-md text-[11px] cursor-pointer whitespace-nowrap"
+              >
+                إعدادات KuCoin
+              </button>
+            </div>
           </div>
         )}
-      </div>
 
-      {/* Sub-Navigation Bar (تقسيم نافذة التداول إلى 3 أقسام نظيفة) */}
-      <div
-        data-testid="simulation_subtabs_bar"
-        className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-1.5 grid grid-cols-3 gap-1.5"
-      >
-        <button
-          type="button"
-          data-testid="sim_subtab_active"
-          onClick={() => setSimSubTab('ACTIVE')}
-          className={`py-2.5 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-colors cursor-pointer ${
-            simSubTab === 'ACTIVE'
-              ? 'bg-[#01BC8D] text-[#0B0E11]'
-              : 'text-[#8A99AD] hover:text-white hover:bg-[#161D26]'
-          }`}
-        >
-          <Layers className="w-4 h-4 shrink-0" />
-          <span className="truncate">المراكز النشطة</span>
-          <span
-            dir="ltr"
-            className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded-md ${
-              simSubTab === 'ACTIVE'
-                ? 'bg-[#0B0E11]/15 text-[#0B0E11]'
-                : 'bg-[#161D26] text-[#01BC8D]'
-            }`}
-          >
-            {openPositions.length}
-          </span>
-        </button>
-
-        <button
-          type="button"
-          data-testid="sim_subtab_accounts_settings"
-          onClick={() => setSimSubTab('ACCOUNTS_SETTINGS')}
-          className={`py-2.5 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-colors cursor-pointer ${
-            simSubTab === 'ACCOUNTS_SETTINGS'
-              ? 'bg-[#01BC8D] text-[#0B0E11]'
-              : 'text-[#8A99AD] hover:text-white hover:bg-[#161D26]'
-          }`}
-        >
-          <Sliders className="w-4 h-4 shrink-0" />
-          <span className="truncate">الحسابات والإعدادات</span>
-          <span
-            dir="ltr"
-            className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded-md ${
-              simSubTab === 'ACCOUNTS_SETTINGS'
-                ? 'bg-[#0B0E11]/15 text-[#0B0E11]'
-                : 'bg-[#161D26] text-white'
-            }`}
-          >
-            {accounts.length}
-          </span>
-        </button>
-
-        <button
-          type="button"
-          data-testid="sim_subtab_stats_history"
-          onClick={() => setSimSubTab('STATS_HISTORY')}
-          className={`py-2.5 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-colors cursor-pointer ${
-            simSubTab === 'STATS_HISTORY'
-              ? 'bg-[#01BC8D] text-[#0B0E11]'
-              : 'text-[#8A99AD] hover:text-white hover:bg-[#161D26]'
-          }`}
-        >
-          <BarChart3 className="w-4 h-4 shrink-0" />
-          <span className="truncate">السجل والإحصائيات</span>
-          <span
-            dir="ltr"
-            className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded-md ${
-              simSubTab === 'STATS_HISTORY'
-                ? 'bg-[#0B0E11]/15 text-[#0B0E11]'
-                : 'bg-[#161D26] text-[#8A99AD]'
-            }`}
-          >
-            {closedPositions.length}
-          </span>
-        </button>
-      </div>
-
-      {/* Compact Active Account Strip on ACTIVE tab for quick switching */}
-      {simSubTab === 'ACTIVE' && !isRealMode && accounts.length > 0 && (
-        <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[11px] text-[#8A99AD]">الحساب الافتراضي النشط:</span>
-            {accounts.map((acc) => {
-              const isSelected = acc.id === activeAccountId;
-              return (
+        {/* Active Account Chips + Compact 3-Column KPI Hairline Strip (on ACTIVE tab) */}
+        {simSubTab === 'ACTIVE' && (
+          <div className="border-b border-[#1C232D]">
+            {!isRealMode && accounts.length > 0 && (
+              <div className="px-3.5 py-2 flex items-center justify-between gap-2 border-b border-[#1C232D]/70 overflow-x-auto no-scrollbar">
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {accounts.map((acc) => {
+                    const isSelected = acc.id === activeAccountId;
+                    return (
+                      <button
+                        key={acc.id}
+                        type="button"
+                        onClick={() => onSelectAccount && onSelectAccount(acc.id)}
+                        className={`text-[11px] px-2 py-1 rounded-md font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                          isSelected
+                            ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
+                            : 'bg-[#0B0E11] text-[#848E9C] hover:text-white border border-[#1C232D]'
+                        }`}
+                      >
+                        {acc.name}{' '}
+                        <span dir="ltr" className="font-mono tabular-nums opacity-85">
+                          {acc.settings.tradeValueUsdt}$×{acc.settings.leverage}x
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
                 <button
-                  key={acc.id}
                   type="button"
-                  onClick={() => onSelectAccount && onSelectAccount(acc.id)}
-                  className={`text-xs px-2.5 py-1 rounded-lg font-bold transition-colors cursor-pointer ${
-                    isSelected
-                      ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
-                      : 'bg-[#161D26] text-[#8A99AD] hover:text-white border border-[#1E2733]'
+                  onClick={() => {
+                    setBalanceInput(String(paperSnapshot.initialBalance));
+                    setIsEditingBalance(!isEditingBalance);
+                  }}
+                  data-testid="edit_virtual_balance_btn"
+                  className="text-[11px] text-[#01BC8D] hover:text-[#00D49F] flex items-center gap-1 font-semibold cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  <span>{isEditingBalance ? 'إغلاق' : 'تعديل الرصيد'}</span>
+                </button>
+              </div>
+            )}
+
+            {/* 3-Column Hairline KPI Strip */}
+            <div className="grid grid-cols-3 divide-x divide-x-reverse divide-[#1C232D]">
+              <div className="px-3 py-2.5">
+                <span className="text-[10px] text-[#848E9C] block">المتاح (USDT)</span>
+                <span
+                  dir="ltr"
+                  className="inline-block text-sm sm:text-base font-bold text-white font-mono tabular-nums mt-0.5"
+                >
+                  {isRealMode
+                    ? kucoinConnectionState.availableUsdt.toFixed(2)
+                    : paperSnapshot.availableBalance.toFixed(2)}
+                </span>
+                <span className="block text-[10px] text-[#848E9C] font-mono tabular-nums mt-0.5">
+                  الإجمالي:{' '}
+                  <span dir="ltr" className="inline-block text-[#EAECEF]">
+                    ${paperSnapshot.totalEquity.toFixed(2)}
+                  </span>
+                </span>
+              </div>
+
+              <div className="px-3 py-2.5">
+                <span className="text-[10px] text-[#848E9C] block">الربح غير المحقق</span>
+                <span
+                  dir="ltr"
+                  className={`inline-block text-sm sm:text-base font-bold font-mono tabular-nums mt-0.5 ${
+                    paperSnapshot.unrealizedPnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F65454]'
                   }`}
                 >
-                  {acc.name} (<span dir="ltr" className="font-mono tabular-nums">{acc.settings.tradeValueUsdt}$×{acc.settings.leverage}x</span>)
-                </button>
-              );
-            })}
+                  {paperSnapshot.unrealizedPnl >= 0 ? '+$' : '-$'}
+                  {Math.abs(paperSnapshot.unrealizedPnl).toFixed(2)}
+                </span>
+                <span className="block text-[10px] text-[#848E9C] font-mono tabular-nums mt-0.5">
+                  عمولات:{' '}
+                  <span dir="ltr" className="inline-block">
+                    ${paperSnapshot.totalCommissionsPaid.toFixed(2)}
+                  </span>
+                </span>
+              </div>
+
+              <div className="px-3 py-2.5">
+                <span className="text-[10px] text-[#848E9C] block">المراكز المفتوحة</span>
+                <div className="flex items-baseline gap-1 mt-0.5 font-mono tabular-nums">
+                  <span dir="ltr" className="text-sm sm:text-base font-bold text-white">
+                    {openPositions.length}
+                  </span>
+                  <span dir="ltr" className="text-[11px] text-[#848E9C]">
+                    /{settings.maxConcurrentTrades}
+                  </span>
+                </div>
+                <span className="block text-[10px] text-[#01BC8D] mt-0.5">
+                  {copiedTraders.length} متداول منسوخ
+                </span>
+              </div>
+            </div>
+
+            {/* Inline Virtual Balance Editor */}
+            {!isRealMode && isEditingBalance && (
+              <div className="px-3.5 py-3 bg-[#0B0E11] border-t border-[#1C232D] space-y-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="number"
+                    min="10"
+                    max="10000000"
+                    step="any"
+                    dir="ltr"
+                    value={balanceInput}
+                    onChange={(e) => setBalanceInput(e.target.value)}
+                    data-testid="virtual_balance_input"
+                    placeholder="الرصيد بـ USDT"
+                    className="flex-1 min-w-[120px] bg-[#12161C] border border-[#01BC8D]/60 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleApplyVirtualBalance(false)}
+                    className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-1.5 rounded-lg text-xs cursor-pointer whitespace-nowrap"
+                  >
+                    تطبيق
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleApplyVirtualBalance(true)}
+                    className="bg-[#161B22] hover:bg-[#1E2530] text-[#01BC8D] border border-[#01BC8D]/40 font-bold px-3 py-1.5 rounded-lg text-xs cursor-pointer whitespace-nowrap"
+                    title="تعيين الرصيد مع تصفير الصفقات السابقة"
+                  >
+                    تصفير وضبط
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[100, 500, 1000, 5000, 10000, 50000].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => {
+                        setBalanceInput(String(preset));
+                        onSetVirtualBalance(preset, false);
+                        setIsEditingBalance(false);
+                      }}
+                      className="text-[10px] bg-[#12161C] hover:bg-[#01BC8D] hover:text-[#0B0E11] text-[#848E9C] border border-[#1C232D] px-2 py-0.5 rounded font-mono cursor-pointer transition-colors"
+                    >
+                      ${preset.toLocaleString('en-US')}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
+        )}
+
+        {/* Zero-Truncation KuCoin 3-Tab Underline Bar */}
+        <div
+          data-testid="simulation_subtabs_bar"
+          className="grid grid-cols-3 bg-[#12161C]"
+        >
           <button
             type="button"
-            onClick={() => setSimSubTab('ACCOUNTS_SETTINGS')}
-            className="text-[11px] text-[#01BC8D] hover:underline font-semibold cursor-pointer"
+            data-testid="sim_subtab_active"
+            onClick={() => setSimSubTab('ACTIVE')}
+            className={`py-2.5 px-2 text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer border-b-2 whitespace-nowrap ${
+              simSubTab === 'ACTIVE'
+                ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
+                : 'border-transparent text-[#848E9C] hover:text-white'
+            }`}
           >
-            إدارة الحسابات والإعدادات
+            <Layers className="w-3.5 h-3.5 shrink-0" />
+            <span>المراكز</span>
+            <span
+              dir="ltr"
+              className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded ${
+                simSubTab === 'ACTIVE'
+                  ? 'bg-[#01BC8D]/15 text-[#01BC8D]'
+                  : 'bg-[#1A2029] text-[#848E9C]'
+              }`}
+            >
+              {openPositions.length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="sim_subtab_accounts_settings"
+            onClick={() => setSimSubTab('ACCOUNTS_SETTINGS')}
+            className={`py-2.5 px-2 text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer border-b-2 whitespace-nowrap ${
+              simSubTab === 'ACCOUNTS_SETTINGS'
+                ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
+                : 'border-transparent text-[#848E9C] hover:text-white'
+            }`}
+          >
+            <Sliders className="w-3.5 h-3.5 shrink-0" />
+            <span>الإعدادات</span>
+            <span
+              dir="ltr"
+              className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded ${
+                simSubTab === 'ACCOUNTS_SETTINGS'
+                  ? 'bg-[#01BC8D]/15 text-[#01BC8D]'
+                  : 'bg-[#1A2029] text-[#848E9C]'
+              }`}
+            >
+              {accounts.length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="sim_subtab_stats_history"
+            onClick={() => setSimSubTab('STATS_HISTORY')}
+            className={`py-2.5 px-2 text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer border-b-2 whitespace-nowrap ${
+              simSubTab === 'STATS_HISTORY'
+                ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
+                : 'border-transparent text-[#848E9C] hover:text-white'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5 shrink-0" />
+            <span>السجل</span>
+            <span
+              dir="ltr"
+              className={`text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded ${
+                simSubTab === 'STATS_HISTORY'
+                  ? 'bg-[#01BC8D]/15 text-[#01BC8D]'
+                  : 'bg-[#1A2029] text-[#848E9C]'
+              }`}
+            >
+              {closedPositions.length}
+            </span>
           </button>
         </div>
-      )}
+      </div>
 
       {/* Multi-Account Virtual Trading Bar (Inside ACCOUNTS_SETTINGS tab) */}
       {simSubTab === 'ACCOUNTS_SETTINGS' && !isRealMode && (
@@ -2343,141 +2466,16 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
         </div>
       )}
 
-      {/* Balance & Portfolio Metrics Row (Inside ACTIVE tab) */}
-      {simSubTab === 'ACTIVE' && (
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-        {/* Editable Virtual / Real Balance Card */}
-        <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:col-span-2 flex flex-col justify-between">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-[#8A99AD] font-semibold">
-              {isRealMode ? 'رصيد KuCoin المتاح للتداول' : 'رصيد التداول الافتراضي المتاح'}
-            </span>
-            {!isRealMode && (
-              <button
-                type="button"
-                onClick={() => {
-                  setBalanceInput(String(paperSnapshot.initialBalance));
-                  setIsEditingBalance(!isEditingBalance);
-                }}
-                data-testid="edit_virtual_balance_btn"
-                className="text-[11px] bg-[#1A222B] hover:bg-[#212C37] text-[#01BC8D] border border-[#01BC8D]/40 px-2.5 py-1 rounded-lg flex items-center gap-1 font-bold cursor-pointer"
-              >
-                <Edit3 className="w-3 h-3" />
-                <span>{isEditingBalance ? 'إغلاق التعديل' : 'تغيير الرصيد الافتراضي'}</span>
-              </button>
-            )}
-          </div>
+      {/* Balance KPIs are now unified inside the top KuCoin Futures Compact Account Header */}
 
-          <div className="my-2 flex items-baseline justify-between gap-2 flex-wrap">
-            <span dir="ltr" className="inline-block text-xl sm:text-2xl font-bold text-white font-mono tabular-nums">
-              {isRealMode
-                ? `${kucoinConnectionState.availableUsdt.toFixed(2)} USDT`
-                : `${paperSnapshot.availableBalance.toFixed(2)} USDT`}
-            </span>
-            {!isRealMode && (
-              <span className="text-xs text-[#8A99AD] font-mono tabular-nums">
-                الرصيد المبدئي: <span dir="ltr" className="inline-block">${paperSnapshot.initialBalance.toFixed(0)}</span>
-              </span>
-            )}
-          </div>
-
-          {/* Inline Virtual Balance Editor */}
-          {!isRealMode && isEditingBalance ? (
-            <div className="mt-2 pt-2 border-t border-[#232E3A] space-y-2">
-              <label className="block text-[11px] text-[#01BC8D] font-bold">
-                أدخل الرصيد الافتراضي الجديد (USDT):
-              </label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  min="10"
-                  max="10000000"
-                  step="any"
-                  value={balanceInput}
-                  onChange={(e) => setBalanceInput(e.target.value)}
-                  data-testid="virtual_balance_input"
-                  className="flex-1 bg-[#0B0E11] border border-[#01BC8D] rounded-xl px-3 py-1.5 text-xs text-white font-mono focus:outline-none"
-                />
-                <button
-                  type="button"
-                  onClick={() => handleApplyVirtualBalance(false)}
-                  className="bg-[#01BC8D] text-[#0B0E11] font-bold px-3 py-1.5 rounded-xl text-xs cursor-pointer"
-                >
-                  تطبيق الرصيد
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleApplyVirtualBalance(true)}
-                  className="bg-[#01BC8D] text-[#0B0E11] font-bold px-3 py-1.5 rounded-xl text-xs cursor-pointer"
-                  title="تعيين الرصيد مع تصفير وإغلاق جميع الصفقات السابقة"
-                >
-                  تصفير وضبط
-                </button>
-              </div>
-              <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                <span className="text-[10px] text-[#8A99AD]">قيم سريعة:</span>
-                {[100, 500, 1000, 5000, 10000, 50000].map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    onClick={() => {
-                      setBalanceInput(String(preset));
-                      onSetVirtualBalance(preset, false);
-                      setIsEditingBalance(false);
-                    }}
-                    className="text-[10px] bg-[#0B0E11] hover:bg-[#01BC8D] hover:text-[#0B0E11] text-[#8A99AD] border border-[#232E3A] px-2 py-0.5 rounded font-mono cursor-pointer transition-colors"
-                  >
-                    {preset.toLocaleString('en-US')}$
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="flex items-center justify-between text-[11px] text-[#01BC8D]">
-              <span>
-                إجمالي القيمة:{' '}
-                <strong dir="ltr" className="inline-block font-mono tabular-nums text-[#01BC8D]">
-                  {paperSnapshot.totalEquity.toFixed(2)} USDT
-                </strong>
-              </span>
-              <span className="text-[#8A99AD] font-mono tabular-nums">
-                العمولات: <span dir="ltr" className="inline-block">${paperSnapshot.totalCommissionsPaid.toFixed(3)}</span>
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* Unrealized PNL Card */}
-        <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 flex flex-col justify-between">
-          <span className="text-xs text-[#8A99AD]">الأرباح غير المحققة (PNL)</span>
-          <span
-            dir="ltr"
-            className={`inline-block self-start text-xl font-bold font-mono tabular-nums my-2 ${
-              paperSnapshot.unrealizedPnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F6465D]'
-            }`}
-          >
-            {paperSnapshot.unrealizedPnl >= 0 ? '+$' : '-$'}
-            {Math.abs(paperSnapshot.unrealizedPnl).toFixed(2)}
-          </span>
-          <span className="text-[11px] text-[#8A99AD]">تحديث لحظي من السوق</span>
-        </div>
-
-        {/* Concurrent Open Positions Slot Counter */}
-        <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 flex flex-col justify-between">
-          <span className="text-xs text-[#8A99AD]">الصفقات المفتوحة بنفس الوقت</span>
-          <div className="my-2 flex items-baseline gap-1.5">
-            <span dir="ltr" className="inline-block text-xl font-bold font-mono tabular-nums text-white">
-              {openPositions.length}
-            </span>
-            <span className="text-xs text-[#8A99AD] font-mono tabular-nums">
-              / <span dir="ltr" className="inline-block">{settings.maxConcurrentTrades}</span> كحد أقصى
-            </span>
-          </div>
-          <span className="text-[11px] text-[#01BC8D]">
-            {copiedTraders.length} متداولين منسوخين حالياً
-          </span>
-        </div>
-      </div>
+      {/* Pro Analytics Panel: Equity Curve, Sharpe-like Metrics & CSV Export (Inside STATS_HISTORY tab) */}
+      {simSubTab === 'STATS_HISTORY' && (
+        <ProAnalyticsPanel
+          positions={paperSnapshot.positions}
+          initialBalance={paperSnapshot.initialBalance}
+          currentEquity={paperSnapshot.totalEquity}
+          accountName={activeAccountName}
+        />
       )}
 
       {/* Portfolio Statistics & Recharts Visualization Section (Inside STATS_HISTORY tab) */}
@@ -3245,13 +3243,24 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             data-testid="save_trade_settings_btn"
             className="w-full bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-2.5 rounded-xl text-xs sm:text-sm transition-colors cursor-pointer"
           >
-            حفظ وتطبيق إعدادات الصفقات لحساب «{activeAccountName}» فقط
+            حفظ الإعدادات
           </button>
         </form>
       </div>
       )}
 
-      {/* قسم معالجة الصفقات السابقة بعد انقطاع الاتصال (Inside ACTIVE tab) */}
+      {/* Pro Risk Management & Smart Copy Suite Panel (Inside ACCOUNTS_SETTINGS tab) */}
+      {simSubTab === 'ACCOUNTS_SETTINGS' && (
+        <ProRiskSettingsPanel
+          settings={settings}
+          dailyPnlUsdt={paperSnapshot.dailyPnlUsdt ?? 0}
+          dailyPnlPercent={paperSnapshot.dailyPnlPercent ?? 0}
+          isDailyCircuitBreakerTripped={Boolean(paperSnapshot.isDailyCircuitBreakerTripped)}
+          onUpdateSettings={(partial) => onUpdateTradeSettings(partial, activeAccountId, false)}
+        />
+      )}
+
+      {/* قسم معالجة الصفقات المتأخرة بانتظار تأكيدك (مضغوط ونظيف في KuCoin Style) */}
       {simSubTab === 'ACTIVE' && (() => {
         const copiedTradersOnThisPage = copiedTraders.filter(
           (ct) => (ct.accountId || 'acc_default') === activeAccountId
@@ -3267,54 +3276,33 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
         return (
           <div
             data-testid="reconnect_trades_advantage_section"
-            className={`bg-[#12171D] border rounded-2xl p-4 sm:p-5 space-y-3 ${
-              isPromptEnabled ? 'border-[#F59E0B]/40' : 'border-[#01BC8D]/40'
+            className={`bg-[#12161C] border rounded-xl p-3 space-y-2.5 ${
+              pendingChoicesForCopiedTradersOnPage.length > 0
+                ? 'border-[#F59E0B]/50'
+                : 'border-[#1C232D]'
             }`}
           >
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-start gap-2.5">
-                <div
-                  className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 mt-0.5 ${
-                    isPromptEnabled
-                      ? 'bg-[#3B2606] border-[#F59E0B]/40 text-[#FBBF24]'
-                      : 'bg-[#0D2B24] border-[#01BC8D]/40 text-[#01BC8D]'
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2 min-w-0">
+                <Zap
+                  className={`w-4 h-4 shrink-0 ${
+                    isPromptEnabled ? 'text-[#FBBF24]' : 'text-[#01BC8D]'
                   }`}
-                >
-                  <Zap className="w-4 h-4" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="font-bold text-sm sm:text-base text-white">
-                      {isPromptEnabled
-                        ? 'صفقات سابقة بانتظار قرارك لأن السعر الحالي أقل أفضلية من سعر دخول المتداول'
-                        : 'الدخول الآلي بسعر السوق مفعّل (تم شطب خيار الانتظار والرفض)'}
-                    </h3>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 font-bold">
-                      خاص بالمتداول المنسوخ في هذه الصفحة فقط
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-[#8A99AD] mt-0.5 leading-relaxed">
-                    {isPromptEnabled ? (
-                      <>
-                        عند فتح التطبيق بعد انقطاع الاتصال ووجود صفقات سابقة للمتداول المنسوخ في هذه الصفحة: إذا كانت{' '}
-                        <strong className="text-[#F6465D]">بيع (SHORT)</strong> والسعر الحالي{' '}
-                        <strong className="text-[#01BC8D]">أعلى من سعر الدخول</strong> (أو{' '}
-                        <strong className="text-[#01BC8D]">شراء LONG</strong> والسعر الحالي{' '}
-                        <strong className="text-[#01BC8D]">أدنى من سعر الدخول</strong>) أي في مصلحتك ←{' '}
-                        <strong className="text-white">تُنفذ مباشرة بالسعر الحالي</strong>. أما إذا كان السعر أسوأ ←{' '}
-                        <strong className="text-[#FBBF24]">تظهر هنا كخيار تنفيذ خاص بالمتداول المنسوخ في هذه الصفحة</strong>.
-                      </>
-                    ) : (
-                      <>
-                        تم شطب خاصية اختيار الدخول أو الرفض لحساب «{activeAccountName}»: سيدخل النظام الآن{' '}
-                        <strong className="text-[#01BC8D]">آلياً وفوراً بالسعر الحالي للسوق</strong> في جميع صفقات المتداول حتى وإن كنت متأخراً أو كان السعر أقل أفضلية.
-                      </>
-                    )}
-                  </p>
-                </div>
+                />
+                <h3 className="font-bold text-xs sm:text-sm text-white">
+                  {isPromptEnabled ? 'بانتظار تأكيدك' : 'الدخول الآلي مفعّل'}
+                </h3>
+                {pendingChoicesForCopiedTradersOnPage.length > 0 && (
+                  <span
+                    dir="ltr"
+                    className="text-[10px] px-1.5 py-0.5 rounded bg-[#3B2606] text-[#FBBF24] font-mono font-bold tabular-nums"
+                  >
+                    {pendingChoicesForCopiedTradersOnPage.length}
+                  </span>
+                )}
               </div>
 
-              <label className="flex items-center gap-2 bg-[#0B0E11] border border-[#232E3A] hover:border-[#01BC8D]/50 rounded-xl px-3 py-2 cursor-pointer shrink-0">
+              <label className="flex items-center gap-1.5 bg-[#0B0E11] border border-[#1C232D] hover:border-[#01BC8D]/40 rounded-lg px-2.5 py-1 cursor-pointer shrink-0">
                 <input
                   type="checkbox"
                   checked={isPromptEnabled}
@@ -3328,10 +3316,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                     );
                   }}
                   data-testid="active_toggle_prompt_late_entry_checkbox"
-                  className="accent-[#01BC8D] w-4 h-4 shrink-0 cursor-pointer"
+                  className="accent-[#01BC8D] w-3.5 h-3.5 shrink-0 cursor-pointer"
                 />
-                <span className="text-[11px] font-bold text-white whitespace-nowrap">
-                  اختيار الدخول أو الرفض
+                <span className="text-[11px] font-semibold text-[#EAECEF] whitespace-nowrap">
+                  تأكيد الدخول المتأخر
                 </span>
               </label>
             </div>
@@ -3339,42 +3327,31 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             {!isPromptEnabled ? (
               <div
                 data-testid="auto_enter_late_trades_active_msg"
-                className="bg-[#0D2B24]/50 border border-[#01BC8D]/40 rounded-xl p-3.5 text-center text-xs text-[#01BC8D] font-semibold"
+                className="text-[11px] text-[#01BC8D]"
               >
-                الوضع الآلي نشط: يتم تنفيذ صفقات المتداول المنسوخ مباشرة بسعر السوق الحالي دون طلب تأكيد أو انتظار.
+                يتم تنفيذ صفقات المتداول المنسوخ آلياً بسعر السوق الحالي دون انتظار تأكيد.
               </div>
             ) : copiedTradersOnThisPage.length === 0 ? (
               <div
                 data-testid="no_copied_trader_pending_choices_msg"
-                className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3.5 text-center text-xs text-[#8A99AD]"
+                className="text-[11px] text-[#848E9C]"
               >
-                لا يوجد متداول منسوخ في حساب «{activeAccountName}» بهذه الصفحة حالياً — تظهر هنا فقط صفقات المتداول المنسوخ في هذه الصفحة عندما يكون السعر الحالي أقل أفضلية من سعر دخوله.
+                تظهر هنا الصفقات المتأخرة ذات السعر الأقل أفضلية عند نسخ متداول في هذا الحساب.
               </div>
             ) : pendingChoicesForCopiedTradersOnPage.length === 0 ? (
               <div
                 data-testid="no_unfavorable_pending_choices_msg"
-                className="bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-[#8A99AD]"
+                className="flex items-center justify-between gap-2 text-[11px] text-[#848E9C]"
               >
-                <span>
-                  لا توجد صفقات معلقة بانتظار قرارك للمتداول المنسوخ في هذه الصفحة (
-                  <strong className="text-[#01BC8D]">
-                    {copiedTradersOnThisPage.map((ct) => ct.nickname).join('، ')}
-                  </strong>
-                  ) حالياً.
+                <span className="truncate">
+                  لا توجد صفقات معلقة للمتداول المنسوخ ({copiedTradersOnThisPage.map((ct) => ct.nickname).join('، ')})
                 </span>
-                <span className="text-[10px] text-[#01BC8D] bg-[#0D2B24] border border-[#01BC8D]/30 px-2.5 py-1 rounded-lg font-bold shrink-0">
-                  المتداولون المنسوخون بالصفحة: {copiedTradersOnThisPage.length}
+                <span className="text-[10px] text-[#01BC8D] font-mono shrink-0">
+                  {copiedTradersOnThisPage.length} منسوخ
                 </span>
               </div>
             ) : (
-              <div className="space-y-2 pt-2 border-t border-[#232E3A]">
-                <div className="text-xs font-bold text-[#FBBF24] flex items-center gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5" />
-                  <span>
-                    صفقات سابقة بانتظار قرارك لأن السعر الحالي أقل أفضلية من سعر دخول المتداول (
-                    {pendingChoicesForCopiedTradersOnPage.length}):
-                  </span>
-                </div>
+              <div className="space-y-2 pt-2 border-t border-[#1C232D]">
                 <div className="grid grid-cols-1 gap-2">
                   {pendingChoicesForCopiedTradersOnPage.map((choice) => {
                     const liveNow = getSymbolPrice(choice.symbol) || choice.currentMarketPrice;
@@ -3383,80 +3360,47 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                       <div
                         key={choice.id}
                         data-testid={`pending_reconnect_choice_card_${choice.id}`}
-                        className="bg-[#0B0E11] border border-[#F59E0B]/60 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                        className="bg-[#0B0E11] border border-[#F59E0B]/50 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
                       >
-                        <div className="space-y-1">
+                        <div className="space-y-1.5">
                           <div className="flex items-center gap-2 flex-wrap">
                             <CoinIcon symbol={choice.symbol} size="sm" />
-                            <span className="font-mono font-extrabold text-sm text-white">
+                            <span className="font-mono font-bold text-sm text-white">
                               {choice.symbol}
                             </span>
                             <span
-                              className={`px-2 py-0.5 rounded font-mono font-bold text-[10px] ${
+                              className={`px-1.5 py-0.5 rounded font-mono font-bold text-[10px] ${
                                 isShort
-                                  ? 'bg-[#2B1216] text-[#F6465D]'
+                                  ? 'bg-[#2B1216] text-[#F65454]'
                                   : 'bg-[#0D2B24] text-[#01BC8D]'
                               }`}
                             >
-                              {choice.side} ({isShort ? 'بيع' : 'شراء'}) {choice.leverage}x
+                              {choice.side} {choice.leverage}x
                             </span>
-                            <span className="text-[10px] px-2 py-0.5 rounded bg-[#1A222B] text-[#8A99AD]">
-                              المتداول المنسوخ: <strong className="text-white">{choice.traderName}</strong> • حساب:{' '}
-                              <strong className="text-[#01BC8D]">{choice.accountName}</strong>
+                            <span className="text-[11px] text-[#848E9C]">
+                              {choice.traderName} ·{' '}
+                              <span className="font-mono text-[#01BC8D]">
+                                ${choice.marginUsdt.toFixed(2)}
+                              </span>
                             </span>
                           </div>
-                          <div className="text-[11px] text-[#8A99AD] space-y-1">
-                            <div className="flex flex-wrap items-center gap-2 bg-[#12171D] border border-[#232E3A] rounded-lg px-2.5 py-1.5">
-                              <span>
-                                سعر دخول المتداول:{' '}
-                                <strong className="font-mono text-white">
-                                  ${choice.traderEntryPrice.toFixed(4)}
-                                </strong>{' '}
-                                <span className="text-[10px] text-[#01BC8D] font-mono">
-                                  (الوقت:{' '}
-                                  <span dir="ltr" className="inline-block whitespace-nowrap">
-                                    {formatLateEntryComparisonDetails({
-                                      traderEntryPrice: choice.traderEntryPrice,
-                                      traderEntryTime: choice.traderEntryTime || choice.createdAt,
-                                      userEntryPrice: liveNow,
-                                      userEntryTime: Date.now(),
-                                    }).traderTimeStr}
-                                  </span>
-                                  )
-                                </span>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[#848E9C] font-mono tabular-nums">
+                            <span>
+                              دخول المتداول:{' '}
+                              <strong className="text-white">${choice.traderEntryPrice.toFixed(4)}</strong>{' '}
+                              <span dir="ltr" className="text-[10px] text-[#848E9C] inline-block">
+                                ({formatLateEntryComparisonDetails({
+                                  traderEntryPrice: choice.traderEntryPrice,
+                                  traderEntryTime: choice.traderEntryTime || choice.createdAt,
+                                  userEntryPrice: liveNow,
+                                  userEntryTime: Date.now(),
+                                }).traderTimeStr})
                               </span>
-                              <span>•</span>
-                              <span>
-                                سعر دخولي (الحالي):{' '}
-                                <strong className="font-mono text-[#FBBF24]">
-                                  ${liveNow.toFixed(4)}
-                                </strong>{' '}
-                                <span className="text-[10px] text-[#FBBF24] font-mono">
-                                  (الوقت الآن:{' '}
-                                  <span dir="ltr" className="inline-block whitespace-nowrap">
-                                    {formatLateEntryComparisonDetails({
-                                      traderEntryPrice: choice.traderEntryPrice,
-                                      traderEntryTime: choice.traderEntryTime || choice.createdAt,
-                                      userEntryPrice: liveNow,
-                                      userEntryTime: Date.now(),
-                                    }).userTimeStr}
-                                  </span>
-                                  )
-                                </span>
-                              </span>
-                              <span>•</span>
-                              <span>
-                                الحجم المخصص:{' '}
-                                <strong className="font-mono text-[#01BC8D]">
-                                  ${choice.marginUsdt.toFixed(2)} USDT
-                                </strong>
-                              </span>
-                            </div>
-                          </div>
-                          <div className="text-[10px] text-[#FBBF24]">
-                            {isShort
-                              ? 'صفقة بيع (SHORT) للمتداول المنسوخ والسعر الحالي أقل من سعر دخوله — هل ترغب بتنفيذها بالسعر الحالي الآن؟'
-                              : 'صفقة شراء (LONG) للمتداول المنسوخ والسعر الحالي أعلى من سعر دخوله — هل ترغب بتنفيذها بالسعر الحالي الآن؟'}
+                            </span>
+                            <span>
+                              السعر الآن:{' '}
+                              <strong className="text-[#FBBF24]">${liveNow.toFixed(4)}</strong>
+                            </span>
                           </div>
                         </div>
 
@@ -3465,18 +3409,18 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                             type="button"
                             data-testid={`execute_pending_choice_btn_${choice.id}`}
                             onClick={() => onExecutePendingChoice && onExecutePendingChoice(choice.id)}
-                            className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-extrabold px-3 py-2 rounded-xl text-xs cursor-pointer transition-colors flex items-center gap-1.5"
+                            className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold px-3 py-1.5 rounded-lg text-xs cursor-pointer transition-colors flex items-center gap-1 whitespace-nowrap"
                           >
                             <CheckCircle2 className="w-3.5 h-3.5" />
-                            <span>تنفيذ بالسعر الحالي الآن</span>
+                            <span>تنفيذ الآن</span>
                           </button>
                           <button
                             type="button"
                             data-testid={`dismiss_pending_choice_btn_${choice.id}`}
                             onClick={() => onDismissPendingChoice && onDismissPendingChoice(choice.id)}
-                            className="bg-[#2B1216] hover:bg-[#F6465D]/30 text-[#F6465D] border border-[#F6465D]/40 font-bold px-3 py-2 rounded-xl text-xs cursor-pointer transition-colors"
+                            className="bg-[#2B1216] hover:bg-[#F65454]/25 text-[#F65454] border border-[#F65454]/40 font-bold px-3 py-1.5 rounded-lg text-xs cursor-pointer transition-colors whitespace-nowrap"
                           >
-                            تجاهل الصفقة
+                            تجاهل
                           </button>
                         </div>
                       </div>
@@ -3489,14 +3433,28 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
         );
       })()}
 
-      {/* Open Positions Card (Inside ACTIVE tab) */}
+      {/* Pending Limit Orders Card (Inside ACTIVE tab) */}
+      {simSubTab === 'ACTIVE' &&
+        (paperSnapshot.pendingLimitOrders || []).length > 0 &&
+        onCancelPendingLimitOrder && (
+          <PendingLimitOrdersCard
+            orders={paperSnapshot.pendingLimitOrders || []}
+            currentPrices={connectionState.allPrices || {}}
+            onCancelOrder={onCancelPendingLimitOrder}
+          />
+        )}
+
+      {/* Open Positions Card (Inside ACTIVE tab — KuCoin Futures Style) */}
       {simSubTab === 'ACTIVE' && (
-      <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl p-4 sm:p-5">
+      <div className="bg-[#12161C] border border-[#1C232D] rounded-xl p-3.5 sm:p-4">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-[#01BC8D]" />
-            <h3 className="font-bold text-sm sm:text-base text-white">
-              الصفقات المفتوحة حالياً ({openPositions.length} من أصل {settings.maxConcurrentTrades})
+            <h3 className="font-bold text-sm text-white">
+              المراكز المفتوحة{' '}
+              <span dir="ltr" className="font-mono text-xs text-[#848E9C] tabular-nums">
+                ({openPositions.length}/{settings.maxConcurrentTrades})
+              </span>
             </h3>
           </div>
           <div className="flex items-center gap-2">
@@ -3510,35 +3468,35 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                 })
               }
               data-testid="wipe_all_positions_and_history_btn"
-              className="text-[11px] bg-[#2B1216] hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/40 px-2.5 py-1 rounded-lg flex items-center gap-1 font-bold cursor-pointer transition-colors"
-              title="مسح كل البيانات وتصفيرها (مسح كل العمليات والصفقات السابقة المفتوحة والمغلقة)"
+              className="text-[11px] bg-[#2B1216] hover:bg-[#F65454]/25 text-[#F65454] border border-[#F65454]/35 px-2.5 py-1 rounded-lg flex items-center gap-1 font-semibold cursor-pointer transition-colors whitespace-nowrap"
+              title="مسح كل البيانات والصفقات السابقة وتصفيرها"
             >
               <Trash2 className="w-3 h-3" />
-              <span>مسح كل البيانات وتصفيرها</span>
+              <span>تصفير الكل</span>
             </button>
             <button
               type="button"
               onClick={onResetPaper}
-              className="text-[11px] text-[#8A99AD] hover:text-[#F6465D] flex items-center gap-1 cursor-pointer"
+              className="text-[11px] text-[#848E9C] hover:text-[#F65454] flex items-center gap-1 cursor-pointer whitespace-nowrap"
             >
               <RotateCcw className="w-3 h-3" />
-              <span>تصفير الحساب الحالي</span>
+              <span>تصفير الحساب</span>
             </button>
           </div>
         </div>
 
         {openPositions.length >= settings.maxConcurrentTrades && (
-          <div className="mb-3 bg-[#0D2B24] border border-[#01BC8D]/40 rounded-xl p-2.5 flex items-center gap-2 text-xs text-[#01BC8D]">
+          <div className="mb-3 bg-[#0D2B24]/70 border border-[#01BC8D]/40 rounded-lg p-2.5 flex items-center gap-2 text-xs text-[#01BC8D]">
             <AlertTriangle className="w-4 h-4 shrink-0" />
             <span>
-              وصلت إلى الحد الأقصى لعدد الصفقات المفتوحة بنفس الوقت ({settings.maxConcurrentTrades} صفقات). لن يتم فتح صفقات إضافية حتى تُغلق صفقة أو ترفع الحد من الإعدادات أعلاه.
+              وصلت للحد الأقصى للمراكز المفتوحة ({settings.maxConcurrentTrades}). أغلق مركزاً أو ارفع الحد من الإعدادات.
             </span>
           </div>
         )}
 
         {openPositions.length === 0 ? (
-          <p className="text-xs sm:text-sm text-[#8A99AD] leading-relaxed py-3">
-            لا توجد صفقات مفتوحة حالياً. عند نسخ متداول أو أكثر، ستظهر الصفقات هنا بالحجم والرافعة والعمولة التي حددتها مع التنفيذ الفوري بالسعر الحالي للسوق، وخيار تأمين الصفقة بوقف خسارة قرب السعر الحالي.
+          <p className="text-xs text-[#848E9C] leading-relaxed py-4 text-center">
+            لا توجد مراكز مفتوحة حالياً. انسخ متداولاً أو افتح صفقة يدوية من الرئيسية لتظهر هنا مباشرة.
           </p>
         ) : (
           <div className="space-y-2.5">
@@ -3549,6 +3507,7 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
               const netPnl = grossPnl - (p.commissionUsdt || 0);
               const isProfit = netPnl >= 0;
               const marginUsed = p.marginUsdt || (p.quantity * p.entryPrice) / p.leverage;
+              const roiPct = marginUsed > 0 ? (netPnl / marginUsed) * 100 : 0;
               const currentScale = p.currentScalePercent ?? 100;
               const lateEntryComp = formatLateEntryComparisonDetails({
                 traderEntryPrice: p.traderEntryPrice || p.entryPrice,
@@ -3560,245 +3519,412 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
               return (
                 <div
                   key={p.id}
-                  className="bg-[#1A222B] border border-[#232E3A] rounded-xl p-3.5 flex flex-col gap-3 text-xs"
+                  className="bg-[#0B0E11] border border-[#1C232D] rounded-xl p-3 space-y-2.5 text-xs"
                 >
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="flex items-start gap-3">
+                  {/* KuCoin Futures Position Header Row */}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2 flex-wrap min-w-0">
+                      <CoinIcon symbol={p.symbol} size="sm" />
+                      <span className="font-bold text-white font-mono text-sm">{p.symbol}</span>
                       <span
-                        className={`px-2 py-1 rounded-md font-bold font-mono text-[10px] shrink-0 ${
+                        className={`px-1.5 py-0.5 rounded font-bold font-mono text-[10px] shrink-0 ${
                           p.side === 'LONG'
                             ? 'bg-[#0D2B24] text-[#01BC8D]'
-                            : 'bg-[#2B1216] text-[#F6465D]'
+                            : 'bg-[#2B1216] text-[#F65454]'
                         }`}
                       >
                         {p.side} {p.leverage}x
                       </span>
-                      <div className="space-y-1.5">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <CoinIcon symbol={p.symbol} size="sm" />
-                          <span className="font-bold text-white font-mono text-sm">{p.symbol}</span>
-                          <span
-                            className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
-                              p.executionMode === 'REAL'
-                                ? 'bg-[#01BC8D]/20 text-[#01BC8D] border border-[#01BC8D]/30'
-                                : 'bg-[#0B0E11] text-[#8A99AD]'
-                            }`}
-                          >
-                            {p.executionMode === 'REAL' ? 'حقيقي KuCoin' : 'افتراضي'}
-                          </span>
-                          <span
-                            className={`text-[10px] px-2 py-0.5 rounded font-mono font-bold ${
-                              currentScale > 100
-                                ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
-                                : currentScale < 100
-                                ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40'
-                                : 'bg-[#0B0E11] text-[#8A99AD]'
-                            }`}
-                          >
-                            الحجم الحالي: {currentScale}%
-                          </span>
-                          {lateEntryComp.isLateEntry && (
-                            <span
-                              data-testid={`late_entry_delay_badge_${p.id}`}
-                              className="text-[10px] px-2 py-0.5 rounded font-bold bg-[#3B2606] text-[#FBBF24] border border-[#F59E0B]/50"
-                            >
-                              {lateEntryComp.delayTextAr}
-                            </span>
-                          )}
-                          {p.stopLossPrice && p.stopLossPrice > 0 && (
-                            <span
-                              data-testid={`secured_sl_badge_${p.id}`}
-                              className="text-[10px] px-2 py-0.5 rounded font-mono font-bold bg-[#2B1216] text-[#F6465D] border border-[#F6465D]/50 flex items-center gap-1"
-                            >
-                              <ShieldCheck className="w-3 h-3" />
-                              <span>
-                                SL @ {p.stopLossPrice.toFixed(4)}
-                              </span>
-                            </span>
-                          )}
-                          {p.takeProfitPrice && p.takeProfitPrice > 0 && (
-                            <span
-                              data-testid={`tp_badge_${p.id}`}
-                              className="text-[10px] px-2 py-0.5 rounded font-mono font-bold bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/60 flex items-center gap-1"
-                            >
-                              <TrendingUp className="w-3 h-3" />
-                              <span>
-                                TP @ {p.takeProfitPrice.toFixed(4)}
-                              </span>
-                            </span>
-                          )}
-                          {p.sourceTraderName && (
-                            <button
-                              type="button"
-                              onClick={() => handleTraderClick(p.sourceTraderName, p.sourceTraderId, p.sourceType)}
-                              className="bg-[#0B0E11] hover:bg-[#0D2B24] text-[#01BC8D] hover:text-[#00D49F] border border-[#01BC8D]/30 hover:border-[#01BC8D] px-2 py-0.5 rounded text-[10px] flex items-center gap-1 cursor-pointer transition-all shadow-sm group"
-                              title={`اضغط لعرض كل معلومات المتداول ${p.sourceTraderName} (المراكز المفتوحة والمغلقة) أسفل نافذة المراكز دون إخفاء صفقاتك`}
-                            >
-                              {p.sourceType === 'SMART_MONEY' ? (
-                                <WhaleIcon className="w-3.5 h-3.5" />
-                              ) : (
-                                <Copy className="w-3 h-3" />
-                              )}
-                              <span>
-                                منسوخ من: <strong className="group-hover:underline">{p.sourceTraderName}</strong>
-                              </span>
-                              <ExternalLink className="w-2.5 h-2.5 opacity-70 group-hover:opacity-100" />
-                            </button>
-                          )}
-                        </div>
-                        <div className="text-[11px] text-[#8A99AD]">
-                          قيمة صفقتك الحالية: <span className="font-mono text-white font-bold">{marginUsed.toFixed(2)}$</span>
-                          {p.initialMarginUsdt && Math.abs(p.initialMarginUsdt - marginUsed) >= 0.05 && (
-                            <span className="text-[10px] text-[#01BC8D] font-mono mr-1">
-                              (الأصلية: {p.initialMarginUsdt.toFixed(2)}$)
-                            </span>
-                          )}{' '}
-                          • السعر الحالي للسوق:{' '}
-                          <span className="font-mono text-[#01BC8D] font-bold">{livePrice.toFixed(4)}$</span> • العمولة:{' '}
-                          <span className="font-mono text-[#F6465D]">{(p.commissionUsdt || 0).toFixed(3)}$</span>
-                        </div>
-
-                        {/* مقارنة واضحة بين سعر دخول المتداول مع الوقت وسعر دخولي مع الوقت */}
-                        <div
-                          data-testid={`late_entry_comparison_box_${p.id}`}
-                          className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5"
-                        >
-                          <div
-                            data-testid={`trader_entry_price_time_${p.id}`}
-                            className="bg-[#0B0E11] border border-[#232E3A] rounded-lg px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]"
-                          >
-                            <span className="text-[#8A99AD]">
-                              سعر دخول المتداول:{' '}
-                              <strong className="text-[#01BC8D] font-mono">
-                                ${lateEntryComp.traderPriceStr}
-                              </strong>
-                            </span>
-                            <span className="text-[10px] text-[#8A99AD] bg-[#12171D] px-1.5 py-0.5 rounded border border-[#232E3A]">
-                              الوقت: <strong dir="ltr" className="text-white font-mono inline-block whitespace-nowrap">{lateEntryComp.traderTimeStr}</strong>
-                            </span>
-                          </div>
-
-                          <div
-                            data-testid={`user_entry_price_time_${p.id}`}
-                            className="bg-[#0B0E11] border border-[#01BC8D]/40 rounded-lg px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]"
-                          >
-                            <span className="text-[#8A99AD]">
-                              سعر دخولي:{' '}
-                              <strong className="text-white font-mono">
-                                ${lateEntryComp.userPriceStr}
-                              </strong>
-                            </span>
-                            <span className="text-[10px] text-[#8A99AD] bg-[#12171D] px-1.5 py-0.5 rounded border border-[#01BC8D]/30">
-                              الوقت: <strong dir="ltr" className="text-[#01BC8D] font-mono inline-block whitespace-nowrap">{lateEntryComp.userTimeStr}</strong>
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-col sm:items-end justify-between gap-2">
-                      <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2">
-                        <div className="text-left font-mono ml-2">
-                          <div
-                            className={`font-bold ${
-                              isProfit ? 'text-[#01BC8D]' : 'text-[#F6465D]'
-                            }`}
-                          >
-                            {isProfit ? '+' : ''}
-                            {netPnl.toFixed(2)} USDT
-                          </div>
-                          <div className="text-[10px] text-[#8A99AD]">
-                            الحجم بالرافعة: {(marginUsed * p.leverage).toFixed(1)}$
-                          </div>
-                        </div>
-
-                        {onSecurePosition && (
-                          <button
-                            type="button"
-                            data-testid={`secure_position_btn_${p.id}`}
-                            onClick={() => onSecurePosition(p.id, livePrice, 0.2)}
-                            className="bg-[#0D2B24] hover:bg-[#01BC8D] text-[#01BC8D] hover:text-[#0B0E11] border border-[#01BC8D]/50 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
-                            title="تأمين الصفقة بوضع وقف خسارة (Stop-Loss) قرب السعر الحالي للسوق"
-                          >
-                            <ShieldCheck className="w-3.5 h-3.5" />
-                            <span>
-                              {p.isSecuredNearCurrent
-                                ? 'تحديث تأمين الصفقة'
-                                : 'تأمين الصفقة (وقف خسارة قرب السعر الحالي)'}
-                            </span>
-                          </button>
-                        )}
-
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                          p.executionMode === 'REAL'
+                            ? 'bg-[#01BC8D]/15 text-[#01BC8D]'
+                            : 'bg-[#161B22] text-[#848E9C]'
+                        }`}
+                      >
+                        {p.executionMode === 'REAL' ? 'KuCoin' : 'افتراضي'}
+                      </span>
+                      {currentScale !== 100 && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold bg-[#0D2B24] text-[#01BC8D]">
+                          {currentScale}%
+                        </span>
+                      )}
+                      {p.sourceTraderName && (
                         <button
                           type="button"
-                          data-testid={`close_position_btn_${p.id}`}
-                          onClick={() => onClosePosition(p.id, livePrice)}
-                          className="bg-[#F6465D]/15 hover:bg-[#F6465D]/25 text-[#F6465D] border border-[#F6465D]/40 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
+                          onClick={() => handleTraderClick(p.sourceTraderName, p.sourceTraderId, p.sourceType)}
+                          className="bg-[#12161C] hover:bg-[#0D2B24] text-[#01BC8D] border border-[#1C232D] hover:border-[#01BC8D]/50 px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 cursor-pointer transition-colors"
+                          title={`عرض تفاصيل ${p.sourceTraderName} أسفل المراكز`}
                         >
-                          إغلاق كامل (100%)
+                          {p.sourceType === 'SMART_MONEY' ? (
+                            <WhaleIcon className="w-3 h-3" />
+                          ) : (
+                            <Copy className="w-2.5 h-2.5" />
+                          )}
+                          <span className="font-semibold">{p.sourceTraderName}</span>
+                          <ExternalLink className="w-2.5 h-2.5 opacity-70" />
                         </button>
-                      </div>
+                      )}
+                    </div>
 
-                      {/* Scale-In (Hidden when Auto Same-% is enabled) and Partial Exit Controls */}
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        {onScaleInPosition && !scaleInSamePercentInput && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                onScaleInPosition(
-                                  p.id,
-                                  0,
-                                  livePrice,
-                                  Math.max(1, settings.scaleInFixedValueUsdt || 10)
-                                )
-                              }
-                              className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] px-2.5 py-1 rounded text-[10px] font-bold font-mono cursor-pointer shadow-sm"
-                              title={`تدعيم الصفقة بالقيمة المحددة (+${settings.scaleInFixedValueUsdt || 10}$)`}
-                            >
-                              +{(settings.scaleInFixedValueUsdt || 10).toFixed(0)}$ تدعيم بالقيمة
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onScaleInPosition(p.id, 25, livePrice)}
-                              className="bg-[#0D2B24] hover:bg-[#143D33] text-[#01BC8D] border border-[#01BC8D]/40 px-2 py-1 rounded text-[10px] font-bold font-mono cursor-pointer"
-                              title="تدعيم الصفقة بنسبة +25% من قيمة الصفقة الأصلية"
-                            >
-                              +25% تدعيم
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onScaleInPosition(p.id, 50, livePrice)}
-                              className="bg-[#0D2B24] hover:bg-[#143D33] text-[#01BC8D] border border-[#01BC8D]/40 px-2 py-1 rounded text-[10px] font-bold font-mono cursor-pointer"
-                              title="تدعيم الصفقة بنسبة +50% من قيمة الصفقة الأصلية"
-                            >
-                              +50% تدعيم
-                            </button>
-                          </>
-                        )}
-                        {onPartialExitPosition && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => onPartialExitPosition(p.id, 25, livePrice)}
-                              className="bg-[#0B0E11] hover:bg-[#141C24] text-[#01BC8D] border border-[#232E3A] px-2 py-1 rounded text-[10px] font-bold font-mono cursor-pointer"
-                              title="انسحاب جزئي بنفس النسبة المئوية (-25% من الصفقة)"
-                            >
-                              -25% سحب جزئي
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onPartialExitPosition(p.id, 50, livePrice)}
-                              className="bg-[#0B0E11] hover:bg-[#141C24] text-[#01BC8D] border border-[#232E3A] px-2 py-1 rounded text-[10px] font-bold font-mono cursor-pointer"
-                              title="انسحاب جزئي بنفس النسبة المئوية (-50% من الصفقة)"
-                            >
-                              -50% سحب جزئي
-                            </button>
-                          </>
-                        )}
+                    {/* Right-aligned PNL + ROI */}
+                    <div dir="ltr" className="text-left font-mono tabular-nums shrink-0">
+                      <div
+                        className={`text-sm font-extrabold ${
+                          isProfit ? 'text-[#01BC8D]' : 'text-[#F65454]'
+                        }`}
+                      >
+                        {isProfit ? '+' : ''}
+                        {netPnl.toFixed(2)} USDT
+                      </div>
+                      <div
+                        className={`text-[10px] font-semibold ${
+                          isProfit ? 'text-[#01BC8D]/90' : 'text-[#F65454]/90'
+                        }`}
+                      >
+                        {isProfit ? '+' : ''}
+                        {roiPct.toFixed(2)}%
                       </div>
                     </div>
                   </div>
+
+                  {/* Risk & Status Tags Row (only shown when active) */}
+                  {(lateEntryComp.isLateEntry ||
+                    (p.stopLossPrice && p.stopLossPrice > 0) ||
+                    (p.takeProfitPrice && p.takeProfitPrice > 0) ||
+                    (p.trailingStopPercent && p.trailingStopPercent > 0) ||
+                    (p.liquidationPrice && p.liquidationPrice > 0)) && (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {lateEntryComp.isLateEntry && (
+                        <span
+                          data-testid={`late_entry_delay_badge_${p.id}`}
+                          className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-[#3B2606] text-[#FBBF24]"
+                        >
+                          {lateEntryComp.delayTextAr}
+                        </span>
+                      )}
+                      {p.stopLossPrice && p.stopLossPrice > 0 && (
+                        <span
+                          dir="ltr"
+                          data-testid={`secured_sl_badge_${p.id}`}
+                          className="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold bg-[#2B1216] text-[#F65454]"
+                        >
+                          SL {p.stopLossPrice.toFixed(4)}
+                        </span>
+                      )}
+                      {p.takeProfitPrice && p.takeProfitPrice > 0 && (
+                        <span
+                          dir="ltr"
+                          data-testid={`tp_badge_${p.id}`}
+                          className="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold bg-[#0D2B24] text-[#01BC8D]"
+                        >
+                          TP {p.takeProfitPrice.toFixed(4)}
+                        </span>
+                      )}
+                      {p.trailingStopPercent && p.trailingStopPercent > 0 && (
+                        <span
+                          dir="ltr"
+                          data-testid={`trailing_badge_${p.id}`}
+                          className="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold bg-[#10253A] text-[#38BDF8]"
+                        >
+                          Trail {p.trailingStopPercent}%
+                        </span>
+                      )}
+                      {p.liquidationPrice && p.liquidationPrice > 0 && (
+                        <span
+                          dir="ltr"
+                          data-testid={`liq_badge_${p.id}`}
+                          className="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold bg-[#2B2210] text-[#F59E0B]"
+                          title="سعر التصفية الآلية التقريبي"
+                        >
+                          Liq {p.liquidationPrice.toFixed(p.liquidationPrice >= 50 ? 2 : 4)}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* KuCoin Futures 3-Column Metric Grid */}
+                  <div className="grid grid-cols-3 gap-2 py-2 border-y border-[#1C232D] text-[11px]">
+                    <div>
+                      <span className="text-[10px] text-[#848E9C] block">الهامش / الحجم</span>
+                      <span dir="ltr" className="inline-block font-mono font-bold text-white tabular-nums">
+                        ${marginUsed.toFixed(2)}
+                      </span>
+                      <span dir="ltr" className="text-[10px] text-[#848E9C] font-mono block">
+                        ${(marginUsed * p.leverage).toFixed(0)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-[#848E9C] block">السعر الحالي</span>
+                      <span dir="ltr" className="inline-block font-mono font-bold text-[#01BC8D] tabular-nums">
+                        ${livePrice.toFixed(livePrice >= 50 ? 2 : 4)}
+                      </span>
+                      <span dir="ltr" className="text-[10px] text-[#848E9C] font-mono block">
+                        عمولة ${(p.commissionUsdt || 0).toFixed(3)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-[#848E9C] block">سعر الدخول</span>
+                      <span dir="ltr" className="inline-block font-mono font-bold text-white tabular-nums">
+                        ${lateEntryComp.userPriceStr}
+                      </span>
+                      <span dir="ltr" className="text-[10px] text-[#848E9C] font-mono block truncate">
+                        {lateEntryComp.userTimeStr}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Entry Comparison Row (Trader vs User Entry & Timestamps) */}
+                  <div
+                    data-testid={`late_entry_comparison_box_${p.id}`}
+                    className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[10px]"
+                  >
+                    <div
+                      data-testid={`trader_entry_price_time_${p.id}`}
+                      className="bg-[#12161C] border border-[#1C232D] rounded-lg px-2.5 py-1 flex items-center justify-between gap-2"
+                    >
+                      <span className="text-[#848E9C]">
+                        دخول المتداول:{' '}
+                        <strong dir="ltr" className="text-[#01BC8D] font-mono inline-block">
+                          ${lateEntryComp.traderPriceStr}
+                        </strong>
+                      </span>
+                      <span dir="ltr" className="text-[#848E9C] font-mono whitespace-nowrap">
+                        {lateEntryComp.traderTimeStr}
+                      </span>
+                    </div>
+                    <div
+                      data-testid={`user_entry_price_time_${p.id}`}
+                      className="bg-[#12161C] border border-[#1C232D] rounded-lg px-2.5 py-1 flex items-center justify-between gap-2"
+                    >
+                      <span className="text-[#848E9C]">
+                        دخولي:{' '}
+                        <strong dir="ltr" className="text-white font-mono inline-block">
+                          ${lateEntryComp.userPriceStr}
+                        </strong>
+                      </span>
+                      <span dir="ltr" className="text-[#01BC8D] font-mono whitespace-nowrap">
+                        {lateEntryComp.userTimeStr}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Crisp Single-Row Position Action Bar (Package ب Short Labels) */}
+                  <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {onSecurePosition && (
+                        <button
+                          type="button"
+                          data-testid={`secure_position_btn_${p.id}`}
+                          onClick={() => onSecurePosition(p.id, livePrice, 0.2)}
+                          className="bg-[#0D2B24] hover:bg-[#01BC8D] text-[#01BC8D] hover:text-[#0B0E11] border border-[#01BC8D]/40 px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
+                          title="تأمين الصفقة بوضع وقف خسارة قرب السعر الحالي"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                          <span>{p.isSecuredNearCurrent ? 'تحديث التأمين' : 'تأمين الربح'}</span>
+                        </button>
+                      )}
+
+                      {onMoveStopLossToBreakEven && (() => {
+                        const breakEvenTarget =
+                          p.side === 'LONG'
+                            ? p.entryPrice * 1.0008
+                            : p.entryPrice * 0.9992;
+                        const canMoveToBreakEven =
+                          livePrice > 0 &&
+                          (p.side === 'LONG'
+                            ? livePrice > breakEvenTarget
+                            : livePrice < breakEvenTarget);
+                        return (
+                          <button
+                            type="button"
+                            data-testid={`breakeven_position_btn_${p.id}`}
+                            disabled={!canMoveToBreakEven}
+                            onClick={() => onMoveStopLossToBreakEven(p.id, livePrice)}
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-colors border whitespace-nowrap ${
+                              canMoveToBreakEven
+                                ? 'bg-[#10253A] hover:bg-[#38BDF8] text-[#38BDF8] hover:text-[#0B0E11] border-[#38BDF8]/40 cursor-pointer'
+                                : 'bg-[#12161C] text-[#64748B] border-[#1C232D] cursor-not-allowed opacity-70'
+                            }`}
+                            title={
+                              canMoveToBreakEven
+                                ? 'نقل وقف الخسارة إلى نقطة الدخول + 0.08% تغطية العمولة'
+                                : 'يتفعل عند تجاوز الربح +0.08% فوق نقطة الدخول'
+                            }
+                          >
+                            <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                            <span>نقطة التعادل</span>
+                          </button>
+                        );
+                      })()}
+
+                      {onUpdatePositionRiskLevels && (
+                        <button
+                          type="button"
+                          data-testid={`edit_risk_position_btn_${p.id}`}
+                          onClick={() => {
+                            if (editingRiskPositionId === p.id) {
+                              setEditingRiskPositionId(null);
+                            } else {
+                              setEditingRiskPositionId(p.id);
+                              setEditSlInput(p.stopLossPrice ? String(p.stopLossPrice) : '');
+                              setEditTpInput(p.takeProfitPrice ? String(p.takeProfitPrice) : '');
+                              setEditTrailingInput(
+                                p.trailingStopPercent ? String(p.trailingStopPercent) : ''
+                              );
+                            }
+                          }}
+                          className="bg-[#161B22] hover:bg-[#1E2530] text-white border border-[#1C232D] px-2.5 py-1.5 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
+                        >
+                          <Edit3 className="w-3 h-3 text-[#01BC8D]" />
+                          <span>SL / TP</span>
+                        </button>
+                      )}
+
+                      {onPartialExitPosition && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onPartialExitPosition(p.id, 25, livePrice)}
+                            className="bg-[#12161C] hover:bg-[#1A2029] text-[#EAECEF] border border-[#1C232D] px-2 py-1.5 rounded-lg text-[10px] font-mono font-semibold cursor-pointer whitespace-nowrap"
+                            title="سحب جزئي -25%"
+                          >
+                            -25%
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onPartialExitPosition(p.id, 50, livePrice)}
+                            className="bg-[#12161C] hover:bg-[#1A2029] text-[#EAECEF] border border-[#1C232D] px-2 py-1.5 rounded-lg text-[10px] font-mono font-semibold cursor-pointer whitespace-nowrap"
+                            title="سحب جزئي -50%"
+                          >
+                            -50%
+                          </button>
+                        </>
+                      )}
+
+                      {onScaleInPosition && !scaleInSamePercentInput && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onScaleInPosition(
+                                p.id,
+                                0,
+                                livePrice,
+                                Math.max(1, settings.scaleInFixedValueUsdt || 10)
+                              )
+                            }
+                            className="bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] px-2 py-1.5 rounded-lg text-[10px] font-bold font-mono cursor-pointer whitespace-nowrap"
+                            title={`تدعيم بقيمة +${settings.scaleInFixedValueUsdt || 10}$`}
+                          >
+                            +{(settings.scaleInFixedValueUsdt || 10).toFixed(0)}$
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onScaleInPosition(p.id, 25, livePrice)}
+                            className="bg-[#0D2B24] hover:bg-[#143D33] text-[#01BC8D] border border-[#01BC8D]/35 px-2 py-1.5 rounded-lg text-[10px] font-bold font-mono cursor-pointer whitespace-nowrap"
+                            title="تدعيم +25%"
+                          >
+                            +25%
+                          </button>
+                        </>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      data-testid={`close_position_btn_${p.id}`}
+                      onClick={() => onClosePosition(p.id, livePrice)}
+                      className="bg-[#F65454]/15 hover:bg-[#F65454] text-[#F65454] hover:text-white border border-[#F65454]/40 px-3 py-1.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      إغلاق
+                    </button>
+                  </div>
+
+                  {/* Inline SL / TP / Trailing Stop-Loss Editor */}
+                  {editingRiskPositionId === p.id && onUpdatePositionRiskLevels && (
+                    <div
+                      data-testid={`inline_risk_editor_${p.id}`}
+                      className="bg-[#0B0E11] border border-[#01BC8D]/40 rounded-xl p-3 grid grid-cols-1 sm:grid-cols-4 gap-2.5 items-end"
+                    >
+                      <div>
+                        <label className="block text-[10px] text-[#8A99AD] mb-1">
+                          سعر وقف الخسارة (SL)
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          min="0"
+                          dir="ltr"
+                          data-testid={`inline_sl_input_${p.id}`}
+                          value={editSlInput}
+                          onChange={(e) => setEditSlInput(e.target.value)}
+                          placeholder="اختياري"
+                          className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#F6465D] rounded-lg px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-[#8A99AD] mb-1">
+                          سعر الهدف (TP)
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          min="0"
+                          dir="ltr"
+                          data-testid={`inline_tp_input_${p.id}`}
+                          value={editTpInput}
+                          onChange={(e) => setEditTpInput(e.target.value)}
+                          placeholder="اختياري"
+                          className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#01BC8D] rounded-lg px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-[#8A99AD] mb-1">
+                          وقف خسارة متحرك (Trailing %)
+                        </label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0"
+                          max="50"
+                          dir="ltr"
+                          data-testid={`inline_trailing_input_${p.id}`}
+                          value={editTrailingInput}
+                          onChange={(e) => setEditTrailingInput(e.target.value)}
+                          placeholder="مثال: 1.5"
+                          className="w-full bg-[#12171D] border border-[#232E3A] focus:border-[#38BDF8] rounded-lg px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none"
+                        />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          data-testid={`inline_risk_save_btn_${p.id}`}
+                          onClick={() => {
+                            const slVal = parseFloat(editSlInput);
+                            const tpVal = parseFloat(editTpInput);
+                            const trVal = parseFloat(editTrailingInput);
+                            onUpdatePositionRiskLevels(p.id, {
+                              stopLossPrice: !isNaN(slVal) && slVal > 0 ? slVal : null,
+                              takeProfitPrice: !isNaN(tpVal) && tpVal > 0 ? tpVal : null,
+                              trailingStopPercent: !isNaN(trVal) && trVal > 0 ? trVal : null,
+                            });
+                            setEditingRiskPositionId(null);
+                          }}
+                          className="flex-1 bg-[#01BC8D] hover:bg-[#00D49F] text-[#0B0E11] font-bold py-1.5 px-3 rounded-lg text-xs cursor-pointer"
+                        >
+                          حفظ
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingRiskPositionId(null)}
+                          className="bg-[#1A222B] hover:bg-[#232E3A] text-[#8A99AD] hover:text-white py-1.5 px-2.5 rounded-lg text-xs cursor-pointer"
+                        >
+                          إلغاء
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Scale Adjustments Timeline for this Open Position */}
                   {p.scaleAdjustments && p.scaleAdjustments.length > 0 && (

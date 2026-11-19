@@ -33,8 +33,8 @@ export const BINANCE_ENVIRONMENTS: Record<string, BinanceEnvOption> = {
 export const DEFAULT_CONFIG: BinanceConfig = {
   environment: 'MAINNET',
   customBaseUrl: 'https://fapi.binance.com',
-  apiKey: '6j7JhIP1py1aBxzaczEqJ0y3Srsk3FaEN4JMZMBOuGbSMQGXejFvCv2kCjmlrZbd',
-  apiSecret: 'A15zPpn7SVLadP6kLk0yxWxHd3NOAvQN49SypHlwSnMj8KsLT8Vxn6RnO0ABdxLP',
+  apiKey: '',
+  apiSecret: '',
   recvWindow: 5000,
   readOnlyMode: true,
 };
@@ -179,6 +179,19 @@ export async function fetchAllFuturesPrices(config?: BinanceConfig): Promise<Rec
 export function getCachedPrice(symbol: string): number | null {
   const s = symbol.toUpperCase().trim();
   return cachedLivePrices[s] || null;
+}
+
+/**
+ * Merges real-time WebSocket tick prices directly into the shared price cache.
+ */
+export function injectWebSocketPrices(updates: Record<string, number>): void {
+  if (!updates) return;
+  for (const [sym, price] of Object.entries(updates)) {
+    if (typeof price === 'number' && Number.isFinite(price) && price > 0) {
+      cachedLivePrices[sym.toUpperCase()] = price;
+    }
+  }
+  lastPricesFetchTime = Date.now();
 }
 
 export function getBinancePriceCacheStats(): {
@@ -373,30 +386,54 @@ export async function fetchSymbolPrice(symbol: string, config?: BinanceConfig): 
   return null;
 }
 
-export async function testConnectionAndFetchData(config: BinanceConfig): Promise<BinanceConnectionState> {
+/**
+ * Lightweight Binance Futures ping probe for real-time Header latency measurement.
+ * Uses cache: 'no-store' + cache-buster so RTT reflects actual live server latency.
+ */
+export async function pingBinanceServer(
+  config: BinanceConfig,
+  timeoutMs: number = 3500
+): Promise<{ reachable: boolean; latencyMs: number | null }> {
   const startMs = Date.now();
+  const basePingUrl = resolveApiUrl(config, '/v1/ping');
+  const pingUrl = `${basePingUrl}${basePingUrl.includes('?') ? '&' : '?'}_t=${startMs}`;
 
-  try {
-    // 1. Ping server
-    let pingLatency = 0;
-    const pingUrl = resolveApiUrl(config, '/v1/ping');
-    let pingOk = false;
-
+  const tryFetch = async (url: string): Promise<boolean> => {
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = setTimeout(() => ctrl?.abort(), timeoutMs);
     try {
-      const pingRes = await fetch(pingUrl, {
-        headers: { Accept: 'application/json' },
+      const res = await fetch(url, {
+        cache: 'no-store',
+        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+        signal: ctrl?.signal,
       });
-      pingLatency = Date.now() - startMs;
-      pingOk = pingRes.ok;
+      return res.ok;
     } catch {
-      // Fallback direct attempt if proxy route had issue
-      const directPing = `${config.customBaseUrl.replace(/\/+$/, '')}/fapi/v1/ping`;
-      const fallbackRes = await fetch(directPing).catch(() => null);
-      if (fallbackRes && fallbackRes.ok) {
-        pingOk = true;
-        pingLatency = Date.now() - startMs;
-      }
+      return false;
+    } finally {
+      clearTimeout(timer);
     }
+  };
+
+  if (await tryFetch(pingUrl)) {
+    return { reachable: true, latencyMs: Math.max(1, Date.now() - startMs) };
+  }
+
+  const fallbackStart = Date.now();
+  const directPing = `${config.customBaseUrl.replace(/\/+$/, '')}/fapi/v1/ping?_t=${fallbackStart}`;
+  if (await tryFetch(directPing)) {
+    return { reachable: true, latencyMs: Math.max(1, Date.now() - fallbackStart) };
+  }
+
+  return { reachable: false, latencyMs: null };
+}
+
+export async function testConnectionAndFetchData(config: BinanceConfig): Promise<BinanceConnectionState> {
+  try {
+    // 1. Ping server (fresh, no-store)
+    const pingProbe = await pingBinanceServer(config, 4000);
+    const pingOk = pingProbe.reachable;
+    const pingLatency = pingProbe.latencyMs ?? 0;
 
     if (!pingOk) {
       return {

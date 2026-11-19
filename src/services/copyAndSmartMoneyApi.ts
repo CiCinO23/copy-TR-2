@@ -20,6 +20,7 @@ import {
   isTraderTradePermanentlyClosed,
   reconcileAllTraderPositionsBeforeCopy,
 } from './tradeExecutionRules';
+import { appendCacheBuster } from './syncResilience';
 
 export interface FetchCopyTradersParams {
   pageNumber?: number;
@@ -540,6 +541,25 @@ async function fetchWithTimeout(
 ): Promise<Response> {
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  const externalSignal = options?.signal;
+
+  const onExternalAbort = () => {
+    try {
+      controller?.abort();
+    } catch {
+      // ignore
+    }
+  };
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      throw new Error(`Request aborted before start: ${url}`);
+    }
+    externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+
+  const method = (options?.method || 'GET').toUpperCase();
+  const finalUrl = method === 'GET' ? appendCacheBuster(url, Date.now()) : url;
 
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
@@ -554,14 +574,23 @@ async function fetchWithTimeout(
 
   try {
     return await Promise.race([
-      fetch(url, {
+      fetch(finalUrl, {
         ...options,
-        signal: controller ? controller.signal : options?.signal,
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache, no-store',
+          Pragma: 'no-cache',
+          ...(options?.headers || {}),
+        },
+        signal: controller ? controller.signal : externalSignal,
       }),
       timeoutPromise,
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
   }
 }
 
@@ -617,7 +646,7 @@ export async function fetchCopyTraderFullData(
   portfolioId: string,
   traderSummary: CopyTraderItem | null,
   tickers: MarketTicker[],
-  options?: { forceRefresh?: boolean }
+  options?: { forceRefresh?: boolean; signal?: AbortSignal }
 ): Promise<{
   detail: CopyTraderDetail;
   positions: TraderOpenPosition[];
@@ -628,13 +657,18 @@ export async function fetchCopyTraderFullData(
 }> {
   if (!options?.forceRefresh) {
     const cachedRecent = copyTraderResultCache.get(portfolioId);
-    if (cachedRecent && Date.now() - cachedRecent.timestamp < 1_500) {
+    if (cachedRecent && Date.now() - cachedRecent.timestamp < 750) {
       return cachedRecent.result;
     }
   }
 
   const existingInFlight = copyTraderInFlight.get(portfolioId);
-  if (existingInFlight && Date.now() - existingInFlight.startedAt < 4_500) {
+  const inFlightReuseWindowMs = options?.forceRefresh ? 1_200 : 3_500;
+  if (
+    existingInFlight &&
+    !options?.signal &&
+    Date.now() - existingInFlight.startedAt < inFlightReuseWindowMs
+  ) {
     return existingInFlight.promise;
   }
 
@@ -669,50 +703,65 @@ export async function fetchCopyTraderFullData(
         leadingDays: traderSummary?.leadingDays || 120,
       };
 
+      const reqSignal = options?.signal;
       const [detailRes, ordRes, posRes, histRes] = await Promise.all([
         fetchWithTimeout(
           `/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/detail?portfolioId=${encodeURIComponent(
             portfolioId
-          )}`
+          )}`,
+          { signal: reqSignal },
+          5500
         ).catch((e) => {
           console.warn('Error fetching copy trader detail:', e);
           return null;
         }),
-        fetchWithTimeout('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
+        fetchWithTimeout(
+          '/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify({
+              pageNumber: 1,
+              pageSize: 50,
+              portfolioId,
+            }),
+            signal: reqSignal,
           },
-          body: JSON.stringify({
-            pageNumber: 1,
-            pageSize: 50,
-            portfolioId,
-          }),
-        }).catch((e) => {
+          5500
+        ).catch((e) => {
           console.warn('Error fetching copy trader latest records:', e);
           return null;
         }),
         fetchWithTimeout(
           `/bapi/futures/v1/friendly/future/copy-trade/lead-data/positions?portfolioId=${encodeURIComponent(
             portfolioId
-          )}`
+          )}`,
+          { signal: reqSignal },
+          5500
         ).catch((e) => {
           console.warn('Error fetching copy trader open positions:', e);
           return null;
         }),
-        fetchWithTimeout('/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-history', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
+        fetchWithTimeout(
+          '/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/position-history',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify({
+              pageNumber: 1,
+              pageSize: 25,
+              portfolioId,
+            }),
+            signal: reqSignal,
           },
-          body: JSON.stringify({
-            pageNumber: 1,
-            pageSize: 25,
-            portfolioId,
-          }),
-        }).catch((e) => {
+          5500
+        ).catch((e) => {
           console.warn('Error fetching copy trader position history:', e);
           return null;
         }),
@@ -1535,7 +1584,7 @@ export async function fetchSmartMoneyWhaleDetail(
   topTraderId: string,
   summaryItem: SmartMoneyTraderItem | null,
   tickers: MarketTicker[],
-  options?: { forceRefresh?: boolean }
+  options?: { forceRefresh?: boolean; signal?: AbortSignal }
 ): Promise<{
   profile: SmartMoneyTraderProfile;
   positions: TraderOpenPosition[];
@@ -1569,14 +1618,16 @@ export async function fetchSmartMoneyWhaleDetail(
         leadPortfolioId: null,
       };
 
-  // Refresh profile metadata only if not cached or older than 60s so active sync polls skip sequential network delay
-  if (!cachedProfileEntry || nowTs - cachedProfileEntry.fetchedAt > 60_000) {
+  // Cache profile metadata for 60s when leadPortfolioId is resolved, or only 8s when unresolved
+  // so transient background/sleep glitches never blind whale sync for a full minute
+  const profileCacheTtlMs = cachedProfileEntry?.profile.leadPortfolioId ? 60_000 : 8_000;
+  if (!cachedProfileEntry || nowTs - cachedProfileEntry.fetchedAt > profileCacheTtlMs) {
     try {
       let profRes = await fetchWithTimeout(
         `/bapi/futures/v1/friendly/future/smart-money/profile?topTraderId=${encodeURIComponent(
           topTraderId
         )}`,
-        undefined,
+        { signal: options?.signal },
         3500
       ).catch(() => null);
 
@@ -1585,7 +1636,7 @@ export async function fetchSmartMoneyWhaleDetail(
           `/bapi/asset/v1/friendly/future/smart-money/profile?topTraderId=${encodeURIComponent(
             topTraderId
           )}`,
-          undefined,
+          { signal: options?.signal },
           3500
         ).catch(() => null);
       }
@@ -1660,34 +1711,58 @@ export async function fetchSmartMoneyWhaleDetail(
     }
   }
 
-  // Attempt Smart Money positions endpoint in case session is available
+  // Attempt public friendly + private Smart Money positions endpoints in parallel for immediate live whale tracking
   let positions: TraderOpenPosition[] = [];
   let hasAuthoritativeSmPositions = false;
   try {
-    const smPosRes = await fetchWithTimeout(
-      `/bapi/asset/v1/private/future/smart-money/profile/query-positions?topTraderId=${encodeURIComponent(
-        topTraderId
-      )}`
-    );
-    if (smPosRes.ok) {
-      const smPosJson = await smPosRes.json();
-      const rows = smPosJson?.data?.rows || smPosJson?.data;
-      if (Array.isArray(rows)) {
-        hasAuthoritativeSmPositions = true;
-      }
-      if (Array.isArray(rows) && rows.length > 0) {
-        positions = rows.map((p: any, idx: number) => {
-          const symbol = String(p.symbol || 'BTCUSDT');
-          const amt = Math.abs(parseFloat(p.positionAmount || p.positionAmt || '1'));
+    const [friendlyRes, privateRes] = await Promise.all([
+      fetchWithTimeout(
+        `/bapi/futures/v1/friendly/future/smart-money/position?topTraderId=${encodeURIComponent(
+          topTraderId
+        )}`,
+        { signal: options?.signal },
+        4500
+      ).catch(() => null),
+      fetchWithTimeout(
+        `/bapi/asset/v1/private/future/smart-money/profile/query-positions?topTraderId=${encodeURIComponent(
+          topTraderId
+        )}`,
+        { signal: options?.signal },
+        4500
+      ).catch(() => null),
+    ]);
+
+    const extractRows = async (res: Response | null): Promise<any[] | null> => {
+      if (!res || !res.ok) return null;
+      const json = await res.json().catch(() => null);
+      const rows = json?.data?.rows || json?.data;
+      return Array.isArray(rows) ? rows : null;
+    };
+
+    const friendlyRows = await extractRows(friendlyRes);
+    const privateRows = friendlyRows ? null : await extractRows(privateRes);
+    const rows = friendlyRows ?? privateRows;
+
+    if (Array.isArray(rows)) {
+      hasAuthoritativeSmPositions = true;
+      const nonZeroRows = rows.filter(
+        (p: any) => Math.abs(parseFloat(p.positionAmount || p.positionAmt || p.amount || '0')) > 0
+      );
+      if (nonZeroRows.length > 0) {
+        positions = nonZeroRows.map((p: any, idx: number) => {
+          const symbol = String(p.symbol || 'BTCUSDT').toUpperCase();
+          const rawAmt = parseFloat(p.positionAmount || p.positionAmt || p.amount || '0');
+          const amt = Math.abs(rawAmt);
           const entry = parseFloat(p.entryPrice || '0');
           const mark =
             parseFloat(p.markPrice || '0') || getLivePriceForSymbol(symbol, tickers);
-          const uPnl = parseFloat(p.unrealizedProfit || '0');
+          const uPnl = parseFloat(p.unrealizedProfit || p.pnl || '0');
           const lev = Number(p.leverage || 10);
           const notional = amt * mark;
-          const side: 'LONG' | 'SHORT' = p.positionSide === 'SHORT' ? 'SHORT' : 'LONG';
-          const posId = `${topTraderId}_pos_${idx}`;
-          const entryTime = Number(p.updateTime || STABLE_FALLBACK_ANCHOR - (idx + 2) * 5400000);
+          const side: 'LONG' | 'SHORT' =
+            p.positionSide === 'SHORT' || rawAmt < 0 ? 'SHORT' : 'LONG';
+          const posId = `${topTraderId}_${symbol}_${side}_${idx}`;
+          const entryTime = Number(p.updateTime || p.entryTime || Date.now());
           const scaling = buildOpenPositionScaleAdjustments({
             posId,
             symbol,
@@ -1725,7 +1800,7 @@ export async function fetchSmartMoneyWhaleDetail(
       }
     }
   } catch {
-    // Ignore 401 on private smart-money endpoint and build live-price-anchored whale positions below
+    // Ignore errors on smart-money endpoints and fall back gracefully below
   }
 
   // Construct deterministic, live-price-anchored Whale `Positions` and `Position` records scaled to the whale's real Binance balance & PNL

@@ -16,6 +16,7 @@ import {
   normalizePinDigits,
   verifyPinCode,
   validatePinChange,
+  isDefaultPinActive,
 } from '../services/kucoinSecurityLock';
 
 interface KuCoinSecurityLockScreenProps {
@@ -41,11 +42,13 @@ export const KuCoinSecurityLockScreen: React.FC<KuCoinSecurityLockScreenProps> =
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showPinDigits, setShowPinDigits] = useState<boolean>(false);
 
-  const expectedPinLength = Math.max(4, (config.pinCode || '1234').length);
+  const storedPinOrHash = config.pinHash || config.pinCode || '';
+  const expectedPinLength =
+    config.pinCode && config.pinCode.length >= 4 ? config.pinCode.length : 4;
 
   const handleVerifyPin = useCallback(
     (candidatePin: string) => {
-      if (verifyPinCode(candidatePin, config.pinCode)) {
+      if (verifyPinCode(candidatePin, storedPinOrHash)) {
         setErrorMsg(null);
         onUnlockSuccess('PIN');
       } else {
@@ -53,7 +56,7 @@ export const KuCoinSecurityLockScreen: React.FC<KuCoinSecurityLockScreenProps> =
         setPinInput('');
       }
     },
-    [config.pinCode, onUnlockSuccess]
+    [storedPinOrHash, onUnlockSuccess]
   );
 
   const handleAppendDigit = useCallback(
@@ -62,11 +65,11 @@ export const KuCoinSecurityLockScreen: React.FC<KuCoinSecurityLockScreenProps> =
       setPinInput((prev) => {
         if (prev.length >= 6) return prev;
         const next = prev + digit;
-        if (verifyPinCode(next, config.pinCode)) {
+        if (verifyPinCode(next, storedPinOrHash)) {
           setTimeout(() => {
             onUnlockSuccess('PIN');
           }, 120);
-        } else if (next.length === expectedPinLength && expectedPinLength === config.pinCode.length) {
+        } else if (next.length >= 6) {
           setTimeout(() => {
             setErrorMsg('رمز القفل الرقمي (PIN) غير صحيح.');
             setPinInput('');
@@ -75,7 +78,7 @@ export const KuCoinSecurityLockScreen: React.FC<KuCoinSecurityLockScreenProps> =
         return next;
       });
     },
-    [config.pinCode, expectedPinLength, onUnlockSuccess]
+    [storedPinOrHash, onUnlockSuccess]
   );
 
   const handleBackspace = useCallback(() => {
@@ -138,7 +141,7 @@ export const KuCoinSecurityLockScreen: React.FC<KuCoinSecurityLockScreenProps> =
           </span>
 
           <div className="flex items-center gap-2">
-            {config.pinCode === '1234' && (
+            {isDefaultPinActive(config) && (
               <span
                 data-testid="default_pin_hint_badge"
                 className="text-[10px] bg-[#1A222B] text-[#01BC8D] border border-[#01BC8D]/30 px-2 py-0.5 rounded font-mono"
@@ -187,7 +190,7 @@ export const KuCoinSecurityLockScreen: React.FC<KuCoinSecurityLockScreenProps> =
               setErrorMsg(null);
               const clean = normalizePinDigits(e.target.value).slice(0, 6);
               setPinInput(clean);
-              if (verifyPinCode(clean, config.pinCode)) {
+              if (verifyPinCode(clean, storedPinOrHash)) {
                 setTimeout(() => onUnlockSuccess('PIN'), 100);
               }
             }}
@@ -314,7 +317,12 @@ export const KuCoinSecurityConfigModal: React.FC<KuCoinSecurityConfigModalProps>
 
   const handleSaveNewPin = (e: React.FormEvent) => {
     e.preventDefault();
-    const res = validatePinChange(currentPin, config.pinCode, newPin, confirmPin);
+    const res = validatePinChange(
+      currentPin,
+      config.pinHash || config.pinCode || '',
+      newPin,
+      confirmPin
+    );
     if (!res.valid || !res.normalizedNewPin) {
       setFeedback({ type: 'error', text: res.errorAr || 'خطأ في التحقق من الرمز' });
       return;
@@ -398,7 +406,7 @@ export const KuCoinSecurityConfigModal: React.FC<KuCoinSecurityConfigModalProps>
         >
           <div className="text-xs font-bold text-[#01BC8D] flex items-center justify-between">
             <span>تغيير رمز القفل الرقمي (PIN Code)</span>
-            {config.pinCode === '1234' && (
+            {isDefaultPinActive(config) && (
               <span className="text-[10px] text-[#8A99AD] font-mono">الرمز الحالي: 1234</span>
             )}
           </div>

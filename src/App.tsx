@@ -39,6 +39,7 @@ import {
   testConnectionAndFetchData,
   fetchAllFuturesPrices,
   addWatchedFuturesSymbol,
+  pingBinanceServer,
 } from './services/binanceApi';
 import {
   loadKuCoinConfig,
@@ -49,6 +50,8 @@ import {
   executeKuCoinOrder,
   loadKuCoinOrderHistory,
   clearKuCoinOrderHistory,
+  fetchKuCoinFuturesContracts,
+  pingKuCoinServer,
   type KuCoinOrderRequestParams,
 } from './services/kucoinApi';
 import {
@@ -59,12 +62,16 @@ import { paperEngine } from './services/paperTrading';
 import { mobileNotifications } from './services/mobileNotifications';
 import { createCentralizedSyncScheduler } from './services/realtimeSyncWorker';
 import { memoryCleanupService } from './services/memoryCleanup';
+import { shouldAbortStaleInFlightSync } from './services/syncResilience';
+import {
+  BinanceFuturesPriceStream,
+  type WebSocketStreamStatus,
+} from './services/binanceWebSocket';
 import {
   loadKuCoinSecurityConfig,
   saveKuCoinSecurityConfig,
   shouldRequireUnlock,
 } from './services/kucoinSecurityLock';
-import { APP_MAJOR_VERSION, APP_VERSION, APP_PROMPT_REVISION } from './constants/appVersion';
 
 function loadAllCopiedTradersFromStorage(): ActiveCopiedTrader[] {
   const result: ActiveCopiedTrader[] = [];
@@ -96,6 +103,7 @@ export const App: React.FC = () => {
   });
   const [showLiveDialog, setShowLiveDialog] = useState<boolean>(false);
   const [isSyncingAll, setIsSyncingAll] = useState<boolean>(false);
+  const [wsStatus, setWsStatus] = useState<WebSocketStreamStatus>('DISCONNECTED');
 
   // Binance State (Used ONLY for Information / Market Data / Signals / Lead Traders)
   const [binanceConfig, setBinanceConfig] = useState<BinanceConfig>(loadBinanceConfig);
@@ -151,8 +159,15 @@ export const App: React.FC = () => {
     paperEngine.getSnapshot({})
   );
 
+  const routeDrainedAutoLogsRef = useRef<((logs: CopiedSyncLog[]) => void) | null>(null);
+
   const updatePaperSnapshot = useCallback(() => {
-    setPaperSnapshot(paperEngine.getSnapshot(pricesMap));
+    const snap = paperEngine.getSnapshot(pricesMap);
+    setPaperSnapshot(snap);
+    const autoLogs = paperEngine.drainTriggeredAutoLogs();
+    if (autoLogs.length > 0) {
+      routeDrainedAutoLogsRef.current?.(autoLogs);
+    }
   }, [pricesMap]);
 
   // Handle auto-copy toggle
@@ -231,6 +246,33 @@ export const App: React.FC = () => {
     setBinanceConfig(cleared);
     handleTestBinanceConnection(cleared);
   };
+
+  // Exclusive Settings Vault Handlers (v2.1 / v2.23)
+  const handleSaveKuCoinSecrets = useCallback(
+    (secrets: { apiSecret: string; passphrase: string }) => {
+      setKucoinConfig((prev) => {
+        const next: KuCoinConfig = {
+          ...prev,
+          apiSecret: secrets.apiSecret.trim(),
+          passphrase: secrets.passphrase.trim(),
+        };
+        saveKuCoinConfig(next);
+        return next;
+      });
+    },
+    []
+  );
+
+  const handleSaveBinanceSecret = useCallback((apiSecret: string) => {
+    setBinanceConfig((prev) => {
+      const next: BinanceConfig = {
+        ...prev,
+        apiSecret: apiSecret.trim(),
+      };
+      saveBinanceConfig(next);
+      return next;
+    });
+  }, []);
 
   // Multi-Account Management Handlers (فتح وتسمية وإدارة عدة حسابات افتراضية في نفس الوقت)
   const handleSelectVirtualAccount = useCallback(
@@ -375,14 +417,77 @@ export const App: React.FC = () => {
     [updatePaperSnapshot]
   );
 
-  // Initial load (run once on mount)
+  // Initial load (run once on mount) + warm KuCoin Futures contract multipliers cache
   const hasInitializedRef = useRef(false);
   useEffect(() => {
     if (hasInitializedRef.current) return;
     hasInitializedRef.current = true;
     handleTestBinanceConnection(binanceConfig);
     handleTestKuCoinConnection(kucoinConfig);
+    fetchKuCoinFuturesContracts().catch(() => {});
   }, [binanceConfig, kucoinConfig, handleTestBinanceConnection, handleTestKuCoinConnection]);
+
+  // Real-time Binance USDⓈ-M Futures WebSocket Price Stream (!miniTicker@arr, 300ms throttled batching)
+  const lastWsPriceTickAtRef = useRef<number>(0);
+  const wsStreamRef = useRef<BinanceFuturesPriceStream | null>(null);
+  useEffect(() => {
+    const stream = new BinanceFuturesPriceStream(
+      {
+        onStatusChange: (status) => {
+          setWsStatus(status);
+        },
+        onPriceBatch: (batch) => {
+          if (mobileNotifications.isAppStoppedByFullExit()) return;
+          lastWsPriceTickAtRef.current = Date.now();
+          const merged: Record<string, number> = {
+            ...pricesMapRef.current,
+            ...batch,
+          };
+          pricesMapRef.current = merged;
+
+          // Evaluate auto SL / TP / Trailing-Stop / Liquidation & Pending Limit Orders at sub-second latency
+          const nextSnap = paperEngine.getSnapshot(merged);
+          const autoLogs = paperEngine.drainTriggeredAutoLogs();
+          if (autoLogs.length > 0) {
+            routeDrainedAutoLogsRef.current?.(autoLogs);
+          }
+
+          React.startTransition(() => {
+            setPaperSnapshot(nextSnap);
+            setConnectionState((prev) => ({
+              ...prev,
+              allPrices: {
+                ...(prev.allPrices || {}),
+                ...batch,
+              },
+              tickers: prev.tickers.map((t) => {
+                const live = batch[t.symbol];
+                if (!live || live <= 0) return t;
+                const formatted =
+                  live >= 100
+                    ? live.toLocaleString('en-US', {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })
+                    : live >= 1
+                    ? live.toFixed(4)
+                    : live.toFixed(6);
+                return { ...t, lastPrice: formatted };
+              }),
+            }));
+          });
+        },
+      },
+      300
+    );
+
+    wsStreamRef.current = stream;
+    stream.start(binanceConfig.environment);
+    return () => {
+      wsStreamRef.current = null;
+      stream.stop();
+    };
+  }, [binanceConfig.environment]);
 
   // Update paper snapshot whenever ticker prices update
   useEffect(() => {
@@ -509,6 +614,7 @@ export const App: React.FC = () => {
             amountUsdt: orderAmountUsdt,
             entryPrice: log.price,
             leverage: userLeverage,
+            reduceOnly: isClosingAction,
             sourceTraderName: `${params.traderName} (${targetAcc.name})`,
             sourceSignal: `Binance ${params.source} [${targetAcc.name}] (${log.action} بالسعر الحالي • ${orderAmountUsdt}$ × ${userLeverage}x)`,
           });
@@ -579,6 +685,7 @@ export const App: React.FC = () => {
           amountUsdt: orderAmountUsdt,
           entryPrice: log.price,
           leverage: userLeverage,
+          reduceOnly: isClosingAction,
           sourceTraderName: `${log.traderName} (${targetAcc.name})`,
           sourceSignal: `Binance ${log.source} [${targetAcc.name}] (${log.action} بالسعر الحالي • ${orderAmountUsdt}$ × ${userLeverage}x)`,
         });
@@ -603,6 +710,8 @@ export const App: React.FC = () => {
         });
     }
   }, []);
+
+  routeDrainedAutoLogsRef.current = routeSyncedLogsToKuCoin;
 
   // Copy a single position using the target Account's configured Trade Settings at the CURRENT LIVE MARKET PRICE
   // If already copied with no uncopied changes -> do nothing.
@@ -680,6 +789,7 @@ export const App: React.FC = () => {
             amountUsdt: Math.max(1, delta.marginDeltaUsdt),
             entryPrice: delta.price > 0 ? delta.price : liveMarketPrice,
             leverage: delta.leverage || effectiveLeverage,
+            reduceOnly: delta.actionType === 'PARTIAL_EXIT',
             sourceTraderName: `${traderName} (${targetAcc.name})`,
             sourceSignal: signalLabel,
           };
@@ -734,155 +844,233 @@ export const App: React.FC = () => {
     [kucoinConfig, pricesMap, updatePaperSnapshot]
   );
 
-  // Sync ALL currently copied traders across both Copy Trading & Whales in parallel at real-time speed
+  // Sync ALL currently copied traders & whales in parallel with sleep-recovery abort guards
   const isSyncInFlightRef = useRef<boolean>(false);
   const syncStartedAtRef = useRef<number>(0);
   const pendingResyncRef = useRef<boolean>(false);
+  const activeSyncAbortControllerRef = useRef<AbortController | null>(null);
 
-  const handleSyncAllCopiedTraders = useCallback(async () => {
+  // Lightweight independent ping probes for Binance & KuCoin Header indicators
+  const refreshExchangePings = useCallback(async () => {
     if (mobileNotifications.isAppStoppedByFullExit()) return;
-    const list = loadAllCopiedTradersFromStorage();
+    const [binanceProbe, kucoinProbe] = await Promise.all([
+      pingBinanceServer(binanceConfigRef.current, 3500).catch(() => ({
+        reachable: false,
+        latencyMs: null,
+      })),
+      pingKuCoinServer(3500).catch(() => ({
+        reachable: false,
+        latencyMs: null,
+        serverTimestamp: Date.now(),
+      })),
+    ]);
 
-    // Keep Service Worker updated with active copied traders so it can poll on lock-screen if OS suspends main thread
-    const currentSnap = paperEngine.getSnapshot(pricesMapRef.current);
-    const knownOpenKeys = currentSnap.positions
-      .filter((p) => p.status === 'OPEN' && p.sourceTraderId)
-      .map((p) => `${p.sourceTraderId}_${p.symbol.toUpperCase()}_${p.side}`);
-    mobileNotifications.syncCopiedTradersStateToServiceWorker(list, knownOpenKeys);
+    React.startTransition(() => {
+      setConnectionState((prev) => ({
+        ...prev,
+        isConnected: binanceProbe.reachable ? true : prev.tickers.length > 0 ? prev.isConnected : false,
+        latencyMs: binanceProbe.latencyMs,
+      }));
+      setKucoinConnectionState((prev) => ({
+        ...prev,
+        isConnected: kucoinProbe.reachable ? true : prev.isAuthenticated ? prev.isConnected : false,
+        latencyMs: kucoinProbe.latencyMs,
+      }));
+    });
+  }, []);
 
-    if (list.length === 0) return;
+  const handleSyncAllCopiedTraders = useCallback(
+    async (syncOpts?: { urgent?: boolean; reason?: string }) => {
+      if (mobileNotifications.isAppStoppedByFullExit()) return;
+      const list = loadAllCopiedTradersFromStorage();
 
-    const now = Date.now();
-    // Anti-deadlock guard: if an earlier sync was stalled > 8.5s while the screen was locked or app minimized, force-release it
-    if (isSyncInFlightRef.current && now - syncStartedAtRef.current < 8500) {
-      pendingResyncRef.current = true;
-      return;
-    }
+      // Keep Service Worker updated with active copied traders so it can poll on lock-screen if OS suspends main thread
+      const currentSnap = paperEngine.getSnapshot(pricesMapRef.current);
+      const knownOpenKeys = currentSnap.positions
+        .filter((p) => p.status === 'OPEN' && p.sourceTraderId)
+        .map((p) => `${p.sourceTraderId}_${p.symbol.toUpperCase()}_${p.side}`);
+      mobileNotifications.syncCopiedTradersStateToServiceWorker(list, knownOpenKeys);
 
-    isSyncInFlightRef.current = true;
-    syncStartedAtRef.current = now;
-    setIsSyncingAll(true);
+      if (list.length === 0) return;
 
-    let hardTimeoutId: ReturnType<typeof setTimeout> | null = null;
-    try {
-      const syncTaskPromise = (async () => {
-        // Fetch fresh live market prices concurrently alongside all copied traders (no sequential blocking!)
-        const freshPricesPromise = fetchAllFuturesPrices(binanceConfigRef.current).catch(
-          () => pricesMapRef.current
-        );
+      const now = Date.now();
+      const isUrgent = Boolean(syncOpts?.urgent);
 
-        const traderDataPromises = list.map(async (ct) => {
-          const targetAcc = paperEngine.getAccount(ct.accountId);
-          if (ct.source === 'COPY_TRADING') {
-            const data = await fetchCopyTraderFullData(ct.traderId, null, tickersRef.current, {
-              forceRefresh: true,
-            });
-            return { ct, targetAcc, data };
-          } else {
-            const data = await fetchSmartMoneyWhaleDetail(ct.traderId, null, tickersRef.current, {
-              forceRefresh: true,
-            });
-            return { ct, targetAcc, data };
-          }
+      if (isSyncInFlightRef.current) {
+        const shouldAbortStale = shouldAbortStaleInFlightSync({
+          isSyncInFlight: true,
+          syncStartedAt: syncStartedAtRef.current,
+          now,
+          isWakeupOrUrgent: isUrgent,
+          normalDeadlockMs: 8000,
+          wakeupStaleMs: 1800,
         });
 
-        const [freshPrices, results] = await Promise.all([
-          freshPricesPromise,
-          Promise.allSettled(traderDataPromises),
-        ]);
+        if (shouldAbortStale) {
+          // Abort hung pre-sleep sockets immediately so fresh post-sleep trades execute without delay
+          try {
+            activeSyncAbortControllerRef.current?.abort();
+          } catch {
+            // ignore
+          }
+          activeSyncAbortControllerRef.current = null;
+          isSyncInFlightRef.current = false;
+        } else {
+          pendingResyncRef.current = true;
+          return;
+        }
+      }
 
-        const mergedPrices: Record<string, number> = {
-          ...pricesMapRef.current,
-          ...(freshPrices || {}),
-        };
+      const syncController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      activeSyncAbortControllerRef.current = syncController;
+      isSyncInFlightRef.current = true;
+      syncStartedAtRef.current = now;
+      setIsSyncingAll(true);
 
-        const workerTasks: Array<{
-          taskId: string;
-          traderId: string;
-          traderName: string;
-          source: 'COPY_TRADING' | 'SMART_MONEY';
-          accountId: string;
-          positions: TraderOpenPosition[];
-          latestRecords: TraderLatestRecord[];
-          positionHistory?: TraderPositionHistoryItem[];
-          marginPerTradeUsdt?: number;
-          checkReconnectAdvantage?: boolean;
-          forceImmediateExecution?: boolean;
-          copiedStartedAt?: number;
-          isPartialOrRateLimited?: boolean;
-        }> = [];
+      let hardTimeoutId: ReturnType<typeof setTimeout> | null = null;
+      try {
+        const syncTaskPromise = (async () => {
+          // Do NOT block trader/whale ingestion on the heavy 800-symbol REST price list:
+          // Use live WebSocket prices when fresh (< 5s), otherwise race REST prices against a fast 1.5s fallback!
+          const wsFresh = Date.now() - lastWsPriceTickAtRef.current < 5000;
+          const freshPricesPromise: Promise<Record<string, number>> = wsFresh
+            ? Promise.resolve(pricesMapRef.current)
+            : Promise.race([
+                fetchAllFuturesPrices(binanceConfigRef.current).catch(() => pricesMapRef.current),
+                new Promise<Record<string, number>>((resolve) =>
+                  setTimeout(() => resolve(pricesMapRef.current), 1500)
+                ),
+              ]);
 
-        for (let idx = 0; idx < results.length; idx++) {
-          const res = results[idx];
-          if (res.status === 'fulfilled') {
-            const { ct, targetAcc, data } = res.value;
-            for (const pos of data.positions || []) {
-              if (pos?.symbol) {
-                const sym = pos.symbol.toUpperCase().trim();
-                addWatchedFuturesSymbol(sym);
-                if (pos.markPrice && pos.markPrice > 0 && !mergedPrices[sym]) {
-                  mergedPrices[sym] = pos.markPrice;
+          const traderDataPromises = list.map(async (ct) => {
+            const targetAcc = paperEngine.getAccount(ct.accountId);
+            if (ct.source === 'COPY_TRADING') {
+              const data = await fetchCopyTraderFullData(ct.traderId, null, tickersRef.current, {
+                forceRefresh: true,
+                signal: syncController?.signal,
+              });
+              return { ct, targetAcc, data };
+            } else {
+              const data = await fetchSmartMoneyWhaleDetail(ct.traderId, null, tickersRef.current, {
+                forceRefresh: true,
+                signal: syncController?.signal,
+              });
+              return { ct, targetAcc, data };
+            }
+          });
+
+          const [freshPrices, results] = await Promise.all([
+            freshPricesPromise,
+            Promise.allSettled(traderDataPromises),
+          ]);
+
+          // If a newer urgent wakeup sync aborted this older batch, discard stale results cleanly
+          if (syncController?.signal.aborted) {
+            return;
+          }
+
+          const mergedPrices: Record<string, number> = {
+            ...pricesMapRef.current,
+            ...(freshPrices || {}),
+          };
+
+          const workerTasks: Array<{
+            taskId: string;
+            traderId: string;
+            traderName: string;
+            source: 'COPY_TRADING' | 'SMART_MONEY';
+            accountId: string;
+            positions: TraderOpenPosition[];
+            latestRecords: TraderLatestRecord[];
+            positionHistory?: TraderPositionHistoryItem[];
+            marginPerTradeUsdt?: number;
+            checkReconnectAdvantage?: boolean;
+            forceImmediateExecution?: boolean;
+            copiedStartedAt?: number;
+            isPartialOrRateLimited?: boolean;
+          }> = [];
+
+          for (let idx = 0; idx < results.length; idx++) {
+            const res = results[idx];
+            if (res.status === 'fulfilled') {
+              const { ct, targetAcc, data } = res.value;
+              for (const pos of data.positions || []) {
+                if (pos?.symbol) {
+                  const sym = pos.symbol.toUpperCase().trim();
+                  addWatchedFuturesSymbol(sym);
+                  if (pos.markPrice && pos.markPrice > 0 && !mergedPrices[sym]) {
+                    mergedPrices[sym] = pos.markPrice;
+                  }
                 }
               }
+              workerTasks.push({
+                taskId: `sync_${targetAcc.id}_${ct.source}_${ct.traderId}_${idx}`,
+                traderId: ct.traderId,
+                traderName: ct.nickname,
+                source: ct.source,
+                accountId: targetAcc.id,
+                positions: data.positions || [],
+                latestRecords: data.latestRecords || [],
+                positionHistory: data.positionHistory,
+                marginPerTradeUsdt: targetAcc.settings.tradeValueUsdt,
+                checkReconnectAdvantage: targetAcc.settings.promptOnUnfavorableLateEntry !== false,
+                forceImmediateExecution: ct.source === 'SMART_MONEY',
+                copiedStartedAt: ct.startedAt,
+                isPartialOrRateLimited: Boolean((data as any).isPartialOrRateLimited),
+              });
+            } else {
+              console.warn('Failed syncing trader:', res.reason);
             }
-            workerTasks.push({
-              taskId: `sync_${targetAcc.id}_${ct.source}_${ct.traderId}_${idx}`,
-              traderId: ct.traderId,
-              traderName: ct.nickname,
-              source: ct.source,
-              accountId: targetAcc.id,
-              positions: data.positions || [],
-              latestRecords: data.latestRecords || [],
-              positionHistory: data.positionHistory,
-              marginPerTradeUsdt: targetAcc.settings.tradeValueUsdt,
-              checkReconnectAdvantage: targetAcc.settings.promptOnUnfavorableLateEntry !== false,
-              forceImmediateExecution: ct.source === 'SMART_MONEY',
-              copiedStartedAt: ct.startedAt,
-              isPartialOrRateLimited: Boolean((data as any).isPartialOrRateLimited),
-            });
-          } else {
-            console.warn('Failed syncing trader:', res.reason);
           }
-        }
 
-        pricesMapRef.current = mergedPrices;
+          pricesMapRef.current = mergedPrices;
 
-        if (workerTasks.length > 0) {
-          // Offload heavy trade & record processing to the dedicated Web Worker (`tradeSync.worker.ts`)
-          // so the main UI thread and button responsiveness never lag even with hundreds of trades
-          const { logs } = await paperEngine.syncMultipleTradersOffMainThread(
-            workerTasks,
-            mergedPrices
-          );
-          if (logs.length > 0) {
-            routeSyncedLogsToKuCoin(logs);
+          if (workerTasks.length > 0) {
+            const { logs } = await paperEngine.syncMultipleTradersOffMainThread(
+              workerTasks,
+              mergedPrices
+            );
+            if (logs.length > 0) {
+              routeSyncedLogsToKuCoin(logs);
+            }
           }
-        }
 
-        const updatedSnapshot = paperEngine.getSnapshot(mergedPrices);
-        React.startTransition(() => {
-          setPaperSnapshot(updatedSnapshot);
-          refreshCopiedTradersList();
+          const updatedSnapshot = paperEngine.getSnapshot(mergedPrices);
+          React.startTransition(() => {
+            setPaperSnapshot(updatedSnapshot);
+            refreshCopiedTradersList();
+          });
+        })();
+
+        const timeoutGuardPromise = new Promise<void>((resolve) => {
+          hardTimeoutId = setTimeout(() => {
+            try {
+              syncController?.abort();
+            } catch {
+              // ignore
+            }
+            resolve();
+          }, 7500);
         });
-      })();
 
-      const timeoutGuardPromise = new Promise<void>((resolve) => {
-        hardTimeoutId = setTimeout(resolve, 8200);
-      });
-
-      await Promise.race([syncTaskPromise, timeoutGuardPromise]);
-    } finally {
-      if (hardTimeoutId) clearTimeout(hardTimeoutId);
-      isSyncInFlightRef.current = false;
-      setIsSyncingAll(false);
-      if (pendingResyncRef.current) {
-        pendingResyncRef.current = false;
-        setTimeout(() => {
-          handleSyncAllCopiedTraders();
-        }, 150);
+        await Promise.race([syncTaskPromise, timeoutGuardPromise]);
+      } finally {
+        if (hardTimeoutId) clearTimeout(hardTimeoutId);
+        if (activeSyncAbortControllerRef.current === syncController) {
+          activeSyncAbortControllerRef.current = null;
+          isSyncInFlightRef.current = false;
+          setIsSyncingAll(false);
+        }
+        if (pendingResyncRef.current) {
+          pendingResyncRef.current = false;
+          setTimeout(() => {
+            handleSyncAllCopiedTraders();
+          }, 120);
+        }
       }
-    }
-  }, [refreshCopiedTradersList, routeSyncedLogsToKuCoin]);
+    },
+    [refreshCopiedTradersList, routeSyncedLogsToKuCoin]
+  );
 
   handleSyncAllCopiedTradersRef.current = handleSyncAllCopiedTraders;
 
@@ -891,18 +1079,32 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (connectionState.tickers.length > 0 && !hasInitialTraderSyncRunRef.current) {
       hasInitialTraderSyncRunRef.current = true;
-      handleSyncAllCopiedTraders();
+      handleSyncAllCopiedTraders({ urgent: true, reason: 'initial_connect' });
     }
   }, [connectionState.tickers.length, handleSyncAllCopiedTraders]);
 
+  // Immediate dual-exchange ping measurement on startup
+  useEffect(() => {
+    refreshExchangePings();
+  }, [refreshExchangePings]);
+
   // Centralized Background Scheduler:
-  // Coordinates copied-traders sync (4.5s visible / 5s hidden) and 24h market metadata refresh (15s visible-only),
-  // automatically cleaning up and reconfiguring all interval handles and listeners on visibility state changes.
+  // Coordinates real-time copied traders & whales sync (1.5s visible / 2.5s hidden + sleep-drift recovery),
+  // separate Binance & KuCoin ping probes (8s visible), and 24h market metadata refresh (15s visible-only).
   useEffect(() => {
     const scheduler = createCentralizedSyncScheduler({
       shouldPauseAll: () => mobileNotifications.isAppStoppedByFullExit(),
       onServiceWorkerHeartbeatAck: () => {
         mobileNotifications.acknowledgeServiceWorkerHeartbeat();
+      },
+      onVisibilityStateChange: (state) => {
+        mobileNotifications.notifyServiceWorkerVisibility(state);
+      },
+      onWakeupSync: () => {
+        // Re-ensure Binance WebSocket price stream is live right after phone sleep / background resume
+        if (Date.now() - lastWsPriceTickAtRef.current > 6000 && wsStreamRef.current) {
+          wsStreamRef.current.start(binanceConfigRef.current.environment);
+        }
       },
       onServiceWorkerNotificationClick: (data) => {
         if (data?.accountId) {
@@ -910,23 +1112,38 @@ export const App: React.FC = () => {
         }
         setSelectedTab('Simulation');
       },
-      wakeupDebounceMs: 1200,
+      wakeupDebounceMs: 400,
     });
 
-    // Task 1: Real-time copied traders & whales synchronization (runs every 2.0s when visible and 3.0s when hidden)
+    // Task 1: Real-time copied traders & whales synchronization (1.5s visible / 2.5s hidden + instant wakeup recovery)
     scheduler.registerTask({
       id: 'copied-traders-sync',
-      intervalMs: 2000,
-      hiddenIntervalMs: 3000,
+      intervalMs: 1500,
+      hiddenIntervalMs: 2500,
       runWhenHidden: true,
       runOnWakeup: true,
-      minDedupGapMs: 400,
-      onTick: () => {
-        handleSyncAllCopiedTraders();
+      minDedupGapMs: 350,
+      onTick: (meta) => {
+        handleSyncAllCopiedTraders({
+          urgent: Boolean(meta?.urgent),
+          reason: meta?.reason || 'interval',
+        });
       },
     });
 
-    // Task 2: Full 24h market metadata refresh (runs ONLY when app is visible; interval handle is cleaned up when hidden)
+    // Task 2: Lightweight separate Binance & KuCoin ping probes (8s visible + immediate on wakeup)
+    scheduler.registerTask({
+      id: 'exchange-ping-sync',
+      intervalMs: 8000,
+      runWhenHidden: false,
+      runOnWakeup: true,
+      minDedupGapMs: 2000,
+      onTick: () => {
+        refreshExchangePings();
+      },
+    });
+
+    // Task 3: Full 24h market metadata refresh (runs ONLY when app is visible; interval handle is cleaned up when hidden)
     scheduler.registerTask({
       id: 'market-metadata-sync',
       intervalMs: 15000,
@@ -942,7 +1159,7 @@ export const App: React.FC = () => {
       },
     });
 
-    // Task 3: Periodic Memory Cleanup & Cache Eviction Guard (prevents OOM crashes on low-end devices)
+    // Task 4: Periodic Memory Cleanup & Cache Eviction Guard (prevents OOM crashes on low-end devices)
     scheduler.registerTask({
       id: 'memory-cleanup-guard',
       intervalMs: 30000,
@@ -960,7 +1177,7 @@ export const App: React.FC = () => {
     return () => {
       scheduler.stop();
     };
-  }, [handleSyncAllCopiedTraders]);
+  }, [handleSyncAllCopiedTraders, refreshExchangePings]);
 
   // Startup History Logs Cleanup (> 30 days): runs automatically on application startup
   // to purge expired closed trades, notifications, sync checkpoints, and KuCoin order logs
@@ -1003,7 +1220,7 @@ export const App: React.FC = () => {
     [refreshCopiedTradersList, updatePaperSnapshot]
   );
 
-  // Manual trade action (Supports Market or Custom Entry Price, Stop-Loss, Take-Profit, Leverage, and Account Selection)
+  // Manual trade action (Supports Market or Custom Entry Price, Stop-Loss, Take-Profit, Trailing Stop, Leverage, and Account Selection)
   const handleOpenPaperOrder = (
     symbol: string,
     side: 'LONG' | 'SHORT',
@@ -1013,6 +1230,7 @@ export const App: React.FC = () => {
     options?: {
       stopLossPrice?: number;
       takeProfitPrice?: number;
+      trailingStopPercent?: number;
       accountId?: string;
       useCustomPrice?: boolean;
     }
@@ -1045,7 +1263,8 @@ export const App: React.FC = () => {
       targetAcc.id,
       liveMarketPrice,
       options?.stopLossPrice,
-      options?.takeProfitPrice
+      options?.takeProfitPrice,
+      options?.trailingStopPercent
     );
     updatePaperSnapshot();
 
@@ -1078,10 +1297,94 @@ export const App: React.FC = () => {
       .catch(console.warn);
   };
 
+  const handleCreatePendingLimitOrder = useCallback(
+    (params: {
+      symbol: string;
+      side: 'LONG' | 'SHORT';
+      limitPrice: number;
+      marginUsdt: number;
+      leverage: number;
+      stopLossPrice?: number;
+      takeProfitPrice?: number;
+      trailingStopPercent?: number;
+      accountId?: string;
+    }) => {
+      const created = paperEngine.createPendingLimitOrder(params);
+      updatePaperSnapshot();
+      return created;
+    },
+    [updatePaperSnapshot]
+  );
+
+  const handleCancelPendingLimitOrder = useCallback(
+    (orderId: string) => {
+      paperEngine.cancelPendingLimitOrder(orderId);
+      updatePaperSnapshot();
+    },
+    [updatePaperSnapshot]
+  );
+
   const handleClosePaperPosition = (positionId: string, exitPrice: number) => {
-    paperEngine.closePosition(positionId, exitPrice);
+    const existing = paperSnapshot.positions.find((p) => p.id === positionId);
+    const closed = paperEngine.closePosition(positionId, exitPrice);
     updatePaperSnapshot();
+
+    const targetPos = closed || existing;
+    if (targetPos) {
+      const targetAcc = paperEngine.getAccount(targetPos.accountId);
+      if (targetAcc.settings.mode === 'REAL') {
+        const closeSide: 'LONG' | 'SHORT' = targetPos.side === 'LONG' ? 'SHORT' : 'LONG';
+        executeKuCoinOrder({
+          config: {
+            ...kucoinConfigRef.current,
+            enableLiveExecution: true,
+          },
+          binanceSymbol: targetPos.symbol,
+          side: closeSide,
+          amountUsdt: Math.max(1, targetPos.marginUsdt || targetAcc.settings.tradeValueUsdt),
+          entryPrice: exitPrice,
+          leverage: targetPos.leverage,
+          reduceOnly: true,
+          sourceTraderName: `${targetPos.sourceTraderName || 'تداول يدوي'} (${targetAcc.name})`,
+          sourceSignal: `Manual Full Close (${targetPos.symbol} @ ${exitPrice})`,
+        })
+          .then((ord) => {
+            setKucoinConnectionState((prev) => ({
+              ...prev,
+              recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(0, 50),
+            }));
+          })
+          .catch(console.warn);
+      }
+    }
   };
+
+  const handleUpdatePositionRiskLevels = useCallback(
+    (
+      positionId: string,
+      levels: {
+        stopLossPrice?: number | null;
+        takeProfitPrice?: number | null;
+        trailingStopPercent?: number | null;
+      }
+    ) => {
+      paperEngine.updatePositionRiskLevels(positionId, levels);
+      updatePaperSnapshot();
+    },
+    [updatePaperSnapshot]
+  );
+
+  const handleMoveStopLossToBreakEven = useCallback(
+    (positionId: string, currentPrice?: number) => {
+      try {
+        paperEngine.moveStopLossToBreakEven(positionId, undefined, currentPrice);
+        updatePaperSnapshot();
+      } catch (err) {
+        console.warn('Break-Even guard:', err instanceof Error ? err.message : err);
+      }
+    },
+    [updatePaperSnapshot]
+  );
 
   const handleSecurePaperPosition = useCallback(
     (positionId: string, currentPrice: number, bufferPercent: number = 0.2) => {
@@ -1141,8 +1444,45 @@ export const App: React.FC = () => {
     price: number,
     customAddedMarginUsdt?: number
   ) => {
+    const existing = paperSnapshot.positions.find((p) => p.id === positionId);
     paperEngine.scaleInPosition(positionId, addPercent, price, Date.now(), customAddedMarginUsdt);
     updatePaperSnapshot();
+
+    if (existing) {
+      const targetAcc = paperEngine.getAccount(existing.accountId);
+      if (targetAcc.settings.mode === 'REAL') {
+        const addedMargin =
+          customAddedMarginUsdt && customAddedMarginUsdt > 0
+            ? customAddedMarginUsdt
+            : Number(
+                (
+                  (existing.initialMarginUsdt || existing.marginUsdt || 25) *
+                  (Math.max(1, addPercent) / 100)
+                ).toFixed(2)
+              );
+        executeKuCoinOrder({
+          config: {
+            ...kucoinConfigRef.current,
+            enableLiveExecution: true,
+          },
+          binanceSymbol: existing.symbol,
+          side: existing.side,
+          amountUsdt: Math.max(1, addedMargin),
+          entryPrice: price,
+          leverage: existing.leverage,
+          reduceOnly: false,
+          sourceTraderName: `${existing.sourceTraderName || 'تداول يدوي'} (${targetAcc.name})`,
+          sourceSignal: `Manual Scale-In (${existing.symbol} +${addedMargin}$ @ ${price})`,
+        })
+          .then((ord) => {
+            setKucoinConnectionState((prev) => ({
+              ...prev,
+              recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(0, 50),
+            }));
+          })
+          .catch(console.warn);
+      }
+    }
   };
 
   const handlePartialExitPaperPosition = (
@@ -1150,8 +1490,40 @@ export const App: React.FC = () => {
     withdrawPercent: number,
     price: number
   ) => {
+    const existing = paperSnapshot.positions.find((p) => p.id === positionId);
     paperEngine.partialExitPosition(positionId, withdrawPercent, price, Date.now());
     updatePaperSnapshot();
+
+    if (existing) {
+      const targetAcc = paperEngine.getAccount(existing.accountId);
+      if (targetAcc.settings.mode === 'REAL') {
+        const closeSide: 'LONG' | 'SHORT' = existing.side === 'LONG' ? 'SHORT' : 'LONG';
+        const exitMargin = Number(
+          ((existing.marginUsdt || 25) * (Math.min(100, Math.max(1, withdrawPercent)) / 100)).toFixed(2)
+        );
+        executeKuCoinOrder({
+          config: {
+            ...kucoinConfigRef.current,
+            enableLiveExecution: true,
+          },
+          binanceSymbol: existing.symbol,
+          side: closeSide,
+          amountUsdt: Math.max(1, exitMargin),
+          entryPrice: price,
+          leverage: existing.leverage,
+          reduceOnly: true,
+          sourceTraderName: `${existing.sourceTraderName || 'تداول يدوي'} (${targetAcc.name})`,
+          sourceSignal: `Manual Partial Exit -${withdrawPercent}% (${existing.symbol} @ ${price})`,
+        })
+          .then((ord) => {
+            setKucoinConnectionState((prev) => ({
+              ...prev,
+              recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(0, 50),
+            }));
+          })
+          .catch(console.warn);
+      }
+    }
   };
 
   const handleResetPaper = () => {
@@ -1516,12 +1888,16 @@ export const App: React.FC = () => {
             connectionState={connectionState}
             kucoinConnectionState={kucoinConnectionState}
             paperSnapshot={paperSnapshot}
+            pendingLimitOrders={paperSnapshot.pendingLimitOrders}
+            wsStatus={wsStatus}
             config={binanceConfig}
             onOpenKucoinSetup={handleOpenKucoinApi}
             onRefreshMarket={() => handleTestBinanceConnection(binanceConfig)}
             onRefreshKucoin={() => handleTestKuCoinConnection(kucoinConfig)}
             onFetchRealKucoinBalance={() => handleTestKuCoinConnection(kucoinConfig, true)}
             onOpenOrder={handleOpenPaperOrder}
+            onCreatePendingLimitOrder={handleCreatePendingLimitOrder}
+            onCancelPendingLimitOrder={handleCancelPendingLimitOrder}
             onSelectAccount={handleSelectVirtualAccount}
             onNavigateToTrading={() => setSelectedTab('Simulation')}
           />
@@ -1531,37 +1907,35 @@ export const App: React.FC = () => {
           selectedTab === 'KuCoinAPI' ||
           selectedTab === 'BinanceAPI') && (
           <div className="space-y-4 animate-in fade-in duration-200">
-            <div className="bg-[#12171D] border border-[#1E2733] rounded-2xl px-4 pt-3.5 pb-0 overflow-hidden">
-              <div className="flex items-center justify-between gap-2 pb-2.5">
-                <div>
-                  <h2 className="text-base sm:text-lg font-bold text-white">
-                    ربط المنصات
-                  </h2>
-                  <p className="text-xs text-[#8A99AD] mt-0.5">
-                    كوكوين لتنفيذ الصفقات وإدارة الرصيد • باينانس لجلب بيانات المتداولين والحيتان والأسعار
-                  </p>
-                </div>
+            <div className="bg-[#12161C] border border-[#1C232D] rounded-xl px-4 pt-3 pb-0 overflow-hidden">
+              <div className="flex items-center justify-between gap-2 pb-2">
+                <h2 className="text-sm sm:text-base font-bold text-white">
+                  ربط المنصات
+                </h2>
+                <span className="text-[11px] text-[#848E9C]">
+                  كوكوين للتنفيذ · باينانس للبيانات
+                </span>
               </div>
 
-              <div className="flex items-center border-t border-[#1E2733] -mx-4 px-4">
+              <div className="flex items-center border-t border-[#1C232D] -mx-4 px-4">
                 <button
                   type="button"
                   onClick={() => {
                     setApiSubTab('KUCOIN');
                   }}
                   data-testid="api_subtab_kucoin"
-                  className={`flex-1 py-3 px-3 text-xs sm:text-sm font-bold border-b-2 flex items-center justify-center gap-2 transition-colors cursor-pointer ${
+                  className={`flex-1 py-2.5 px-3 text-xs sm:text-sm font-bold border-b-2 flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap ${
                     apiSubTab === 'KUCOIN'
                       ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
-                      : 'border-transparent text-[#8A99AD] hover:text-white'
+                      : 'border-transparent text-[#848E9C] hover:text-white'
                   }`}
                 >
                   <span
                     className={`w-2 h-2 rounded-full ${
-                      kucoinConnectionState.isConnected ? 'bg-[#01BC8D]' : 'bg-[#F6465D]'
+                      kucoinConnectionState.isConnected ? 'bg-[#01BC8D]' : 'bg-[#F65454]'
                     }`}
                   />
-                  <span>كوكوين للتنفيذ</span>
+                  <span>كوكوين</span>
                   {kucoinSecurityConfig.enabled &&
                     (isKucoinSecurityUnlocked ? (
                       <Unlock className="w-3.5 h-3.5 text-[#01BC8D]" />
@@ -1576,18 +1950,18 @@ export const App: React.FC = () => {
                     setApiSubTab('BINANCE');
                   }}
                   data-testid="api_subtab_binance"
-                  className={`flex-1 py-3 px-3 text-xs sm:text-sm font-bold border-b-2 flex items-center justify-center gap-2 transition-colors cursor-pointer ${
+                  className={`flex-1 py-2.5 px-3 text-xs sm:text-sm font-bold border-b-2 flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap ${
                     apiSubTab === 'BINANCE'
                       ? 'border-[#01BC8D] text-[#01BC8D] bg-[#01BC8D]/5'
-                      : 'border-transparent text-[#8A99AD] hover:text-white'
+                      : 'border-transparent text-[#848E9C] hover:text-white'
                   }`}
                 >
                   <span
                     className={`w-2 h-2 rounded-full ${
-                      connectionState.isConnected ? 'bg-[#01BC8D]' : 'bg-[#F6465D]'
+                      connectionState.isConnected ? 'bg-[#01BC8D]' : 'bg-[#F65454]'
                     }`}
                   />
-                  <span>باينانس للمعلومات</span>
+                  <span>باينانس</span>
                 </button>
               </div>
             </div>
@@ -1614,6 +1988,7 @@ export const App: React.FC = () => {
                 connectionState={connectionState}
                 onSaveAndTest={handleSaveAndTestBinance}
                 onClearKeys={handleClearBinanceKeys}
+                onOpenSettingsTab={() => setSelectedTab('Settings')}
               />
             )}
           </div>
@@ -1677,6 +2052,9 @@ export const App: React.FC = () => {
             onOpenOrder={handleOpenPaperOrder}
             onClosePosition={handleClosePaperPosition}
             onSecurePosition={handleSecurePaperPosition}
+            onUpdatePositionRiskLevels={handleUpdatePositionRiskLevels}
+            onMoveStopLossToBreakEven={handleMoveStopLossToBreakEven}
+            onCancelPendingLimitOrder={handleCancelPendingLimitOrder}
             onExecutePendingChoice={handleExecutePendingReconnectChoice}
             onDismissPendingChoice={handleDismissPendingReconnectChoice}
             onTriggerSampleReconnectChoice={handleTriggerSampleReconnectChoice}
@@ -1708,6 +2086,9 @@ export const App: React.FC = () => {
           <SettingsTab
             config={binanceConfig}
             connectionState={connectionState}
+            kucoinConfig={kucoinConfig}
+            onSaveKuCoinSecrets={handleSaveKuCoinSecrets}
+            onSaveBinanceSecret={handleSaveBinanceSecret}
             notificationSettings={notificationSettings}
             onUpdateNotificationSettings={(partial) => mobileNotifications.updateSettings(partial)}
             securityConfig={kucoinSecurityConfig}
@@ -1719,30 +2100,6 @@ export const App: React.FC = () => {
           />
         )}
         </AppErrorBoundary>
-        {/* Global App Version Bar visible at the bottom of every screen */}
-        <div
-          data-testid="app_global_version_footer"
-          className="mt-6 pt-3 border-t border-[#1E2733]/70 flex items-center justify-between gap-2 text-[11px] text-[#8A99AD]"
-        >
-          <div className="flex items-center gap-2">
-            <span className="font-bold text-[#F0F4F8] font-mono">Copy TR</span>
-            <span>•</span>
-            <span>منصة التداول والنسخ</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span>الإصدار الحالي:</span>
-            <span
-              dir="ltr"
-              data-testid="app-version-badge-footer"
-              className="px-2 py-0.5 rounded-md bg-[#12171D] border border-[#01BC8D]/40 text-[#01BC8D] font-mono font-bold tabular-nums"
-            >
-              v{APP_VERSION}
-            </span>
-            <span className="hidden sm:inline text-[10px] text-[#8A99AD]">
-              ({APP_PROMPT_REVISION} تحديثات من {APP_MAJOR_VERSION}.0)
-            </span>
-          </div>
-        </div>
       </main>
 
       {/* Bottom Navigation */}

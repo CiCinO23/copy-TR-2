@@ -1,15 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   CheckCircle2,
   Info,
   Key,
   Lock,
-  Eye,
-  EyeOff,
   ShieldCheck,
-  AlertTriangle,
   Trash2,
-  ExternalLink,
 } from 'lucide-react';
 import { BinanceConfig, BinanceConnectionState, BinanceEnvironment } from '../types';
 import { BINANCE_ENVIRONMENTS } from '../services/binanceApi';
@@ -19,6 +15,7 @@ interface BinanceApiTabProps {
   connectionState: BinanceConnectionState;
   onSaveAndTest: (config: BinanceConfig) => void;
   onClearKeys: () => void;
+  onOpenSettingsTab?: () => void;
 }
 
 export const BinanceApiTab: React.FC<BinanceApiTabProps> = ({
@@ -26,13 +23,19 @@ export const BinanceApiTab: React.FC<BinanceApiTabProps> = ({
   connectionState,
   onSaveAndTest,
   onClearKeys,
+  onOpenSettingsTab,
 }) => {
   const [selectedEnv, setSelectedEnv] = useState<BinanceEnvironment>(config.environment);
   const [baseUrl, setBaseUrl] = useState<string>(config.customBaseUrl);
   const [apiKey, setApiKey] = useState<string>(config.apiKey);
-  const [apiSecret, setApiSecret] = useState<string>(config.apiSecret);
   const [readOnlyMode, setReadOnlyMode] = useState<boolean>(config.readOnlyMode);
-  const [showSecret, setShowSecret] = useState<boolean>(false);
+
+  useEffect(() => {
+    setSelectedEnv(config.environment);
+    setBaseUrl(config.customBaseUrl);
+    setApiKey(config.apiKey);
+    setReadOnlyMode(config.readOnlyMode);
+  }, [config.environment, config.customBaseUrl, config.apiKey, config.readOnlyMode]);
 
   const handleSelectEnv = (env: BinanceEnvironment) => {
     setSelectedEnv(env);
@@ -44,7 +47,7 @@ export const BinanceApiTab: React.FC<BinanceApiTabProps> = ({
       environment: selectedEnv,
       customBaseUrl: baseUrl.trim(),
       apiKey: apiKey.trim(),
-      apiSecret: apiSecret.trim(),
+      apiSecret: (config.apiSecret || '').trim(),
       recvWindow: config.recvWindow || 5000,
       readOnlyMode,
     });
@@ -207,33 +210,42 @@ export const BinanceApiTab: React.FC<BinanceApiTabProps> = ({
           </div>
         </div>
 
-        {/* API Secret */}
-        <div className="mb-4">
-          <label className="block text-xs font-medium text-[#8A99AD] mb-1.5">
-            المفتاح السري (Secret Key)
-          </label>
-          <div className="relative">
-            <span className="absolute right-3.5 top-3 text-[#01BC8D]">
-              <Lock className="w-4 h-4" />
-            </span>
-            <input
-              type={showSecret ? 'text' : 'password'}
-              value={apiSecret}
-              onChange={(e) => setApiSecret(e.target.value)}
-              data-testid="input_api_secret"
-              dir="ltr"
-              placeholder="Binance Futures API Secret"
-              className="w-full bg-[#0B0E11] border border-[#232E3A] focus:border-[#01BC8D] focus:outline-none rounded-xl pr-10 pl-10 py-2.5 text-xs text-white font-mono transition-colors"
-            />
+        {/* Masked API Secret Status (Managed Exclusively in Settings) */}
+        <div
+          data-testid="binance_secret_managed_in_settings_box"
+          className="mb-4 bg-[#0B0E11] border border-[#232E3A] rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+        >
+          <div className="space-y-1">
+            <div className="text-xs font-bold text-white flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5 text-[#01BC8D]" />
+              <span>المفتاح السري لـ Binance (API Secret)</span>
+            </div>
+            <div className="text-[11px]">
+              <span
+                className={`px-2 py-0.5 rounded font-mono text-[10px] border ${
+                  config.apiSecret?.trim()
+                    ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/40'
+                    : 'bg-[#2B1216] text-[#F6465D] border-[#F6465D]/40'
+                }`}
+              >
+                Secret: {config.apiSecret?.trim() ? '•••••••• (محفوظ بأمان)' : 'غير مُدخل'}
+              </span>
+            </div>
+            <p className="text-[10px] text-[#8A99AD]">
+              لحماية حسابك، يتم إدخال أو تعديل المفتاح السري حصرياً من صفحة الإعدادات.
+            </p>
+          </div>
+          {onOpenSettingsTab && (
             <button
               type="button"
-              onClick={() => setShowSecret(!showSecret)}
-              data-testid="toggle_secret_visibility"
-              className="absolute left-3.5 top-3 text-[#8A99AD] hover:text-white"
+              onClick={onOpenSettingsTab}
+              data-testid="binance_jump_to_settings_secrets_btn"
+              className="text-xs bg-[#161D26] hover:bg-[#01BC8D] text-[#01BC8D] hover:text-[#0B0E11] border border-[#01BC8D]/40 px-3 py-2 rounded-xl font-bold transition-colors cursor-pointer shrink-0 flex items-center gap-1.5"
             >
-              {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>إدارة المفاتيح في الإعدادات</span>
             </button>
-          </div>
+          )}
         </div>
 
         {/* Read-Only Mode Switch */}
@@ -268,17 +280,16 @@ export const BinanceApiTab: React.FC<BinanceApiTabProps> = ({
           <CheckCircle2 className="w-4 h-4" />
           <span>
             {connectionState.isTesting
-              ? 'جاري فحص الاتصال وتحديث البيانات...'
-              : 'حفظ الإعدادات وإعادة اختبار الاتصال بـ باينانس'}
+              ? 'جاري اختبار الاتصال...'
+              : 'حفظ واختبار الاتصال'}
           </span>
         </button>
 
         {/* Clear keys button */}
-        {(apiKey || apiSecret) && (
+        {(apiKey || Boolean(config.apiSecret)) && (
           <button
             onClick={() => {
               setApiKey('');
-              setApiSecret('');
               onClearKeys();
             }}
             className="w-full mt-2 border border-[#F6465D]/40 hover:bg-[#F6465D]/15 text-[#F6465D] font-semibold py-2 px-4 rounded-xl flex items-center justify-center gap-2 text-xs transition-colors cursor-pointer"

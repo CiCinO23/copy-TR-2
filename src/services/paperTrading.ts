@@ -2,6 +2,7 @@ import type {
   PaperPosition,
   PaperAccountSnapshot,
   PaperVirtualAccountSummary,
+  PendingLimitOrder,
   TradeExecutionSettings,
   TraderOpenPosition,
   TraderLatestRecord,
@@ -45,6 +46,15 @@ import type {
   WorkerSyncBatchResponse,
   WorkerTraderSyncInputTask,
 } from './tradeSyncWorkerLogic';
+import {
+  calculateLiquidationPrice,
+  updateTrailingStopForPosition,
+  evaluateCopySlippageGuard,
+  evaluateDailyLossCircuitBreaker,
+  isSymbolAllowedByFilter,
+  resolveEffectiveCopySide,
+  calculateProportionalCopyMargin,
+} from './proRiskAndAnalytics';
 
 const PAPER_STORAGE_KEY = 'whale_copy_paper_state_v3';
 const TRADE_SETTINGS_STORAGE_KEY = 'whale_copy_trade_settings_v1';
@@ -53,6 +63,7 @@ const ACTIVE_ACCOUNT_ID_STORAGE_KEY = 'whale_copy_active_account_id_v1';
 const PENDING_CHOICES_STORAGE_KEY = 'whale_copy_pending_reconnect_choices_v1';
 const DISMISSED_CHOICES_STORAGE_KEY = 'whale_copy_dismissed_reconnect_choices_v1';
 const TRADER_SYNC_CHECKPOINTS_STORAGE_KEY = 'whale_copy_trader_sync_checkpoints_v1';
+const PENDING_LIMIT_ORDERS_STORAGE_KEY = 'whale_copy_pending_limit_orders_v1';
 
 function getSafeStorage(): Storage | null {
   try {
@@ -76,6 +87,15 @@ export const DEFAULT_TRADE_SETTINGS: TradeExecutionSettings = {
   scaleInSamePercentAsTrader: true,
   partialExitSamePercentAsTrader: true,
   promptOnUnfavorableLateEntry: true,
+  trailingStopPercent: 0,
+  maxSlippagePercent: 0,
+  dailyLossLimitPercent: 0,
+  dailyCircuitBreakerPaused: false,
+  allowedSymbols: [],
+  blockedSymbols: [],
+  reverseCopyMode: false,
+  proportionalCopyMode: false,
+  proportionalCopyMultiplier: 1.0,
 };
 
 interface StoredPaperState {
@@ -102,16 +122,232 @@ export class PaperEngine {
   private pendingReconnectChoices: PendingReconnectTradeChoice[] = [];
   private dismissedReconnectChoiceIds: Set<string> = new Set();
   private traderSyncCheckpoints: Record<string, TraderSyncCheckpoint> = {};
+  private pendingLimitOrders: PendingLimitOrder[] = [];
+  private triggeredAutoLogsQueue: CopiedSyncLog[] = [];
   private lastKnownPrices: Record<string, number> = {};
   private batchSaveDepth: number = 0;
   private batchDirtyState: boolean = false;
   private batchDirtyPendingChoices: boolean = false;
   private batchDirtyCheckpoints: boolean = false;
+  private debouncedSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.loadMultiAccounts();
     this.loadPendingChoices();
     this.loadTraderSyncCheckpoints();
+    this.loadPendingLimitOrders();
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pagehide', () => this.flushDebouncedSave());
+    }
+  }
+
+  private scheduleDebouncedSaveState(): void {
+    if (this.debouncedSaveTimer) return;
+    this.debouncedSaveTimer = setTimeout(() => {
+      this.debouncedSaveTimer = null;
+      this.saveState();
+    }, 500);
+  }
+
+  public flushDebouncedSave(): void {
+    if (this.debouncedSaveTimer) {
+      clearTimeout(this.debouncedSaveTimer);
+      this.debouncedSaveTimer = null;
+      this.saveState();
+    }
+  }
+
+  private loadPendingLimitOrders(): void {
+    const storage = getSafeStorage();
+    if (!storage) return;
+    try {
+      const raw = storage.getItem(PENDING_LIMIT_ORDERS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this.pendingLimitOrders = parsed.filter(
+            (o: PendingLimitOrder) => o && o.status === 'PENDING' && o.limitPrice > 0
+          );
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private savePendingLimitOrders(): void {
+    const storage = getSafeStorage();
+    if (!storage) return;
+    try {
+      storage.setItem(PENDING_LIMIT_ORDERS_STORAGE_KEY, JSON.stringify(this.pendingLimitOrders));
+    } catch {
+      // ignore
+    }
+  }
+
+  /**
+   * Drains automatically triggered SL / Trailing-Stop / TP / Liquidation / Limit-Fill logs
+   * so App.tsx can route REAL-mode orders to KuCoin and surface them in the activity feed.
+   */
+  public drainTriggeredAutoLogs(): CopiedSyncLog[] {
+    if (this.triggeredAutoLogsQueue.length === 0) return [];
+    const drained = [...this.triggeredAutoLogsQueue];
+    this.triggeredAutoLogsQueue = [];
+    return drained;
+  }
+
+  public getPendingLimitOrders(accountId?: string): PendingLimitOrder[] {
+    const targetAccId = accountId || this.getActiveAccountId();
+    return this.pendingLimitOrders.filter(
+      (o) => o.status === 'PENDING' && o.accountId === targetAccId
+    );
+  }
+
+  /**
+   * Queues a genuine Pending Limit Order that waits until live price touches `limitPrice`
+   * (LONG fills when price <= limitPrice; SHORT fills when price >= limitPrice).
+   */
+  public createPendingLimitOrder(params: {
+    symbol: string;
+    side: 'LONG' | 'SHORT';
+    limitPrice: number;
+    marginUsdt: number;
+    leverage: number;
+    stopLossPrice?: number;
+    takeProfitPrice?: number;
+    trailingStopPercent?: number;
+    accountId?: string;
+    sourceType?: 'MANUAL' | 'COPY_TRADING' | 'SMART_MONEY';
+  }): PendingLimitOrder {
+    const acc = this.getAccount(params.accountId);
+    const cleanSymbol = params.symbol.toUpperCase().trim();
+    const safeLimit = Number(params.limitPrice);
+    const safeMargin = Math.max(1, Number(params.marginUsdt) || acc.settings.tradeValueUsdt || 25);
+    const safeLev = Math.max(1, Math.min(125, Number(params.leverage) || acc.settings.leverage || 5));
+
+    if (!cleanSymbol || !Number.isFinite(safeLimit) || safeLimit <= 0) {
+      throw new Error('يرجى إدخال رمز عملة وسعر أمر معلق (Limit Price) صحيح.');
+    }
+
+    const quantity = Number(((safeMargin * safeLev) / safeLimit).toFixed(5));
+    const order: PendingLimitOrder = {
+      id: `limit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      accountId: acc.id,
+      accountName: acc.name,
+      symbol: cleanSymbol,
+      side: params.side,
+      limitPrice: safeLimit,
+      marginUsdt: Number(safeMargin.toFixed(2)),
+      quantity,
+      leverage: safeLev,
+      stopLossPrice: params.stopLossPrice && params.stopLossPrice > 0 ? params.stopLossPrice : undefined,
+      takeProfitPrice: params.takeProfitPrice && params.takeProfitPrice > 0 ? params.takeProfitPrice : undefined,
+      trailingStopPercent:
+        params.trailingStopPercent && params.trailingStopPercent > 0
+          ? params.trailingStopPercent
+          : undefined,
+      createdAt: Date.now(),
+      status: 'PENDING',
+      sourceType: params.sourceType || 'MANUAL',
+    };
+
+    this.pendingLimitOrders.unshift(order);
+    this.savePendingLimitOrders();
+    return order;
+  }
+
+  public cancelPendingLimitOrder(orderId: string): boolean {
+    const before = this.pendingLimitOrders.length;
+    this.pendingLimitOrders = this.pendingLimitOrders.filter((o) => o.id !== orderId);
+    if (this.pendingLimitOrders.length !== before) {
+      this.savePendingLimitOrders();
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Checks all PENDING limit orders against current live market prices and executes any touched orders.
+   */
+  public checkAndExecutePendingLimitOrders(currentPrices: Record<string, number>): CopiedSyncLog[] {
+    const logs: CopiedSyncLog[] = [];
+    if (!currentPrices || this.pendingLimitOrders.length === 0) return logs;
+
+    const remaining: PendingLimitOrder[] = [];
+    let changed = false;
+
+    for (const order of this.pendingLimitOrders) {
+      if (order.status !== 'PENDING') continue;
+      const livePrice =
+        currentPrices[order.symbol] || currentPrices[order.symbol.toUpperCase()];
+
+      if (!livePrice || livePrice <= 0) {
+        remaining.push(order);
+        continue;
+      }
+
+      const triggered =
+        (order.side === 'LONG' && livePrice <= order.limitPrice) ||
+        (order.side === 'SHORT' && livePrice >= order.limitPrice);
+
+      if (!triggered) {
+        remaining.push(order);
+        continue;
+      }
+
+      changed = true;
+      try {
+        const execPrice = order.limitPrice;
+        const opened = this.openPosition(
+          order.symbol,
+          order.side,
+          order.quantity,
+          execPrice,
+          order.leverage,
+          'أمر معلق (Limit)',
+          order.sourceType || 'MANUAL',
+          undefined,
+          undefined,
+          undefined,
+          100,
+          order.marginUsdt,
+          order.accountId,
+          execPrice,
+          order.stopLossPrice,
+          order.takeProfitPrice,
+          order.trailingStopPercent
+        );
+        const logEntry: CopiedSyncLog = {
+          id: `log_limit_fill_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          timestamp: Date.now(),
+          traderId: 'manual_limit_order',
+          traderName: 'أمر معلق (Limit Order)',
+          source: 'COPY_TRADING',
+          action: 'ENTRY',
+          volumePercent: 100,
+          symbol: opened.symbol,
+          side: opened.side,
+          price: execPrice,
+          quantity: opened.quantity,
+          leverage: opened.leverage,
+          accountId: opened.accountId,
+          accountName: opened.accountName,
+          messageAr: `[${opened.accountName}] تم تنفيذ الأمر المعلق (Limit) وفتح ${opened.symbol} (${opened.side}) عند السعر ${execPrice} USDT`,
+        };
+        logs.push(logEntry);
+        this.triggeredAutoLogsQueue.push(logEntry);
+      } catch (err) {
+        console.warn('Pending limit order fill failed (kept pending):', err);
+        remaining.push(order);
+        changed = false;
+      }
+    }
+
+    if (changed) {
+      this.pendingLimitOrders = remaining;
+      this.savePendingLimitOrders();
+    }
+    return logs;
   }
 
   /**
@@ -1021,7 +1257,8 @@ export class PaperEngine {
     accountId?: string,
     traderEntryPrice?: number,
     stopLossPrice?: number,
-    takeProfitPrice?: number
+    takeProfitPrice?: number,
+    trailingStopPercent?: number
   ): PaperPosition {
     const acc = this.getAccount(accountId);
     const openCount = this.getOpenPositionsCount(acc.id);
@@ -1057,6 +1294,37 @@ export class PaperEngine {
         ? Number(initialMarginOverride.toFixed(2))
         : cleanMargin;
 
+    // Resolve SL / TP / Trailing Stop defaults from account settings if not explicitly passed
+    let resolvedSl = stopLossPrice && stopLossPrice > 0 ? stopLossPrice : undefined;
+    let resolvedTp = takeProfitPrice && takeProfitPrice > 0 ? takeProfitPrice : undefined;
+    const resolvedTrailingPct =
+      trailingStopPercent && trailingStopPercent > 0
+        ? trailingStopPercent
+        : acc.settings.trailingStopPercent && acc.settings.trailingStopPercent > 0
+        ? acc.settings.trailingStopPercent
+        : undefined;
+
+    if (!resolvedSl && acc.settings.stopLossPercent > 0) {
+      const slPct = acc.settings.stopLossPercent / 100;
+      resolvedSl = Number(
+        (side === 'LONG' ? entryPrice * (1 - slPct) : entryPrice * (1 + slPct)).toPrecision(7)
+      );
+    }
+    if (!resolvedTp && acc.settings.takeProfitPercent > 0) {
+      const tpPct = acc.settings.takeProfitPercent / 100;
+      resolvedTp = Number(
+        (side === 'LONG' ? entryPrice * (1 + tpPct) : entryPrice * (1 - tpPct)).toPrecision(7)
+      );
+    }
+    if (!resolvedSl && resolvedTrailingPct && resolvedTrailingPct > 0) {
+      const trPct = resolvedTrailingPct / 100;
+      resolvedSl = Number(
+        (side === 'LONG' ? entryPrice * (1 - trPct) : entryPrice * (1 + trPct)).toPrecision(7)
+      );
+    }
+
+    const liquidationPrice = calculateLiquidationPrice(entryPrice, safeLeverage, side);
+
     const defaultComp = formatLateEntryComparisonDetails({
       traderEntryPrice: traderEntryPrice && traderEntryPrice > 0 ? traderEntryPrice : entryPrice,
       traderEntryTime: traderEntryTime || now,
@@ -1064,8 +1332,8 @@ export class PaperEngine {
       userEntryTime: now,
     });
 
-    const slLabel = stopLossPrice && stopLossPrice > 0 ? ` • SL @ ${stopLossPrice}` : '';
-    const tpLabel = takeProfitPrice && takeProfitPrice > 0 ? ` • TP @ ${takeProfitPrice}` : '';
+    const slLabel = resolvedSl && resolvedSl > 0 ? ` • SL @ ${resolvedSl}` : '';
+    const tpLabel = resolvedTp && resolvedTp > 0 ? ` • TP @ ${resolvedTp}` : '';
 
     const defaultAdjustments: PaperPosition['scaleAdjustments'] =
       initialScaleAdjustments && initialScaleAdjustments.length > 0
@@ -1098,10 +1366,15 @@ export class PaperEngine {
       initialMarginUsdt: baseInitialMargin,
       entryPrice,
       traderEntryPrice: traderEntryPrice && traderEntryPrice > 0 ? traderEntryPrice : entryPrice,
-      stopLossPrice: stopLossPrice && stopLossPrice > 0 ? stopLossPrice : undefined,
-      takeProfitPrice: takeProfitPrice && takeProfitPrice > 0 ? takeProfitPrice : undefined,
+      stopLossPrice: resolvedSl,
+      takeProfitPrice: resolvedTp,
+      trailingStopPercent: resolvedTrailingPct,
+      highestPriceSinceOpen: entryPrice,
+      lowestPriceSinceOpen: entryPrice,
+      liquidationPrice,
       leverage: safeLeverage,
       commissionUsdt: Number(entryCommission.toFixed(4)),
+      unaccountedCommissionUsdt: Number(entryCommission.toFixed(4)),
       status: 'OPEN',
       openTime: now,
       traderEntryTime: traderEntryTime || now,
@@ -1260,7 +1533,7 @@ export class PaperEngine {
 
     const openPositionsInAcc = acc.positions.filter((p) => p.status === 'OPEN');
     const plan = evaluateManualSinglePositionCopyPlan({
-      incomingPos: targetTraderPos,
+      incomingPos: params.pos,
       traderName: params.traderName,
       traderId: params.traderId,
       existingOpenPositions: openPositionsInAcc,
@@ -1417,34 +1690,132 @@ export class PaperEngine {
   }
 
   /**
-   * Automatically checks and executes any triggered Stop-Loss on open positions across all accounts
+   * Inline Risk Levels Editor (SL / TP / Trailing Stop %) on an active open position (v2.23)
+   */
+  public updatePositionRiskLevels(
+    positionId: string,
+    levels: {
+      stopLossPrice?: number | null;
+      takeProfitPrice?: number | null;
+      trailingStopPercent?: number | null;
+    },
+    accountId?: string
+  ): PaperPosition {
+    const { pos } = this.findAccountAndPosition(positionId, accountId);
+
+    if (levels.stopLossPrice !== undefined) {
+      pos.stopLossPrice =
+        levels.stopLossPrice !== null && levels.stopLossPrice > 0
+          ? Number(levels.stopLossPrice)
+          : undefined;
+      if (!pos.stopLossPrice) {
+        pos.isSecuredNearCurrent = false;
+      }
+    }
+    if (levels.takeProfitPrice !== undefined) {
+      pos.takeProfitPrice =
+        levels.takeProfitPrice !== null && levels.takeProfitPrice > 0
+          ? Number(levels.takeProfitPrice)
+          : undefined;
+    }
+    if (levels.trailingStopPercent !== undefined) {
+      const nextTrail =
+        levels.trailingStopPercent !== null && levels.trailingStopPercent > 0
+          ? Math.min(50, Math.max(0.1, Number(levels.trailingStopPercent)))
+          : undefined;
+      pos.trailingStopPercent = nextTrail;
+      if (nextTrail) {
+        pos.highestPriceSinceOpen = pos.highestPriceSinceOpen ?? pos.entryPrice;
+        pos.lowestPriceSinceOpen = pos.lowestPriceSinceOpen ?? pos.entryPrice;
+      }
+    }
+
+    this.saveState();
+    return pos;
+  }
+
+  /**
+   * Moves Stop-Loss immediately to Break-Even (entry price + 0.08% fee coverage buffer) (v2.23).
+   * Safety guard: when `currentMarketPrice` is provided, rejects moving SL past live price
+   * so the position is never stopped out immediately on the next tick.
+   */
+  public moveStopLossToBreakEven(
+    positionId: string,
+    accountId?: string,
+    currentMarketPrice?: number
+  ): PaperPosition {
+    const { pos } = this.findAccountAndPosition(positionId, accountId);
+    const feeCover = 0.0008; // 0.08% covers round-trip maker/taker commission
+    const breakEvenPrice =
+      pos.side === 'LONG'
+        ? Number((pos.entryPrice * (1 + feeCover)).toPrecision(7))
+        : Number((pos.entryPrice * (1 - feeCover)).toPrecision(7));
+
+    if (currentMarketPrice && Number.isFinite(currentMarketPrice) && currentMarketPrice > 0) {
+      const pricePastBreakEven =
+        pos.side === 'LONG'
+          ? currentMarketPrice > breakEvenPrice
+          : currentMarketPrice < breakEvenPrice;
+      if (!pricePastBreakEven) {
+        throw new Error(
+          pos.side === 'LONG'
+            ? `لا يمكن نقل وقف الخسارة لنقطة الدخول قبل أن يتجاوز السعر الحي ${breakEvenPrice} USDT.`
+            : `لا يمكن نقل وقف الخسارة لنقطة الدخول قبل أن يهبط السعر الحي دون ${breakEvenPrice} USDT.`
+        );
+      }
+    }
+
+    pos.stopLossPrice = breakEvenPrice;
+    pos.isSecuredNearCurrent = true;
+    this.saveState();
+
+    mobileNotifications.notifyPositionSecured({
+      position: pos,
+      currentPrice: currentMarketPrice && currentMarketPrice > 0 ? currentMarketPrice : pos.entryPrice,
+      stopLossPrice: breakEvenPrice,
+    });
+
+    return pos;
+  }
+
+  /**
+   * Automatically evaluates Auto-Liquidation, Trailing Stop-Loss ratcheting, Stop-Loss, and Take-Profit
+   * across all open positions in all accounts. Enqueues executed logs into `triggeredAutoLogsQueue`
+   * so App.tsx can dispatch REAL-mode KuCoin close orders.
    */
   public checkAndExecuteStopLosses(currentPrices: Record<string, number>): CopiedSyncLog[] {
     const logs: CopiedSyncLog[] = [];
     if (!currentPrices || Object.keys(currentPrices).length === 0) return logs;
 
+    let trailingStateMutated = false;
+
     for (const acc of this.accounts) {
       const openList = acc.positions.filter((p) => p.status === 'OPEN');
       for (const pos of openList) {
-        const livePrice = currentPrices[pos.symbol];
+        const livePrice =
+          currentPrices[pos.symbol] || currentPrices[pos.symbol.toUpperCase()];
         if (!livePrice || livePrice <= 0) continue;
 
-        if (
-          pos.stopLossPrice &&
-          pos.stopLossPrice > 0 &&
-          isStopLossTriggered({
-            side: pos.side,
-            stopLossPrice: pos.stopLossPrice,
-            currentMarketPrice: livePrice,
-          })
-        ) {
+        // 1. Auto-Liquidation Guard (Isolated Margin Simulation)
+        const liqPrice =
+          pos.liquidationPrice && pos.liquidationPrice > 0
+            ? pos.liquidationPrice
+            : calculateLiquidationPrice(pos.entryPrice, pos.leverage, pos.side);
+        const isLiquidated =
+          liqPrice > 0 &&
+          ((pos.side === 'LONG' && livePrice <= liqPrice) ||
+            (pos.side === 'SHORT' && livePrice >= liqPrice));
+
+        if (isLiquidated) {
           try {
-            const closed = this.closePosition(pos.id, livePrice, Date.now(), acc.id);
-            logs.push({
-              id: `log_sl_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            const closed = this.closePosition(pos.id, livePrice, Date.now(), acc.id, {
+              closeReason: 'LIQUIDATION',
+            });
+            const logEntry: CopiedSyncLog = {
+              id: `log_liq_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               timestamp: Date.now(),
-              traderId: pos.sourceTraderId || 'secured_sl',
-              traderName: pos.sourceTraderName || 'تأمين الصفقة',
+              traderId: pos.sourceTraderId || 'auto_liquidation',
+              traderName: pos.sourceTraderName || 'تصفية آلية (Liquidation)',
               source: pos.sourceType === 'SMART_MONEY' ? 'SMART_MONEY' : 'COPY_TRADING',
               action: 'EXIT',
               volumePercent: -100,
@@ -1455,14 +1826,72 @@ export class PaperEngine {
               leverage: closed.leverage,
               accountId: acc.id,
               accountName: acc.name,
-              messageAr: `[${acc.name}] تم تفعيل وقف الخسارة (SL) وإغلاق ${closed.symbol} بالسعر الحالي ${livePrice.toFixed(4)} USDT`,
+              messageAr: `[${acc.name}] تصفية آلية (Auto-Liquidation) لصفقة ${closed.symbol} (${closed.leverage}x) عند السعر ${livePrice.toFixed(4)} USDT`,
+            };
+            logs.push(logEntry);
+            this.triggeredAutoLogsQueue.push(logEntry);
+          } catch (e) {
+            console.warn('Auto-liquidation execution failed:', e);
+          }
+          continue;
+        }
+
+        // 2. Dynamic Trailing Stop-Loss Ratchet (moves strictly in favorable direction)
+        if (pos.trailingStopPercent && pos.trailingStopPercent > 0) {
+          const trailRes = updateTrailingStopForPosition(pos, livePrice);
+          if (trailRes.updated) {
+            pos.stopLossPrice = trailRes.stopLossPrice;
+            pos.highestPriceSinceOpen = trailRes.highestPriceSinceOpen;
+            pos.lowestPriceSinceOpen = trailRes.lowestPriceSinceOpen;
+            trailingStateMutated = true;
+          }
+        }
+
+        // 3. Stop-Loss / Trailing Stop Execution
+        if (
+          pos.stopLossPrice &&
+          pos.stopLossPrice > 0 &&
+          isStopLossTriggered({
+            side: pos.side,
+            stopLossPrice: pos.stopLossPrice,
+            currentMarketPrice: livePrice,
+          })
+        ) {
+          try {
+            const isTrailing = Boolean(pos.trailingStopPercent && pos.trailingStopPercent > 0);
+            const closed = this.closePosition(pos.id, livePrice, Date.now(), acc.id, {
+              closeReason: isTrailing ? 'TRAILING_STOP' : 'STOP_LOSS',
             });
+            const logEntry: CopiedSyncLog = {
+              id: `log_sl_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              timestamp: Date.now(),
+              traderId: pos.sourceTraderId || (isTrailing ? 'trailing_sl' : 'secured_sl'),
+              traderName:
+                pos.sourceTraderName ||
+                (isTrailing ? 'وقف خسارة متحرك (Trailing SL)' : 'وقف الخسارة (SL)'),
+              source: pos.sourceType === 'SMART_MONEY' ? 'SMART_MONEY' : 'COPY_TRADING',
+              action: 'EXIT',
+              volumePercent: -100,
+              symbol: closed.symbol,
+              side: closed.side,
+              price: livePrice,
+              quantity: closed.quantity,
+              leverage: closed.leverage,
+              accountId: acc.id,
+              accountName: acc.name,
+              messageAr: isTrailing
+                ? `[${acc.name}] تفعيل وقف الخسارة المتحرك (Trailing Stop ${pos.trailingStopPercent}%) وإغلاق ${closed.symbol} عند ${livePrice.toFixed(4)} USDT`
+                : `[${acc.name}] تم تفعيل وقف الخسارة (SL) وإغلاق ${closed.symbol} بالسعر الحالي ${livePrice.toFixed(4)} USDT`,
+            };
+            logs.push(logEntry);
+            this.triggeredAutoLogsQueue.push(logEntry);
           } catch (e) {
             console.warn('Stop-loss execution failed:', e);
           }
           continue;
         }
 
+        // 4. Take-Profit Execution
         if (
           pos.takeProfitPrice &&
           pos.takeProfitPrice > 0 &&
@@ -1473,8 +1902,10 @@ export class PaperEngine {
           })
         ) {
           try {
-            const closed = this.closePosition(pos.id, livePrice, Date.now(), acc.id);
-            logs.push({
+            const closed = this.closePosition(pos.id, livePrice, Date.now(), acc.id, {
+              closeReason: 'TAKE_PROFIT',
+            });
+            const logEntry: CopiedSyncLog = {
               id: `log_tp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               timestamp: Date.now(),
               traderId: pos.sourceTraderId || 'manual_tp',
@@ -1490,12 +1921,18 @@ export class PaperEngine {
               accountId: acc.id,
               accountName: acc.name,
               messageAr: `[${acc.name}] تم تحقيق الهدف وجني الأرباح (TP) وإغلاق ${closed.symbol} بالسعر الحالي ${livePrice.toFixed(4)} USDT`,
-            });
+            };
+            logs.push(logEntry);
+            this.triggeredAutoLogsQueue.push(logEntry);
           } catch (e) {
             console.warn('Take-profit execution failed:', e);
           }
         }
       }
+    }
+
+    if (trailingStateMutated) {
+      this.scheduleDebouncedSaveState();
     }
     return logs;
   }
@@ -1550,6 +1987,10 @@ export class PaperEngine {
     pos.quantity = Number(newTotalQty.toFixed(5));
     pos.marginUsdt = Number((pos.marginUsdt + addedMargin).toFixed(2));
     pos.commissionUsdt = Number(((pos.commissionUsdt || 0) + scaleCommission).toFixed(4));
+    pos.unaccountedCommissionUsdt = Number(
+      ((pos.unaccountedCommissionUsdt ?? pos.commissionUsdt ?? 0) + scaleCommission).toFixed(4)
+    );
+    pos.liquidationPrice = calculateLiquidationPrice(pos.entryPrice, pos.leverage, pos.side);
     pos.currentScalePercent = (pos.currentScalePercent || 100) + cleanPct;
 
     const ts = actionTimestamp || Date.now();
@@ -1637,8 +2078,15 @@ export class PaperEngine {
 
     pos.quantity = Number(Math.max(0.00001, pos.quantity - closedQty).toFixed(5));
     pos.marginUsdt = Number(Math.max(0.25, pos.marginUsdt - releasedMargin).toFixed(2));
+    const currentUnaccounted = pos.unaccountedCommissionUsdt ?? 0;
+    const allocatedEntryCommission = Number((currentUnaccounted * fraction).toFixed(4));
+    pos.unaccountedCommissionUsdt = Number(
+      Math.max(0, currentUnaccounted - allocatedEntryCommission).toFixed(4)
+    );
     pos.commissionUsdt = Number(((pos.commissionUsdt || 0) + exitCommission).toFixed(4));
-    pos.realizedPnl = Number(((pos.realizedPnl || 0) + netPartialPnl).toFixed(4));
+    pos.realizedPnl = Number(
+      ((pos.realizedPnl || 0) + netPartialPnl - allocatedEntryCommission).toFixed(4)
+    );
 
     const prevScale = pos.currentScalePercent || 100;
     const nextScale = Math.max(1, Math.round(prevScale * (1 - fraction)));
@@ -1688,7 +2136,12 @@ export class PaperEngine {
     exitPrice: number,
     exitTimestamp?: number,
     accountId?: string,
-    options?: { sourceEventId?: string; appliedEventKeys?: string[]; eventKey?: string }
+    options?: {
+      sourceEventId?: string;
+      appliedEventKeys?: string[];
+      eventKey?: string;
+      closeReason?: PaperPosition['closeReason'];
+    }
   ): PaperPosition {
     const { acc, pos } = this.findAccountAndPosition(positionId, accountId);
 
@@ -1700,27 +2153,48 @@ export class PaperEngine {
     const remainingMargin = pos.marginUsdt || (pos.quantity * pos.entryPrice) / pos.leverage;
 
     if (pos.executionMode !== 'REAL') {
-      acc.availableBalance = Math.max(0, acc.availableBalance + remainingMargin + netPnl);
+      const payout =
+        options?.closeReason === 'LIQUIDATION'
+          ? 0
+          : Math.max(0, remainingMargin + netPnl);
+      acc.availableBalance = Math.max(0, acc.availableBalance + payout);
     }
     acc.totalCommissionsPaid += exitCommission;
 
     const rawCloseTs = exitTimestamp || Date.now();
     const closeTs = rawCloseTs >= pos.openTime ? rawCloseTs : Date.now();
+    const remainingEntryCommission =
+      pos.unaccountedCommissionUsdt !== undefined
+        ? pos.unaccountedCommissionUsdt
+        : Math.max(0, pos.commissionUsdt || 0);
+
     pos.status = 'CLOSED';
     pos.closeTime = closeTs;
     pos.traderExitTime = rawCloseTs;
     pos.exitPrice = exitPrice;
     pos.currentScalePercent = 0;
+    pos.closeReason = options?.closeReason || pos.closeReason || 'MANUAL';
+    pos.unaccountedCommissionUsdt = 0;
     pos.commissionUsdt = Number(((pos.commissionUsdt || 0) + exitCommission).toFixed(4));
-    pos.realizedPnl = parseFloat(
-      ((pos.realizedPnl || 0) + netPnl - (pos.commissionUsdt - exitCommission)).toFixed(4)
-    );
+    pos.realizedPnl =
+      options?.closeReason === 'LIQUIDATION'
+        ? parseFloat(((pos.realizedPnl || 0) - remainingMargin - remainingEntryCommission).toFixed(4))
+        : parseFloat(((pos.realizedPnl || 0) + netPnl - remainingEntryCommission).toFixed(4));
 
     if (!pos.scaleAdjustments) pos.scaleAdjustments = [];
     pos.scaleAdjustments.push({
       id: `${pos.id}_full_exit_${closeTs}`,
       actionType: 'FULL_EXIT',
-      actionLabelAr: 'خروج كامل وإغلاق الصفقة (-100%)',
+      actionLabelAr:
+        options?.closeReason === 'LIQUIDATION'
+          ? 'تصفية آلية للمركز (Auto-Liquidation -100%)'
+          : options?.closeReason === 'TRAILING_STOP'
+          ? 'إغلاق عبر وقف الخسارة المتحرك (Trailing Stop -100%)'
+          : options?.closeReason === 'STOP_LOSS'
+          ? 'إغلاق عبر وقف الخسارة (Stop Loss -100%)'
+          : options?.closeReason === 'TAKE_PROFIT'
+          ? 'إغلاق بتحقيق الهدف (Take Profit -100%)'
+          : 'خروج كامل وإغلاق الصفقة (-100%)',
       timestamp: closeTs,
       volumePercent: -100,
       remainingPercentAfter: 0,
@@ -2783,19 +3257,71 @@ export class PaperEngine {
     this.savePendingChoices();
 
     // 2. Copy ONLY genuinely active, reconciled open positions (`reconciledPositions`) — never finished or already-synced trades
+    // Evaluate Daily Loss Circuit Breaker once before opening any new copied positions
+    let accUnrealizedNow = 0;
+    let accOpenMarginNow = 0;
+    for (const op of acc.positions) {
+      if (op.status === 'OPEN') {
+        accOpenMarginNow += op.marginUsdt || (op.quantity * op.entryPrice) / op.leverage;
+        const pNow = liveMap[op.symbol] || liveMap[op.symbol.toUpperCase()] || op.entryPrice;
+        accUnrealizedNow += (pNow - op.entryPrice) * op.quantity * (op.side === 'LONG' ? 1 : -1);
+      }
+    }
+    const accEquityNow = acc.availableBalance + accOpenMarginNow + accUnrealizedNow;
+    const dailyBreaker = evaluateDailyLossCircuitBreaker({
+      positions: acc.positions,
+      unrealizedPnlUsdt: accUnrealizedNow,
+      initialBalance: acc.initialBalance,
+      dailyLossLimitPercent: acc.settings.dailyLossLimitPercent,
+      manualCircuitBreakerPaused: acc.settings.dailyCircuitBreakerPaused,
+    });
+
     for (const pos of reconciledPositions) {
+      const effectiveSide = resolveEffectiveCopySide(pos.side, acc.settings.reverseCopyMode);
+
       if (
         hasTraderEntryAlreadyBeenSynced({
           traderId: params.traderId,
           traderName: params.traderName,
           symbol: pos.symbol,
-          side: pos.side,
+          side: effectiveSide,
           rawPositionId: pos.id,
           entryTime: pos.entryTime,
           accountPositions: acc.positions,
           checkpoint,
         })
       ) {
+        continue;
+      }
+
+      // Guard A: Daily Loss Circuit Breaker (blocks new entries when tripped)
+      if (dailyBreaker.tripped) {
+        logs.push({
+          id: `log_breaker_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          timestamp: Date.now(),
+          traderId: params.traderId,
+          traderName: params.traderName,
+          source: params.source,
+          action: 'POSITION_SYNC',
+          symbol: pos.symbol,
+          side: effectiveSide,
+          price: pos.markPrice || pos.entryPrice,
+          quantity: 0,
+          leverage: userLeverage,
+          accountId: acc.id,
+          accountName: acc.name,
+          messageAr: `[${acc.name}] تم حظر فتح ${pos.symbol}: ${dailyBreaker.reasonAr}`,
+        });
+        break;
+      }
+
+      // Guard B: Symbol Whitelist / Blacklist Filter
+      const symbolFilterCheck = isSymbolAllowedByFilter(
+        pos.symbol,
+        acc.settings.allowedSymbols,
+        acc.settings.blockedSymbols
+      );
+      if (!symbolFilterCheck.allowed) {
         continue;
       }
 
@@ -2808,7 +3334,7 @@ export class PaperEngine {
           source: params.source,
           action: 'POSITION_SYNC',
           symbol: pos.symbol,
-          side: pos.side,
+          side: effectiveSide,
           price: pos.markPrice || pos.entryPrice,
           quantity: 0,
           leverage: userLeverage,
@@ -2828,6 +3354,28 @@ export class PaperEngine {
       );
       const traderEntryPrice = pos.entryPrice > 0 ? pos.entryPrice : liveMarketPrice;
 
+      // Guard C: Max Slippage Guard (blocks unfavorable entry slippage beyond configured %)
+      const slippageCheck = evaluateCopySlippageGuard(
+        traderEntryPrice,
+        liveMarketPrice,
+        effectiveSide,
+        acc.settings.maxSlippagePercent
+      );
+      if (!slippageCheck.allowed) {
+        continue;
+      }
+
+      // Compute Proportional Sizing if enabled, otherwise fixed user margin
+      const computedMarginUsdt = acc.settings.proportionalCopyMode
+        ? calculateProportionalCopyMargin({
+            settings: acc.settings,
+            traderNotionalUsdt: pos.notionalValue || Math.abs(pos.positionAmount * traderEntryPrice),
+            traderLeverage: pos.leverage,
+            userAccountEquityUsdt: accEquityNow,
+            availableBalanceUsdt: acc.availableBalance,
+          })
+        : userMarginUsdt;
+
       // Whale trades (SMART_MONEY), explicit copy actions, and newly opened live trades (< 3m or after copiedStartedAt)
       // execute IMMEDIATELY in the exact same moment without waiting for manual confirmation
       const executeImmediately = shouldExecuteWhaleOrLiveTradeImmediately({
@@ -2839,13 +3387,13 @@ export class PaperEngine {
       });
 
       const evalResult = evaluatePreviousTradePriceAdvantage({
-        side: pos.side,
+        side: effectiveSide,
         traderEntryPrice,
         currentMarketPrice: liveMarketPrice,
         promptOnUnfavorableLateEntry: !executeImmediately,
       });
 
-      const choiceId = `choice_${acc.id}_${params.traderId}_${pos.symbol.toUpperCase()}_${pos.side}`;
+      const choiceId = `choice_${acc.id}_${params.traderId}_${pos.symbol.toUpperCase()}_${effectiveSide}`;
 
       if (!executeImmediately && evalResult.decision === 'PROMPT_USER_CHOICE') {
         if (!this.dismissedReconnectChoiceIds.has(choiceId)) {
@@ -2859,12 +3407,12 @@ export class PaperEngine {
             accountId: acc.id,
             accountName: acc.name,
             symbol: pos.symbol.toUpperCase(),
-            side: pos.side,
+            side: effectiveSide,
             traderEntryPrice,
             currentMarketPrice: liveMarketPrice,
             priceDiffPercent: evalResult.priceDiffPercent,
             leverage: userLeverage,
-            marginUsdt: userMarginUsdt,
+            marginUsdt: computedMarginUsdt,
             traderEntryTime: pos.entryTime,
             traderScaleAdjustments: pos.scaleAdjustments,
             currentScalePercent: pos.currentScalePercent,
@@ -2900,11 +3448,11 @@ export class PaperEngine {
       try {
         const opened = this.openPositionWithUserSettings({
           symbol: pos.symbol,
-          side: pos.side,
+          side: effectiveSide,
           entryPrice: liveMarketPrice,
           traderEntryPrice,
           traderLeverage: pos.leverage,
-          customMarginUsdt: userMarginUsdt,
+          customMarginUsdt: computedMarginUsdt,
           customLeverage: userLeverage,
           sourceTraderId: params.traderId,
           sourceTraderName: params.traderName,
@@ -3101,8 +3649,9 @@ export class PaperEngine {
 
   public getSnapshot(currentPrices: Record<string, number>, accountId?: string): PaperAccountSnapshot {
     const effectivePrices = this.mergeWithLastKnownPrices(currentPrices);
-    // Automatically check and execute any Stop-Loss (including secured near-current-price stop-loss)
+    // Automatically check and execute Auto-Liquidation, Trailing Stop, SL/TP, and Pending Limit Orders
     this.checkAndExecuteStopLosses(effectivePrices);
+    this.checkAndExecutePendingLimitOrders(effectivePrices);
 
     const acc = this.getAccount(accountId);
     let totalUnrealized = 0;
@@ -3125,6 +3674,15 @@ export class PaperEngine {
 
     const totalEquity = acc.availableBalance + openPositionsMargin + totalUnrealized;
     const summaries = this.getAccountsSummaries(effectivePrices);
+
+    // Evaluate daily PNL & Circuit Breaker status for UI telemetry
+    const dailyEval = evaluateDailyLossCircuitBreaker({
+      positions: acc.positions,
+      unrealizedPnlUsdt: totalUnrealized,
+      initialBalance: acc.initialBalance,
+      dailyLossLimitPercent: acc.settings.dailyLossLimitPercent,
+      manualCircuitBreakerPaused: acc.settings.dailyCircuitBreakerPaused,
+    });
 
     // Check if any virtual account reached the configured Drawdown threshold and dispatch an instant Push Notification
     mobileNotifications.checkAccountsDrawdown(summaries);
@@ -3161,8 +3719,12 @@ export class PaperEngine {
       unrealizedPnl: parseFloat(totalUnrealized.toFixed(4)),
       totalCommissionsPaid: parseFloat(acc.totalCommissionsPaid.toFixed(4)),
       positions: [...acc.positions],
+      pendingLimitOrders: this.getPendingLimitOrders(acc.id),
       settings: { ...acc.settings },
       pendingReconnectChoices: activeAccountPendingChoices,
+      dailyPnlUsdt: dailyEval.totalDailyPnlUsdt,
+      dailyPnlPercent: dailyEval.dailyPnlPercent,
+      isDailyCircuitBreakerTripped: dailyEval.tripped,
     };
   }
 

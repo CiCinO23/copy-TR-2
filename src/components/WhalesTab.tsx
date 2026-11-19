@@ -47,6 +47,7 @@ import {
   fetchSmartMoneyTradersList,
   fetchSmartMoneyWhaleDetail,
 } from '../services/copyAndSmartMoneyApi';
+import { calculateTraderQualityScore } from '../services/proRiskAndAnalytics';
 
 interface WhalesTabProps {
   connectionState: BinanceConnectionState;
@@ -237,12 +238,13 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
     [connectionState.tickers]
   );
 
-  // Live real-time refresh while viewing a Whale detail (2.5s interval) so new trades/scale-ins/exits apply immediately
+  // Visibility-aware detail refresh (4s interval) without duplicating App.tsx background sync
   useEffect(() => {
     if (!selectedWhaleId || !selectedSummary) return;
     let isCancelled = false;
 
     const timer = window.setInterval(async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       try {
         const fullData = await fetchSmartMoneyWhaleDetail(
           selectedWhaleId,
@@ -255,32 +257,10 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
         setWhalePositions(fullData.positions);
         setWhalePositionHistory(fullData.positionHistory);
         setWhaleRecords(fullData.latestRecords);
-
-        // If this whale is actively copied in any virtual account, immediately apply any trade changes in the same moment
-        const matchingCopiedEntries = copiedWhales.filter(
-          (c) => c.traderId === selectedWhaleId
-        );
-        for (const entry of matchingCopiedEntries) {
-          const logs = onSyncTraderToEngine({
-            traderId: selectedWhaleId,
-            traderName: selectedSummary.traderName,
-            source: 'SMART_MONEY',
-            positions: fullData.positions,
-            latestRecords: fullData.latestRecords,
-            positionHistory: fullData.positionHistory,
-            marginPerTradeUsdt: entry.copyBudgetUsdt || marginPerTrade,
-            accountId: entry.accountId || 'acc_default',
-            forceImmediateExecution: true,
-            copiedStartedAt: entry.startedAt,
-          });
-          if (logs.length > 0) {
-            setSyncLogs((prev) => [...logs, ...prev].slice(0, 30));
-          }
-        }
       } catch {
         // ignore transient refresh failure
       }
-    }, 2500);
+    }, 4000);
 
     return () => {
       isCancelled = true;
@@ -290,9 +270,6 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
     selectedWhaleId,
     selectedSummary,
     connectionState.tickers,
-    copiedWhales,
-    marginPerTrade,
-    onSyncTraderToEngine,
   ]);
 
   // Auto-select whale if requested from SimulationTab or elsewhere
@@ -1160,6 +1137,33 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                 );
                 const isCopied = whaleCopiedEntries.length > 0;
                 const inPos = whale.positionStatus === 'IN_POSITION';
+                const roiPct = whale.roi * 100;
+                const mddPct =
+                  whale.mdd !== null && whale.mdd !== undefined
+                    ? Math.abs(whale.mdd) <= 1
+                      ? Math.abs(whale.mdd) * 100
+                      : Math.abs(whale.mdd)
+                    : 18;
+                const estimatedWinRate =
+                  whale.pnl > 0
+                    ? Math.min(82, 56 + Math.min(26, Math.max(0, roiPct * 0.25)))
+                    : 42;
+                const quality = calculateTraderQualityScore({
+                  roi: roiPct,
+                  winRate: estimatedWinRate,
+                  mdd: mddPct,
+                  sharpRatio: whale.roi > 0 ? 1.8 : 0.4,
+                  leadingDays: whale.daysActive,
+                  pnl: whale.pnl,
+                });
+                const scoreBadgeCls =
+                  quality.tier === 'ELITE'
+                    ? 'bg-[#0D2B24] text-[#01BC8D] border-[#01BC8D]/50'
+                    : quality.tier === 'STRONG'
+                    ? 'bg-[#10253A] text-[#38BDF8] border-[#38BDF8]/40'
+                    : quality.tier === 'MODERATE'
+                    ? 'bg-[#2B2210] text-[#F59E0B] border-[#F59E0B]/40'
+                    : 'bg-[#2B1216] text-[#F6465D] border-[#F6465D]/40';
 
                 return (
                   <div
@@ -1180,7 +1184,7 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                             name={whale.traderName}
                             size="md"
                           />
-                          <span dir="ltr" className="absolute -top-1 -right-1 bg-[#01BC8D] text-[#0B0E11] font-mono font-bold text-[9px] px-1.5 rounded-full">
+                          <span dir="ltr" className="absolute -top-1 -right-1 bg-[#01BC8D] text-[#0B0E11] font-mono font-bold text-[9px] px-1 rounded">
                             #{index + 1}
                           </span>
                         </div>
@@ -1204,19 +1208,29 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
                         </div>
                       </div>
 
-                      {/* Left Side: Filter Days + Status */}
+                      {/* Left Side: Quality Score + Filter Days + Status */}
                       <div className="flex flex-col items-end gap-1.5 shrink-0">
-                        <span
-                          className="text-[#01BC8D] bg-[#0D2B24]/80 border border-[#01BC8D]/30 px-2.5 py-0.5 rounded-lg font-mono font-bold text-[11px]"
-                          title="الفترة الزمنية"
-                        >
-                          {SMART_TIME_RANGES.find((t) => t.key === timeRange)?.labelAr || timeRange}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            dir="ltr"
+                            data-testid={`whale_quality_score_${whale.topTraderId}`}
+                            title={`تقييم جودة الحوت: ${quality.gradeAr} (${quality.score}/100)`}
+                            className={`px-2 py-0.5 rounded-lg border font-mono font-extrabold text-[10px] tabular-nums ${scoreBadgeCls}`}
+                          >
+                            Score {quality.score}/100
+                          </span>
+                          <span
+                            className="text-[#01BC8D] bg-[#0D2B24]/80 border border-[#01BC8D]/30 px-2.5 py-0.5 rounded-lg font-mono font-bold text-[11px]"
+                            title="الفترة الزمنية"
+                          >
+                            {SMART_TIME_RANGES.find((t) => t.key === timeRange)?.labelAr || timeRange}
+                          </span>
+                        </div>
                         {isCopied ? (
-                          <span className="bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center gap-1.5">
+                          <span className="bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/40 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-[#01BC8D]" />
                             <span>
-                              منسوخ ({whaleCopiedEntries.length > 1 ? `${whaleCopiedEntries.length} حسابات` : whaleCopiedEntries[0]?.accountName || 'يتم النسخ'})
+                              منسوخ ({whaleCopiedEntries.length > 1 ? `${whaleCopiedEntries.length} حسابات` : whaleCopiedEntries[0]?.accountName || 'نشط'})
                             </span>
                           </span>
                         ) : (
@@ -1334,7 +1348,7 @@ export const WhalesTab: React.FC<WhalesTabProps> = ({
               <div className="flex items-center gap-2">
                 <Activity className="w-4 h-4 text-[#01BC8D]" />
                 <h3 className="font-bold text-xs sm:text-sm text-white">
-                  مؤشر العقود المفتوحة الكلية للحيتان (Binance Futures Open Interest)
+                  العقود المفتوحة للحيتان (OI)
                 </h3>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">

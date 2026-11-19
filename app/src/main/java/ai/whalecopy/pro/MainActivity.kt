@@ -173,7 +173,7 @@ class WhaleBackgroundService : Service() {
                     WebViewHolder.activeWebView?.let { wv ->
                         wv.resumeTimers()
                         wv.evaluateJavascript(
-                            "window.__copyTrNativeHeartbeat && window.__copyTrNativeHeartbeat();",
+                            "window.__copyTrNativeHeartbeat && window.__copyTrNativeHeartbeat('native_bg');",
                             null
                         )
                     }
@@ -181,7 +181,7 @@ class WhaleBackgroundService : Service() {
             } catch (_: Throwable) {
                 // ignore
             }
-            mainHandler.postDelayed(this, 4500L)
+            mainHandler.postDelayed(this, 2500L)
         }
     }
 
@@ -324,7 +324,7 @@ class WhaleBackgroundService : Service() {
 
         return NotificationCompat.Builder(this, BG_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
-            .setContentTitle("Copy TR يعمل في الخلفية (v2.22)")
+            .setContentTitle("Copy TR يعمل في الخلفية (v2.24)")
             .setContentText("مراقبة الصفقات المنسوخة وإشعارات شاشة القفل نشطة بلا توقف")
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -578,7 +578,7 @@ class MainActivity : ComponentActivity() {
             wv.resumeTimers()
             wv.onResume()
             wv.evaluateJavascript(
-                "window.__copyTrNativeHeartbeat && window.__copyTrNativeHeartbeat();",
+                "window.__copyTrNativeHeartbeat && window.__copyTrNativeHeartbeat('native_resume');",
                 null
             )
         }
@@ -859,9 +859,12 @@ object LocalWebProxyServer {
         try {
             conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = method
-                connectTimeout = 12000
-                readTimeout = 12000
+                connectTimeout = 10000
+                readTimeout = 10000
+                useCaches = false
                 instanceFollowRedirects = true
+                setRequestProperty("Cache-Control", "no-cache, no-store")
+                setRequestProperty("Pragma", "no-cache")
                 setRequestProperty(
                     "User-Agent",
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -980,7 +983,8 @@ object LocalWebProxyServer {
         headerBuilder.append("Access-Control-Allow-Origin: *\r\n")
         headerBuilder.append("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n")
         headerBuilder.append("Access-Control-Allow-Headers: *\r\n")
-        headerBuilder.append("Cache-Control: no-cache\r\n")
+        headerBuilder.append("Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n")
+        headerBuilder.append("Pragma: no-cache\r\n")
         headerBuilder.append("Connection: close\r\n\r\n")
         output.write(headerBuilder.toString().toByteArray(Charsets.UTF_8))
         if (body.isNotEmpty()) {
