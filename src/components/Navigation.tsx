@@ -27,7 +27,10 @@ export const NAV_ITEMS: { id: TabId; labelAr: string; icon: React.ComponentType<
 
 export const Navigation: React.FC<NavigationProps> = ({ currentTab, onSelectTab }) => {
   return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-[#12171D]/95 backdrop-blur-md border-t border-[#1E2733] z-40 nav-safe pl-safe pr-safe">
+    <nav
+      data-testid="bottom_navigation"
+      className="shrink-0 w-full bg-[#12171D] border-t border-[#1E2733] z-40 nav-safe pl-safe pr-safe"
+    >
       <div className="max-w-4xl mx-auto flex items-center justify-around px-1.5 py-1 sm:py-1.5">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;

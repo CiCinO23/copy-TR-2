@@ -67,7 +67,7 @@ export const Header: React.FC<HeaderProps> = ({
   const kucoinTooltip = `كوكوين: ${isKucoinConnected ? 'متصل' : 'غير متصل'} (${kucoinPing.labelMs})`;
 
   return (
-    <header className="w-full bg-[#0B0E11]/95 backdrop-blur-md border-b border-[#1C232D] px-2.5 sm:px-4 py-2 sticky top-0 z-40 header-safe pl-safe pr-safe">
+    <header className="shrink-0 relative w-full bg-[#0B0E11] border-b border-[#1C232D] px-2.5 sm:px-4 py-2 z-40 header-safe pl-safe pr-safe">
       <div className="max-w-4xl mx-auto flex items-center justify-between gap-1.5 sm:gap-2">
         {/* Right (Start in RTL): Clean single-line KuCoin-style Brand Lockup */}
         <button

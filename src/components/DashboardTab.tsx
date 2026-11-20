@@ -155,36 +155,18 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
   const [isLoadingChart, setIsLoadingChart] = useState<boolean>(false);
   const [hoveredCandle, setHoveredCandle] = useState<FuturesKlinePoint | null>(null);
 
-  // KuCoin Balance Calculations (Real or Virtual fallback)
-  const isKucoinAuth = kucoinConnectionState.isAuthenticated;
-  const totalKucoinUsdt = isKucoinAuth
-    ? kucoinConnectionState.usdtBalance
-    : paperSnapshot?.totalEquity ?? kucoinConnectionState.usdtBalance ?? 1000;
-
-  const availableKucoinUsdt = isKucoinAuth
-    ? kucoinConnectionState.availableUsdt
-    : paperSnapshot?.availableBalance ?? kucoinConnectionState.availableUsdt ?? 1000;
-
-  const futuresBalance =
-    kucoinConnectionState.futuresBalanceUsdt !== undefined && isKucoinAuth
-      ? kucoinConnectionState.futuresBalanceUsdt
-      : Number((totalKucoinUsdt * 0.55).toFixed(2));
-
-  const spotBalance =
-    kucoinConnectionState.spotBalanceUsdt !== undefined && isKucoinAuth
-      ? kucoinConnectionState.spotBalanceUsdt
-      : Number((totalKucoinUsdt * 0.35).toFixed(2));
-
-  const mainBalance =
-    kucoinConnectionState.mainBalanceUsdt !== undefined && isKucoinAuth
-      ? kucoinConnectionState.mainBalanceUsdt
-      : Number((totalKucoinUsdt * 0.1).toFixed(2));
-
-  const unrealizedPnl = isKucoinAuth
+  // Real KuCoin Balance ONLY on Home Page (never fall back to virtual/paper balance)
+  const hasRealKucoinBalance = Boolean(kucoinConnectionState.isLiveBalanceVerified);
+  const totalKucoinUsdt = hasRealKucoinBalance ? kucoinConnectionState.usdtBalance : 0;
+  const availableKucoinUsdt = hasRealKucoinBalance ? kucoinConnectionState.availableUsdt : 0;
+  const futuresBalance = hasRealKucoinBalance
+    ? kucoinConnectionState.futuresBalanceUsdt ?? 0
+    : 0;
+  const spotBalance = hasRealKucoinBalance ? kucoinConnectionState.spotBalanceUsdt ?? 0 : 0;
+  const mainBalance = hasRealKucoinBalance ? kucoinConnectionState.mainBalanceUsdt ?? 0 : 0;
+  const unrealizedPnl = hasRealKucoinBalance
     ? kucoinConnectionState.unrealizedPnlUsdt ?? 0
-    : paperSnapshot?.unrealizedPnl ?? 0;
-
-  const inOrderOrMargin = Math.max(0, Number((totalKucoinUsdt - availableKucoinUsdt).toFixed(2)));
+    : 0;
 
   // Active ticker for the selected chart symbol
   const activeTicker =
@@ -496,21 +478,37 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
 
   return (
     <div className="space-y-3.5 sm:space-y-4 animate-in fade-in duration-200 w-full overflow-hidden">
-      {/* 1. شريط الأصول المدمج بأسلوب KuCoin */}
-      <div className="bg-[#12161C] border border-[#1C232D] rounded-xl p-3.5 sm:p-4 space-y-3 overflow-hidden">
+      {/* 1. شريط رصيد كوكوين الحقيقي فقط بأسلوب KuCoin */}
+      <div
+        data-testid="dashboard_kucoin_real_balance_card"
+        className="bg-[#12161C] border border-[#1C232D] rounded-xl p-3.5 sm:p-4 space-y-3 overflow-hidden"
+      >
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 text-xs text-[#848E9C]">
               <Wallet className="w-3.5 h-3.5 text-[#01BC8D] shrink-0" />
-              <span className="font-semibold">إجمالي الأصول</span>
+              <span className="font-semibold text-[#D1D9E6]">رصيد كوكوين الحقيقي</span>
               <span aria-hidden="true">·</span>
-              <span className={isKucoinAuth ? 'text-[#01BC8D] font-semibold' : 'text-[#848E9C]'}>
-                {isKucoinAuth ? 'حقيقي KuCoin' : 'افتراضي'}
+              <span
+                className={
+                  hasRealKucoinBalance
+                    ? 'text-[#01BC8D] font-semibold'
+                    : kucoinConnectionState.isTesting
+                    ? 'text-[#38BDF8] font-semibold'
+                    : 'text-[#F59E0B] font-semibold'
+                }
+              >
+                {hasRealKucoinBalance
+                  ? 'حقيقي مباشر'
+                  : kucoinConnectionState.isTesting
+                  ? 'جاري الجلب...'
+                  : 'غير مربوط'}
               </span>
             </div>
             <div className="flex items-baseline gap-2.5 mt-1 flex-wrap">
               <span
                 dir="ltr"
+                data-testid="dashboard_real_kucoin_balance_value"
                 className="text-2xl sm:text-[28px] font-bold text-white font-mono tabular-nums tracking-tight"
               >
                 {totalKucoinUsdt.toLocaleString('en-US', {
@@ -519,14 +517,16 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
                 })}{' '}
                 <span className="text-xs sm:text-sm text-[#848E9C] font-semibold">USDT</span>
               </span>
-              <span
-                dir="ltr"
-                className={`text-xs font-mono font-bold tabular-nums ${
-                  unrealizedPnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F65454]'
-                }`}
-              >
-                {unrealizedPnl >= 0 ? '+' : '-'}${Math.abs(unrealizedPnl).toFixed(2)} PNL
-              </span>
+              {hasRealKucoinBalance && (
+                <span
+                  dir="ltr"
+                  className={`text-xs font-mono font-bold tabular-nums ${
+                    unrealizedPnl >= 0 ? 'text-[#01BC8D]' : 'text-[#F65454]'
+                  }`}
+                >
+                  {unrealizedPnl >= 0 ? '+' : '-'}${Math.abs(unrealizedPnl).toFixed(2)} PNL
+                </span>
+              )}
             </div>
           </div>
 
@@ -572,56 +572,50 @@ export const DashboardTab: React.FC<DashboardTabProps> = ({
           </div>
         )}
 
-        {/* Compact Hairline Balance Breakdown */}
-        {isKucoinAuth ? (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2.5 border-t border-[#1C232D] text-xs">
-            <div>
-              <span className="text-[11px] text-[#848E9C] block">الفيوتشر</span>
-              <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
-                {futuresBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
-              </span>
-            </div>
-            <div>
-              <span className="text-[11px] text-[#848E9C] block">السبوت</span>
-              <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
-                {spotBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
-              </span>
-            </div>
-            <div>
-              <span className="text-[11px] text-[#848E9C] block">التمويل</span>
-              <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
-                {mainBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
-              </span>
-            </div>
-            <div>
-              <span className="text-[11px] text-[#848E9C] block">المتاح</span>
-              <span dir="ltr" className="font-mono font-bold text-[#01BC8D] tabular-nums">
-                {availableKucoinUsdt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
-              </span>
-            </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-[#1C232D] text-xs">
-            <div>
-              <span className="text-[11px] text-[#848E9C] block">المتاح للتداول</span>
-              <span dir="ltr" className="font-mono font-bold text-[#01BC8D] tabular-nums">
-                {availableKucoinUsdt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $
-              </span>
-            </div>
-            <div>
-              <span className="text-[11px] text-[#848E9C] block">الهامش المحجوز</span>
-              <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
-                ${inOrderOrMargin.toFixed(2)}
-              </span>
-            </div>
-            <div>
-              <span className="text-[11px] text-[#848E9C] block">المراكز النشطة</span>
-              <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
-                {openPositionsCount} / {paperSnapshot?.settings?.maxConcurrentTrades ?? 5}
-              </span>
-            </div>
+        {!hasRealKucoinBalance && !kucoinConnectionState.isTesting && (
+          <div className="bg-[#161C24] border border-[#1C232D] rounded-lg px-3 py-2 text-[11px] text-[#848E9C] flex items-center justify-between gap-2">
+            <span>
+              {kucoinConnectionState.needsSecretKeyForBalance
+                ? 'أدخل مفتاح KuCoin API Secret في الإعدادات لجلب رصيدك الحقيقي.'
+                : 'اربط مفاتيح KuCoin الحقيقية لعرض رصيد محفظتك الفعلي هنا.'}
+            </span>
+            <button
+              type="button"
+              onClick={onOpenKucoinSetup}
+              className="text-[#01BC8D] hover:text-[#00D49F] font-bold shrink-0 cursor-pointer whitespace-nowrap"
+            >
+              ربط الحساب
+            </button>
           </div>
         )}
+
+        {/* Real KuCoin Wallet Breakdown (Futures / Spot / Funding / Available) */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2.5 border-t border-[#1C232D] text-xs">
+          <div>
+            <span className="text-[11px] text-[#848E9C] block">الفيوتشر</span>
+            <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
+              {futuresBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
+            </span>
+          </div>
+          <div>
+            <span className="text-[11px] text-[#848E9C] block">السبوت</span>
+            <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
+              {spotBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
+            </span>
+          </div>
+          <div>
+            <span className="text-[11px] text-[#848E9C] block">التمويل</span>
+            <span dir="ltr" className="font-mono font-bold text-white tabular-nums">
+              {mainBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
+            </span>
+          </div>
+          <div>
+            <span className="text-[11px] text-[#848E9C] block">المتاح</span>
+            <span dir="ltr" className="font-mono font-bold text-[#01BC8D] tabular-nums">
+              {availableKucoinUsdt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT
+            </span>
+          </div>
+        </div>
       </div>
 
       {/* 2. أسعار العقود الآجلة */}

@@ -709,8 +709,8 @@ export async function testKuCoinConnectionAndFetchData(
   // 1. Test public server time to verify KuCoin API connectivity and calibrate timestamp offset
   const { serverTimestamp, latencyMs } = await syncKuCoinServerTime();
 
-  // If user explicitly selected SANDBOX / Demo mode
-  if (config.apiType === 'SANDBOX') {
+  // If user explicitly selected SANDBOX / Demo mode (unless explicitly requesting real balance with keys)
+  if (config.apiType === 'SANDBOX' && !(options?.forceRealBalance && hasKeys && cleanPassphrase)) {
     return {
       isTesting: false,
       isConnected: true,

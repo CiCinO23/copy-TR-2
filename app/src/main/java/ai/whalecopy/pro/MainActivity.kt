@@ -45,10 +45,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -577,6 +579,7 @@ class MainActivity : ComponentActivity() {
         WebViewHolder.activeWebView?.let { wv ->
             wv.resumeTimers()
             wv.onResume()
+            wv.post { wv.requestLayout() }
             wv.evaluateJavascript(
                 "window.__copyTrNativeHeartbeat && window.__copyTrNativeHeartbeat('native_resume');",
                 null
@@ -1048,7 +1051,7 @@ fun WhaleApp(activity: Activity) {
         modifier = Modifier
             .fillMaxSize()
             .background(Ink)
-            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
     ) {
         androidx.compose.runtime.key(webViewRecoveryKey) {
             AndroidView(
@@ -1057,8 +1060,13 @@ fun WhaleApp(activity: Activity) {
                     val existing = WebViewHolder.activeWebView
                     if (existing != null) {
                         (existing.parent as? ViewGroup)?.removeView(existing)
+                        existing.layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
                         existing.resumeTimers()
                         existing.onResume()
+                        existing.post { existing.requestLayout() }
                         isLoading = false
                         webViewInstance = existing
                         existing

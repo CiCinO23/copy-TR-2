@@ -98,6 +98,7 @@ function loadAllCopiedTradersFromStorage(): ActiveCopiedTrader[] {
 
 export const App: React.FC = () => {
   const [selectedTab, setSelectedTab] = useState<TabId>('Dashboard');
+  const mainScrollRef = useRef<HTMLElement | null>(null);
   const [autoCopy, setAutoCopy] = useState<boolean>(() => {
     return localStorage.getItem('whale_auto_copy_active') === 'true';
   });
@@ -1837,8 +1838,46 @@ export const App: React.FC = () => {
     };
   }, []);
 
+  // Scroll main content container cleanly to top when switching top-level tabs
+  useEffect(() => {
+    if (mainScrollRef.current) {
+      mainScrollRef.current.scrollTo({ top: 0, behavior: 'auto' });
+    }
+  }, [selectedTab]);
+
+  // Ensure focused inputs near the bottom remain visible when mobile soft keyboard overlays content
+  useEffect(() => {
+    const mainEl = mainScrollRef.current;
+    if (!mainEl) return;
+    let focusTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const handleFocusIn = (e: FocusEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      const tag = target.tagName;
+      if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') return;
+      if (focusTimer) clearTimeout(focusTimer);
+      focusTimer = setTimeout(() => {
+        try {
+          const rect = target.getBoundingClientRect();
+          if (rect.bottom > window.innerHeight * 0.52) {
+            target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          }
+        } catch {
+          // ignore
+        }
+      }, 240);
+    };
+
+    mainEl.addEventListener('focusin', handleFocusIn);
+    return () => {
+      mainEl.removeEventListener('focusin', handleFocusIn);
+      if (focusTimer) clearTimeout(focusTimer);
+    };
+  }, []);
+
   return (
-    <div className="min-h-screen bg-[#0B0E11] text-white flex flex-col font-sans selection:bg-[#01BC8D]/30 content-safe pl-safe pr-safe">
+    <div className="h-full w-full bg-[#0B0E11] text-white flex flex-col overflow-hidden font-sans selection:bg-[#01BC8D]/30 pl-safe pr-safe">
       {/* Double-Back Exit Protection Toast */}
       {backExitPromptVisible && (
         <div
@@ -1880,8 +1919,13 @@ export const App: React.FC = () => {
         onOpenHomeTab={() => setSelectedTab('Dashboard')}
       />
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-4xl w-full mx-auto px-4 py-4 sm:py-6">
+      {/* Main Content Area (Dedicated scroll container so Header stays top & Navigation stays locked to bottom) */}
+      <main
+        ref={mainScrollRef}
+        data-testid="main_scroll_container"
+        className="flex-1 min-h-0 w-full overflow-y-auto overscroll-y-contain"
+      >
+        <div className="max-w-4xl w-full mx-auto px-4 py-4 sm:py-6 pb-8">
         <AppErrorBoundary key={selectedTab}>
         {selectedTab === 'Dashboard' && (
           <DashboardTab
@@ -2100,6 +2144,7 @@ export const App: React.FC = () => {
           />
         )}
         </AppErrorBoundary>
+        </div>
       </main>
 
       {/* Bottom Navigation */}

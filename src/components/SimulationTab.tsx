@@ -3718,10 +3718,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                           data-testid={`secure_position_btn_${p.id}`}
                           onClick={() => onSecurePosition(p.id, livePrice, 0.2)}
                           className="bg-[#0D2B24] hover:bg-[#01BC8D] text-[#01BC8D] hover:text-[#0B0E11] border border-[#01BC8D]/40 px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
-                          title="تأمين الصفقة بوضع وقف خسارة قرب السعر الحالي"
+                          title="وضع وقف خسارة قرب السعر الحالي (-0.2% للشراء / +0.2% للبيع)"
                         >
                           <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                          <span>{p.isSecuredNearCurrent ? 'تحديث التأمين' : 'تأمين الربح'}</span>
+                          <span>SL السعر الحالي</span>
                         </button>
                       )}
 
@@ -3748,12 +3748,12 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
                             }`}
                             title={
                               canMoveToBreakEven
-                                ? 'نقل وقف الخسارة إلى نقطة الدخول + 0.08% تغطية العمولة'
-                                : 'يتفعل عند تجاوز الربح +0.08% فوق نقطة الدخول'
+                                ? 'نقل وقف الخسارة إلى سعر الدخول + 0.08% تغطية العمولة'
+                                : 'يتفعل عند تجاوز الربح +0.08% فوق سعر الدخول'
                             }
                           >
                             <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                            <span>نقطة التعادل</span>
+                            <span>SL سعر الدخول</span>
                           </button>
                         );
                       })()}
