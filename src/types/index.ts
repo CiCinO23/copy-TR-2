@@ -453,6 +453,8 @@ export interface KuCoinConfig {
   enableLiveExecution: boolean; // false = simulation/dry-run, true = send real orders to KuCoin
   defaultLeverage: number;
   maxOrderUsdt: number;
+  /** Indicates encrypted credentials exist in localStorage even while vault is locked */
+  hasEncryptedSecrets?: boolean;
   manualRealBalanceUsdt?: number | null;
   manualFuturesBalanceUsdt?: number | null;
   manualSpotBalanceUsdt?: number | null;
@@ -478,6 +480,15 @@ export interface KuCoinPosition {
   isOpen: boolean;
 }
 
+export type KuCoinOrderStatus =
+  | 'NEW'
+  | 'DONE'
+  | 'CANCELLED'
+  | 'SIMULATED'
+  | 'FAILED'
+  | 'UNKNOWN_TIMEOUT'
+  | 'REJECTED_GUARD';
+
 export interface KuCoinOrderRecord {
   id: string;
   orderId: string;
@@ -488,11 +499,33 @@ export interface KuCoinOrderRecord {
   price: number;
   size: number;
   dealSize: number;
-  status: 'NEW' | 'DONE' | 'CANCELLED' | 'SIMULATED';
+  status: KuCoinOrderStatus;
   createdAt: number;
   sourceTraderName?: string;
   sourceSignal?: string;
   isRealKuCoin: boolean;
+  errorCode?: string;
+  errorMessageAr?: string;
+  guardReasonAr?: string;
+  stopLossOrderId?: string;
+  takeProfitOrderId?: string;
+}
+
+export type KuCoinReconciliationIssueType =
+  | 'MISSING_ON_KUCOIN'
+  | 'UNTRACKED_ON_KUCOIN'
+  | 'SIDE_MISMATCH'
+  | 'SIZE_MISMATCH';
+
+export interface KuCoinReconciliationDiscrepancy {
+  symbol: string;
+  kucoinSymbol: string;
+  type: KuCoinReconciliationIssueType;
+  paperSide?: 'LONG' | 'SHORT';
+  kucoinSide?: 'LONG' | 'SHORT';
+  paperContracts?: number;
+  kucoinContracts?: number;
+  messageAr: string;
 }
 
 export interface KuCoinConnectionState {
@@ -608,8 +641,14 @@ export interface KuCoinSecurityLockConfig {
   enabled: boolean;
   /** Legacy fallback kept empty when pinHash is set; hashed verification is always preferred */
   pinCode: string;
-  /** Salted hash of the user's PIN so plaintext PIN is never stored in localStorage */
+  /** Cryptographic PBKDF2-SHA256 hash (`pbkdf2_v2:<salt>:<hash>`) so plaintext PIN is never stored */
   pinHash?: string;
+  /** False on fresh install until the user explicitly sets their own non-trivial PIN */
+  isPinConfigured?: boolean;
+  /** Number of consecutive failed PIN attempts for brute-force lockout */
+  failedAttempts?: number;
+  /** Epoch timestamp (ms) until which PIN verification is locked out */
+  lockedUntilMs?: number;
   biometricEnabled: boolean;
   biometricCredentialId?: string | null;
   lockScope: KuCoinLockScope;

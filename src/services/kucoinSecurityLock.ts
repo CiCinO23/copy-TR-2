@@ -1,8 +1,38 @@
 import { KuCoinSecurityLockConfig } from '../types';
+import {
+  hashPinPbkdf2,
+  verifyPinPbkdf2,
+  isPbkdf2Hash,
+  setActiveSessionPin,
+  clearActiveSessionPin,
+} from './secureVault';
 
 export const KUCOIN_SECURITY_STORAGE_KEY = 'whale_kucoin_security_lock_v1';
-const PIN_HASH_SALT = 'CopyTR_v223_PIN_SALT_#9182';
-const PIN_HASH_PREFIX = 'h1:';
+const LEGACY_PIN_HASH_SALT = 'CopyTR_v223_PIN_SALT_#9182';
+const LEGACY_PIN_HASH_PREFIX = 'h1:';
+
+const TRIVIAL_PINS = new Set([
+  '0000',
+  '1111',
+  '2222',
+  '3333',
+  '4444',
+  '5555',
+  '6666',
+  '7777',
+  '8888',
+  '9999',
+  '1234',
+  '4321',
+  '12345',
+  '54321',
+  '123456',
+  '654321',
+  '000000',
+  '111111',
+  '1122',
+  '2580',
+]);
 
 /**
  * Normalizes Arabic-Indic (٠-٩) and Extended Arabic-Indic (۰-۹) digits to standard ASCII digits (0-9)
@@ -16,22 +46,32 @@ export function normalizePinDigits(raw: string): string {
 }
 
 /**
- * Checks whether a normalized PIN string is between 4 and 6 digits.
+ * Checks whether a normalized PIN string is between 4 and 8 digits (4-6+ supported).
  */
 export function isValidPinFormat(pin: string): boolean {
   const clean = normalizePinDigits(pin);
-  return clean.length >= 4 && clean.length <= 6 && /^\d{4,6}$/.test(clean);
+  return clean.length >= 4 && clean.length <= 8 && /^\d{4,8}$/.test(clean);
 }
 
 /**
- * Deterministic salted synchronous hash for PIN storage so plaintext PINs are never persisted to localStorage.
- * Uses multi-round dual-lane 32-bit FNV-1a / Murmur-style avalanche mixing.
+ * Detects trivial, easily guessed PINs (e.g., 1234, 0000, 1111, 123456, all-same digits).
  */
-export function hashPinSync(pin: string): string {
+export function isWeakTrivialPin(pin: string): boolean {
+  const clean = normalizePinDigits(pin);
+  if (TRIVIAL_PINS.has(clean)) return true;
+  if (/^(\d)\1+$/.test(clean)) return true;
+  return false;
+}
+
+/**
+ * Legacy synchronous hash kept ONLY to verify & auto-migrate existing users' pre-v2.25 hashes.
+ * New PINs are always hashed with PBKDF2-SHA256 (100,000 iterations + random 128-bit salt).
+ */
+export function hashPinLegacySync(pin: string): string {
   const clean = normalizePinDigits(pin);
   let h1 = 0x811c9dc5;
   let h2 = 0x9e3779b9;
-  const input = `${PIN_HASH_SALT}:${clean}:${clean.length}`;
+  const input = `${LEGACY_PIN_HASH_SALT}:${clean}:${clean.length}`;
 
   for (let round = 0; round < 64; round++) {
     for (let i = 0; i < input.length; i++) {
@@ -47,20 +87,46 @@ export function hashPinSync(pin: string): string {
 
   const hex1 = (h1 >>> 0).toString(16).padStart(8, '0');
   const hex2 = (h2 >>> 0).toString(16).padStart(8, '0');
-  return `${PIN_HASH_PREFIX}${hex1}${hex2}`;
+  return `${LEGACY_PIN_HASH_PREFIX}${hex1}${hex2}`;
+}
+
+export function isLegacyPinHash(value?: string | null): boolean {
+  return (
+    typeof value === 'string' &&
+    value.startsWith(LEGACY_PIN_HASH_PREFIX) &&
+    value.length > 12
+  );
 }
 
 export function isPinHashed(value?: string | null): boolean {
-  return typeof value === 'string' && value.startsWith(PIN_HASH_PREFIX) && value.length > 12;
+  return isPbkdf2Hash(value) || isLegacyPinHash(value);
 }
 
-const DEFAULT_PIN_PLAIN = '1234';
-export const DEFAULT_PIN_HASH = hashPinSync(DEFAULT_PIN_PLAIN);
+/**
+ * Computes progressive brute-force lockout duration (ms) based on consecutive failed attempts.
+ */
+export function computeLockoutDurationMs(failedAttempts: number): number {
+  if (failedAttempts >= 10) return 15 * 60 * 1000; // 15 minutes
+  if (failedAttempts >= 8) return 5 * 60 * 1000; // 5 minutes
+  if (failedAttempts >= 5) return 60 * 1000; // 60 seconds
+  return 0;
+}
+
+export function getPinLockoutRemainingMs(
+  config: Pick<KuCoinSecurityLockConfig, 'lockedUntilMs'>,
+  nowMs: number = Date.now()
+): number {
+  const until = Number(config.lockedUntilMs || 0);
+  return until > nowMs ? until - nowMs : 0;
+}
 
 export const DEFAULT_KUCOIN_SECURITY_CONFIG: KuCoinSecurityLockConfig = {
   enabled: true,
   pinCode: '',
-  pinHash: DEFAULT_PIN_HASH,
+  pinHash: '',
+  isPinConfigured: false,
+  failedAttempts: 0,
+  lockedUntilMs: 0,
   biometricEnabled: false,
   biometricCredentialId: null,
   lockScope: 'ALWAYS_ON_TAB_OPEN',
@@ -69,56 +135,153 @@ export const DEFAULT_KUCOIN_SECURITY_CONFIG: KuCoinSecurityLockConfig = {
 };
 
 /**
- * Helper to detect if the security config is still using the default 1234 PIN.
+ * Returns true if the user has not yet configured a personal PIN (first-run setup required).
  */
-export function isDefaultPinActive(config: KuCoinSecurityLockConfig): boolean {
-  if (isPinHashed(config.pinHash)) {
-    return config.pinHash === DEFAULT_PIN_HASH;
-  }
-  return verifyPinCode(DEFAULT_PIN_PLAIN, config.pinCode || DEFAULT_PIN_HASH);
+export function needsInitialPinSetup(config: KuCoinSecurityLockConfig): boolean {
+  if (config.isPinConfigured === false) return true;
+  return !isPinHashed(config.pinHash);
 }
 
 /**
- * Verifies if the user-entered PIN matches either a salted pinHash or a legacy stored plaintext PIN.
+ * Cryptographic async verification supporting PBKDF2-SHA256 (`pbkdf2_v2:`) and transparent
+ * migration of legacy `h1:` hashes. Rejects empty hashes and never falls back to a default PIN.
  */
-export function verifyPinCode(inputPin: string, storedPinOrHash: string): boolean {
+export async function verifyPinCodeAsync(
+  inputPin: string,
+  storedHash: string
+): Promise<{ valid: boolean; needsMigrationToPbkdf2: boolean }> {
   const cleanInput = normalizePinDigits(inputPin);
-  if (!cleanInput) return false;
-
-  const target = (storedPinOrHash || '').trim() || DEFAULT_PIN_HASH;
-  if (isPinHashed(target)) {
-    return hashPinSync(cleanInput) === target;
+  if (!cleanInput || !storedHash) {
+    return { valid: false, needsMigrationToPbkdf2: false };
   }
 
-  const cleanStored = normalizePinDigits(target);
-  if (!cleanStored) return false;
-  return cleanInput === cleanStored;
+  const target = storedHash.trim();
+  if (isPbkdf2Hash(target)) {
+    const valid = await verifyPinPbkdf2(cleanInput, target);
+    return { valid, needsMigrationToPbkdf2: false };
+  }
+
+  if (isLegacyPinHash(target)) {
+    const valid = hashPinLegacySync(cleanInput) === target;
+    return { valid, needsMigrationToPbkdf2: valid };
+  }
+
+  return { valid: false, needsMigrationToPbkdf2: false };
 }
 
 /**
- * Validates changing the PIN code from `currentInput` to `newPin` & `confirmPin`.
- * Accepts either a hashed `storedPinOrHash` or plaintext `storedPinOrHash`.
+ * Verifies a PIN with brute-force lockout tracking, auto-upgrades legacy hashes to PBKDF2-SHA256,
+ * and registers the verified PIN in JS memory for AES-256-GCM secret decryption.
  */
-export function validatePinChange(
-  currentInput: string,
-  storedPinOrHash: string,
-  newPin: string,
-  confirmPin: string
-): { valid: boolean; errorAr?: string; normalizedNewPin?: string; newPinHash?: string } {
-  if (!verifyPinCode(currentInput, storedPinOrHash)) {
+export async function attemptPinUnlockAsync(
+  inputPin: string,
+  config: KuCoinSecurityLockConfig,
+  nowMs: number = Date.now()
+): Promise<{
+  success: boolean;
+  updatedConfig: KuCoinSecurityLockConfig;
+  lockedRemainingMs: number;
+  errorAr?: string;
+}> {
+  const remainingLock = getPinLockoutRemainingMs(config, nowMs);
+  if (remainingLock > 0) {
+    const secs = Math.ceil(remainingLock / 1000);
     return {
-      valid: false,
-      errorAr: 'رمز PIN الحالي غير صحيح. يرجى إدخال الرمز الحالي بشكل صحيح.',
+      success: false,
+      updatedConfig: config,
+      lockedRemainingMs: remainingLock,
+      errorAr: `تم قفل المحاولات مؤقتاً لحماية المحفظة. يرجى الانتظار ${secs} ثانية قبل المحاولة مجدداً.`,
     };
   }
 
+  if (needsInitialPinSetup(config)) {
+    return {
+      success: false,
+      updatedConfig: config,
+      lockedRemainingMs: 0,
+      errorAr: 'لم يتم تعيين رمز PIN بعد. يرجى إنشاء رمز PIN شخصي أولاً.',
+    };
+  }
+
+  const cleanInput = normalizePinDigits(inputPin);
+  const check = await verifyPinCodeAsync(cleanInput, config.pinHash || '');
+
+  if (check.valid) {
+    let nextHash = config.pinHash || '';
+    if (check.needsMigrationToPbkdf2) {
+      nextHash = await hashPinPbkdf2(cleanInput);
+    }
+    setActiveSessionPin(cleanInput);
+    const updatedConfig = saveKuCoinSecurityConfig({
+      ...config,
+      pinHash: nextHash,
+      isPinConfigured: true,
+      failedAttempts: 0,
+      lockedUntilMs: 0,
+    });
+    return {
+      success: true,
+      updatedConfig,
+      lockedRemainingMs: 0,
+    };
+  }
+
+  const nextAttempts = (config.failedAttempts || 0) + 1;
+  const lockoutMs = computeLockoutDurationMs(nextAttempts);
+  const lockedUntilMs = lockoutMs > 0 ? nowMs + lockoutMs : 0;
+  const updatedConfig = saveKuCoinSecurityConfig({
+    ...config,
+    failedAttempts: nextAttempts,
+    lockedUntilMs,
+  });
+
+  if (lockoutMs > 0) {
+    const secs = Math.ceil(lockoutMs / 1000);
+    return {
+      success: false,
+      updatedConfig,
+      lockedRemainingMs: lockoutMs,
+      errorAr: `تجاوزت الحد المسموح من المحاولات (${nextAttempts}). تم قفل المحاولات لمدة ${secs} ثانية.`,
+    };
+  }
+
+  const leftBeforeLock = Math.max(0, 5 - nextAttempts);
+  return {
+    success: false,
+    updatedConfig,
+    lockedRemainingMs: 0,
+    errorAr: `رمز PIN غير صحيح. المحاولات المتبقية قبل القفل المؤقت: ${leftBeforeLock}.`,
+  };
+}
+
+/**
+ * First-run PIN setup: validates strength (6+ recommended, 4-8 digits, blocks trivial PINs like 1234),
+ * hashes with PBKDF2-SHA256 + random 128-bit salt, and saves config.
+ */
+export async function setupInitialPinAsync(
+  newPin: string,
+  confirmPin: string
+): Promise<{
+  valid: boolean;
+  errorAr?: string;
+  normalizedNewPin?: string;
+  newPinHash?: string;
+  updatedConfig?: KuCoinSecurityLockConfig;
+}> {
   const cleanNew = normalizePinDigits(newPin);
   const cleanConfirm = normalizePinDigits(confirmPin);
 
-  if (!isValidPinFormat(cleanNew)) {
+  if (!isValidPinFormat(cleanNew) || cleanNew.length < 6) {
     return {
       valid: false,
-      errorAr: 'يجب أن يتكون رمز PIN الجديد من 4 إلى 6 أرقام فقط.',
+      errorAr: 'يجب أن يتكون رمز PIN من 6 إلى 8 أرقام لحماية قوية للمحفظة.',
+    };
+  }
+
+  if (isWeakTrivialPin(cleanNew)) {
+    return {
+      valid: false,
+      errorAr: 'رمز PIN ضعيف جداً (مثل 123456 أو أرقام مكررة). يرجى اختيار رمز أقوى.',
     };
   }
 
@@ -129,11 +292,87 @@ export function validatePinChange(
     };
   }
 
+  const newPinHash = await hashPinPbkdf2(cleanNew);
+  setActiveSessionPin(cleanNew);
+  const updatedConfig = saveKuCoinSecurityConfig({
+    enabled: true,
+    pinCode: '',
+    pinHash: newPinHash,
+    isPinConfigured: true,
+    failedAttempts: 0,
+    lockedUntilMs: 0,
+  });
+
   return {
     valid: true,
     normalizedNewPin: cleanNew,
-    newPinHash: hashPinSync(cleanNew),
+    newPinHash,
+    updatedConfig,
   };
+}
+
+/**
+ * Validates changing the PIN code from `currentInput` to `newPin` & `confirmPin` using PBKDF2-SHA256.
+ */
+export async function validatePinChangeAsync(
+  currentInput: string,
+  storedHash: string,
+  newPin: string,
+  confirmPin: string
+): Promise<{
+  valid: boolean;
+  errorAr?: string;
+  normalizedCurrentPin?: string;
+  normalizedNewPin?: string;
+  newPinHash?: string;
+}> {
+  const cleanCurrent = normalizePinDigits(currentInput);
+  const check = await verifyPinCodeAsync(cleanCurrent, storedHash);
+  if (!check.valid) {
+    return {
+      valid: false,
+      errorAr: 'رمز PIN الحالي غير صحيح. يرجى إدخال الرمز الحالي بشكل صحيح.',
+    };
+  }
+
+  const cleanNew = normalizePinDigits(newPin);
+  const cleanConfirm = normalizePinDigits(confirmPin);
+
+  if (!isValidPinFormat(cleanNew) || cleanNew.length < 6) {
+    return {
+      valid: false,
+      errorAr: 'يجب أن يتكون رمز PIN الجديد من 6 إلى 8 أرقام لحماية قوية.',
+    };
+  }
+
+  if (isWeakTrivialPin(cleanNew)) {
+    return {
+      valid: false,
+      errorAr: 'رمز PIN الجديد ضعيف جداً (مثل 123456 أو أرقام مكررة). يرجى اختيار رمز غير متوقع.',
+    };
+  }
+
+  if (cleanNew !== cleanConfirm) {
+    return {
+      valid: false,
+      errorAr: 'رمز PIN الجديد وتأكيد الرمز غير متطابقين.',
+    };
+  }
+
+  const newPinHash = await hashPinPbkdf2(cleanNew);
+  return {
+    valid: true,
+    normalizedCurrentPin: cleanCurrent,
+    normalizedNewPin: cleanNew,
+    newPinHash,
+  };
+}
+
+/**
+ * Wipes the unlocked session PIN from memory immediately when locking the vault.
+ */
+export function lockSecurityVaultSession(): void {
+  clearActiveSessionPin();
 }
 
 /**
@@ -172,22 +411,31 @@ export function loadKuCoinSecurityConfig(): KuCoinSecurityLockConfig {
     }
     const parsed = JSON.parse(raw);
 
-    // Transparently migrate legacy plaintext `pinCode` into salted `pinHash`
-    let resolvedHash = isPinHashed(parsed.pinHash) ? parsed.pinHash : '';
-    let migrated = false;
-    if (!resolvedHash) {
-      const legacyPlain = normalizePinDigits(parsed.pinCode || '');
-      resolvedHash = isValidPinFormat(legacyPlain) ? hashPinSync(legacyPlain) : DEFAULT_PIN_HASH;
-      migrated = true;
+    let resolvedHash = isPinHashed(parsed.pinHash) ? String(parsed.pinHash) : '';
+    // Reject the old insecure hardcoded default 1234 hash so users must create a real personal PIN
+    const oldDefault1234Hash = hashPinLegacySync('1234');
+    if (resolvedHash === oldDefault1234Hash) {
+      resolvedHash = '';
     }
+
+    const isPinConfigured = Boolean(resolvedHash);
 
     const loaded: KuCoinSecurityLockConfig = {
       enabled:
         typeof parsed.enabled === 'boolean'
           ? parsed.enabled
           : DEFAULT_KUCOIN_SECURITY_CONFIG.enabled,
-      pinCode: '', // Never retain plaintext PIN in memory/storage once hashed
+      pinCode: '', // Never retain plaintext PIN
       pinHash: resolvedHash,
+      isPinConfigured,
+      failedAttempts:
+        typeof parsed.failedAttempts === 'number' && parsed.failedAttempts >= 0
+          ? parsed.failedAttempts
+          : 0,
+      lockedUntilMs:
+        typeof parsed.lockedUntilMs === 'number' && parsed.lockedUntilMs > 0
+          ? parsed.lockedUntilMs
+          : 0,
       biometricEnabled: Boolean(parsed.biometricEnabled),
       biometricCredentialId: parsed.biometricCredentialId || null,
       lockScope:
@@ -202,7 +450,7 @@ export function loadKuCoinSecurityConfig(): KuCoinSecurityLockConfig {
           : DEFAULT_KUCOIN_SECURITY_CONFIG.protectRealTradingSwitch,
     };
 
-    if (migrated || parsed.pinCode) {
+    if (parsed.pinCode || parsed.pinHash === oldDefault1234Hash) {
       localStorage.setItem(KUCOIN_SECURITY_STORAGE_KEY, JSON.stringify(loaded));
     }
 
@@ -217,14 +465,9 @@ export function saveKuCoinSecurityConfig(
 ): KuCoinSecurityLockConfig {
   const current = loadKuCoinSecurityConfig();
 
-  let nextHash = current.pinHash || DEFAULT_PIN_HASH;
-  if (partial.pinHash && isPinHashed(partial.pinHash)) {
+  let nextHash = current.pinHash || '';
+  if (partial.pinHash !== undefined && (partial.pinHash === '' || isPinHashed(partial.pinHash))) {
     nextHash = partial.pinHash;
-  } else if (partial.pinCode !== undefined) {
-    const cleanNew = normalizePinDigits(partial.pinCode);
-    if (isValidPinFormat(cleanNew)) {
-      nextHash = hashPinSync(cleanNew);
-    }
   }
 
   const updated: KuCoinSecurityLockConfig = {
@@ -232,6 +475,7 @@ export function saveKuCoinSecurityConfig(
     ...partial,
     pinCode: '', // Never store plaintext PIN in localStorage
     pinHash: nextHash,
+    isPinConfigured: isPinHashed(nextHash),
   };
 
   try {
@@ -276,8 +520,7 @@ export async function isPlatformBiometricSupported(): Promise<boolean> {
 
 /**
  * Performs genuine biometric verification using native Android BiometricPrompt bridge or WebAuthn.
- * Security hardening (v2.23): Never auto-succeeds when hardware biometrics are unavailable or cancelled —
- * returns `{ success: false }` so the user must authenticate with their real PIN.
+ * Fails closed when hardware biometrics are unavailable or cancelled.
  */
 export async function performBiometricAuthentication(
   existingCredentialId?: string | null
@@ -287,7 +530,6 @@ export async function performBiometricAuthentication(
   methodUsed: 'WEBAUTHN_NATIVE' | 'BIOMETRIC_SENSOR' | 'BIOMETRIC_UNAVAILABLE';
   messageAr: string;
 }> {
-  // 1. Native Android WebView biometric bridge (BiometricPrompt)
   try {
     const win =
       typeof window !== 'undefined'
@@ -316,7 +558,6 @@ export async function performBiometricAuthentication(
     // fall through to WebAuthn
   }
 
-  // 2. Genuine WebAuthn platform assertion if registered
   const isGenuineWebAuthnCred =
     typeof existingCredentialId === 'string' && existingCredentialId.startsWith('webauthn:');
 
@@ -365,7 +606,6 @@ export async function performBiometricAuthentication(
     }
   }
 
-  // 3. No genuine biometric authenticator available — fail closed and require real PIN
   return {
     success: false,
     credentialId: existingCredentialId || null,

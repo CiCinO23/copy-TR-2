@@ -17,7 +17,12 @@ import {
   RotateCcw,
   AlertCircle,
 } from 'lucide-react';
-import { KuCoinConfig, KuCoinConnectionState, KuCoinSecurityLockConfig } from '../types';
+import {
+  KuCoinConfig,
+  KuCoinConnectionState,
+  KuCoinSecurityLockConfig,
+  KuCoinReconciliationDiscrepancy,
+} from '../types';
 import {
   KuCoinSecurityLockScreen,
   KuCoinSecurityConfigModal,
@@ -35,6 +40,7 @@ import { formatDateTimeWestern } from '../utils/formatters';
 interface KucoinApiTabProps {
   config: KuCoinConfig;
   connectionState: KuCoinConnectionState;
+  reconciliationDiscrepancies?: KuCoinReconciliationDiscrepancy[];
   onSaveAndTest: (config: KuCoinConfig) => void;
   onClearKeys: () => void;
   onRefresh: () => void;
@@ -42,7 +48,12 @@ interface KucoinApiTabProps {
   onOpenSimulationTab?: () => void;
   securityConfig?: KuCoinSecurityLockConfig;
   isSecurityUnlocked?: boolean;
-  onUnlockSecurity?: (method: 'PIN' | 'BIOMETRIC', credentialId?: string | null) => void;
+  onUnlockSecurity?: (
+    method: 'PIN' | 'BIOMETRIC',
+    credentialId?: string | null,
+    verifiedPin?: string,
+    updatedConfig?: KuCoinSecurityLockConfig
+  ) => void;
   onLockSecurityNow?: () => void;
   onUpdateSecurityConfig?: (partial: Partial<KuCoinSecurityLockConfig>) => void;
   onOpenSettingsTab?: () => void;
@@ -51,8 +62,10 @@ interface KucoinApiTabProps {
 export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
   config,
   connectionState,
+  reconciliationDiscrepancies = [],
   onSaveAndTest,
   onClearKeys,
+  onRefresh,
   onClearOrderHistory,
   onOpenSimulationTab,
   securityConfig = DEFAULT_KUCOIN_SECURITY_CONFIG,
@@ -167,11 +180,14 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
         <KuCoinSecurityLockScreen
           config={securityConfig}
           titleAr="قفل أمان تبويب التنفيذ المباشر (KuCoin)"
-          subtitleAr="تم تفعيل الحماية المتقدمة للمحفظة الحقيقية. يرجى إدخال رمز القفل الرقمي (PIN Code) لفتح تبويب التنفيذ المباشر (KuCoin)."
-          onUnlockSuccess={(method, credId) => {
+          subtitleAr="مفاتيحك السرية مشفّرة بـ AES-256-GCM. يرجى إدخال رمز القفل الرقمي (PIN Code) لفك التشفير وفتح تبويب KuCoin."
+          onUnlockSuccess={(method, credId, verifiedPin, updatedCfg) => {
             if (onUnlockSecurity) {
-              onUnlockSecurity(method, credId);
+              onUnlockSecurity(method, credId, verifiedPin, updatedCfg);
             }
+          }}
+          onConfigChange={(updated) => {
+            onUpdateSecurityConfig?.(updated);
           }}
           onOpenSettingsTab={onOpenSettingsTab}
         />
@@ -181,6 +197,35 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
 
   return (
     <div className="space-y-4 animate-in fade-in duration-200">
+      {/* Live Position Reconciliation Discrepancy Alert Banner */}
+      {reconciliationDiscrepancies.length > 0 && (
+        <div
+          data-testid="kucoin_reconciliation_alert_banner"
+          className="bg-[#2B1216] border border-[#F6465D]/60 rounded-2xl p-4 space-y-2.5"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-[#F6465D] font-bold text-xs sm:text-sm">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>
+                تحذير مطابقة المراكز الحقيقية: يوجد {reconciliationDiscrepancies.length} اختلاف بين التطبيق وحساب KuCoin
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={onRefresh}
+              className="text-xs bg-[#F6465D]/20 hover:bg-[#F6465D]/30 text-white border border-[#F6465D]/50 px-3 py-1.5 rounded-lg font-bold flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>تحديث ومطابقة الآن</span>
+            </button>
+          </div>
+          <ul className="space-y-1 text-[11px] text-[#F4D5D9] list-disc list-inside">
+            {reconciliationDiscrepancies.map((item, idx) => (
+              <li key={`${item.kucoinSymbol}_${item.type}_${idx}`}>{item.messageAr}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {/* Real Wallet Security Vault Bar (شريط حماية المحفظة الحقيقية برمز PIN) */}
       <div
         data-testid="kucoin_security_vault_bar"
@@ -987,16 +1032,27 @@ export const KucoinApiTab: React.FC<KucoinApiTabProps> = ({
                       <td className="py-3 px-3 whitespace-nowrap">
                         <span
                           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                            ord.isRealKuCoin || ord.status === 'DONE' || ord.status === 'NEW'
+                            ord.status === 'FAILED'
+                              ? 'bg-[#2B1216] text-[#F6465D] border border-[#F6465D]/50'
+                              : ord.status === 'REJECTED_GUARD' || ord.status === 'UNKNOWN_TIMEOUT'
+                              ? 'bg-[#2E2209] text-[#F59E0B] border border-[#F59E0B]/50'
+                              : ord.isRealKuCoin || ord.status === 'DONE' || ord.status === 'NEW'
                               ? 'bg-[#0D2B24] text-[#01BC8D] border border-[#01BC8D]/30'
                               : 'bg-[#1A222B] text-[#8A99AD] border border-[#232E3A]'
                           }`}
+                          title={ord.errorMessageAr || ord.guardReasonAr || undefined}
                         >
                           <span>
                             {ord.status === 'DONE'
                               ? 'منفّذ (DONE)'
                               : ord.status === 'NEW'
                               ? 'مرسل (LIVE)'
+                              : ord.status === 'FAILED'
+                              ? 'فشل التنفيذ (FAILED)'
+                              : ord.status === 'REJECTED_GUARD'
+                              ? 'محظور بالحماية (GUARD)'
+                              : ord.status === 'UNKNOWN_TIMEOUT'
+                              ? 'حالة غير مؤكدة (TIMEOUT)'
                               : ord.status === 'CANCELLED'
                               ? 'ملغي (CANCELLED)'
                               : 'محاكاة (SIMULATED)'}

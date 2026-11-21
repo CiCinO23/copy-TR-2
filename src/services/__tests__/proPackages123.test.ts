@@ -4,11 +4,11 @@ import assert from 'node:assert/strict';
 import { calculateKuCoinFuturesContractsSize } from '../kucoinApi';
 import {
   DEFAULT_KUCOIN_SECURITY_CONFIG,
-  hashPinSync,
   isPinHashed,
-  verifyPinCode,
-  isDefaultPinActive,
-  validatePinChange,
+  needsInitialPinSetup,
+  setupInitialPinAsync,
+  verifyPinCodeAsync,
+  validatePinChangeAsync,
   performBiometricAuthentication,
 } from '../kucoinSecurityLock';
 import { PaperEngine } from '../paperTrading';
@@ -27,22 +27,24 @@ import {
 import type { PaperPosition } from '../../types';
 
 // ============================================================================
-// 1. KuCoin Futures Contract Sizing (Package 1)
+// 1. KuCoin Futures Contract Sizing (Package 1 — Budget-Safe Floor & Limits)
 // ============================================================================
 
-test('calculateKuCoinFuturesContractsSize respects XBTUSDTM, ETHUSDTM, DOGEUSDTM, PEPEUSDTM multipliers and min floor', () => {
+test('calculateKuCoinFuturesContractsSize respects XBTUSDTM, ETHUSDTM, DOGEUSDTM, PEPEUSDTM multipliers and never exceeds budget', () => {
   // XBTUSDTM: multiplier = 0.001 BTC/contract. At $100,000 BTC, 1 contract = $100 notional.
   // $500 notional => 0.005 BTC => 5 contracts.
   const btc = calculateKuCoinFuturesContractsSize('XBTUSDTM', 500, 100_000);
   assert.equal(btc.multiplier, 0.001);
   assert.equal(btc.lotSize, 1);
   assert.equal(btc.contracts, 5);
+  assert.equal(btc.budgetExceeded, false);
 
   // ETHUSDTM: multiplier = 0.01 ETH/contract. At $3,000 ETH, 1 contract = $30 notional.
   // $300 notional => 0.1 ETH => 10 contracts.
   const eth = calculateKuCoinFuturesContractsSize('ETHUSDTM', 300, 3_000);
   assert.equal(eth.multiplier, 0.01);
   assert.equal(eth.contracts, 10);
+  assert.equal(eth.budgetExceeded, false);
 
   // DOGEUSDTM: multiplier = 100 DOGE/contract. At $0.20 DOGE, 1 contract = $20 notional.
   // $100 notional => 500 DOGE => 5 contracts.
@@ -56,39 +58,37 @@ test('calculateKuCoinFuturesContractsSize respects XBTUSDTM, ETHUSDTM, DOGEUSDTM
   assert.equal(pepe.multiplier, 1_000_000);
   assert.equal(pepe.contracts, 5);
 
-  // Tiny order still enforces minimum 1 contract floor
+  // Tiny order below 1 contract ($100 notional on XBTUSDTM) MUST NOT force 1 contract over budget!
   const tiny = calculateKuCoinFuturesContractsSize('XBTUSDTM', 1, 100_000);
-  assert.equal(tiny.contracts, 1);
+  assert.equal(tiny.contracts, 0);
+  assert.equal(tiny.budgetExceeded, true);
+  assert.equal(tiny.minContractNotionalUsdt, 100);
 });
 
 // ============================================================================
-// 2. Security Lock Hardening: Salted PIN Hash & Fail-Closed Biometrics (Package 1)
+// 2. Security Lock Hardening: PBKDF2-SHA256 PIN Hash & Fail-Closed Biometrics
 // ============================================================================
 
-test('hashPinSync produces deterministic salted hash and verifyPinCode validates both hash and legacy plaintext', () => {
-  const hash1234 = hashPinSync('1234');
-  assert.equal(isPinHashed(hash1234), true);
-  assert.notEqual(hash1234, '1234');
-  assert.equal(hashPinSync('١٢٣٤'), hash1234); // Arabic-Indic normalization
+test('setupInitialPinAsync produces unique PBKDF2-SHA256 salted hashes and rejects weak/default PINs', async () => {
+  assert.equal(needsInitialPinSetup(DEFAULT_KUCOIN_SECURITY_CONFIG), true);
 
-  assert.equal(verifyPinCode('1234', hash1234), true);
-  assert.equal(verifyPinCode('9999', hash1234), false);
-  assert.equal(verifyPinCode('5678', '5678'), true); // Legacy plaintext compatibility
+  const setupA = await setupInitialPinAsync('849271', '849271');
+  const setupB = await setupInitialPinAsync('٨٤٩٢٧١', '849271');
+  assert.equal(setupA.valid, true);
+  assert.equal(setupB.valid, true);
+  assert.equal(isPinHashed(setupA.newPinHash!), true);
+  // Random salt ensures two hashes of the same PIN differ
+  assert.notEqual(setupA.newPinHash, setupB.newPinHash);
 
-  assert.equal(isDefaultPinActive(DEFAULT_KUCOIN_SECURITY_CONFIG), true);
-  assert.equal(
-    isDefaultPinActive({
-      ...DEFAULT_KUCOIN_SECURITY_CONFIG,
-      pinHash: hashPinSync('8426'),
-    }),
-    false
-  );
+  assert.equal((await verifyPinCodeAsync('849271', setupA.newPinHash!)).valid, true);
+  assert.equal((await verifyPinCodeAsync('٨٤٩٢٧١', setupA.newPinHash!)).valid, true);
+  assert.equal((await verifyPinCodeAsync('999999', setupA.newPinHash!)).valid, false);
 
-  const changeOk = validatePinChange('1234', hash1234, '8426', '8426');
+  const changeOk = await validatePinChangeAsync('849271', setupA.newPinHash!, '739152', '739152');
   assert.equal(changeOk.valid, true);
-  assert.equal(changeOk.newPinHash, hashPinSync('8426'));
+  assert.equal((await verifyPinCodeAsync('739152', changeOk.newPinHash!)).valid, true);
 
-  const changeBadCurrent = validatePinChange('0000', hash1234, '8426', '8426');
+  const changeBadCurrent = await validatePinChangeAsync('000000', setupA.newPinHash!, '739152', '739152');
   assert.equal(changeBadCurrent.valid, false);
 });
 

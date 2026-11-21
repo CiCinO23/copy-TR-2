@@ -164,7 +164,13 @@ interface SimulationTabProps {
   onOpenNotificationsCenter?: () => void;
   securityConfig?: KuCoinSecurityLockConfig;
   isSecurityUnlocked?: boolean;
-  onUnlockSecurity?: (method: 'PIN' | 'BIOMETRIC', credentialId?: string | null) => void;
+  onUnlockSecurity?: (
+    method: 'PIN' | 'BIOMETRIC',
+    credentialId?: string | null,
+    verifiedPin?: string,
+    updatedConfig?: KuCoinSecurityLockConfig
+  ) => void;
+  onUpdateSecurityConfig?: (partial: Partial<KuCoinSecurityLockConfig>) => void;
   onLockSecurityNow?: () => void;
 }
 
@@ -1720,10 +1726,10 @@ export const SimulationTab: React.FC<SimulationTabProps> = ({
             <KuCoinSecurityLockScreen
               config={securityConfig}
               titleAr="تأكيد التبديل إلى التداول الحقيقي (KuCoin)"
-              subtitleAr="أدخل رمز القفل الرقمي (PIN) لحماية محفظتك الحقيقية قبل تفعيل التنفيذ المباشر."
-              onUnlockSuccess={(method, credId) => {
+              subtitleAr="أدخل رمز القفل الرقمي (PIN) لفك تشفير مفاتيح محفظتك قبل تفعيل التنفيذ المباشر."
+              onUnlockSuccess={(method, credId, verifiedPin, updatedCfg) => {
                 if (onUnlockSecurity) {
-                  onUnlockSecurity(method, credId);
+                  onUnlockSecurity(method, credId, verifiedPin, updatedCfg);
                 }
                 setIsPromptingRealModeUnlock(false);
                 onUpdateTradeSettings({ mode: 'REAL' }, activeAccountId, false);

@@ -44,16 +44,25 @@ import {
 import {
   loadKuCoinConfig,
   saveKuCoinConfig,
+  saveKuCoinConfigEncrypted,
+  unlockKuCoinConfigWithPin,
   clearKuCoinConfig,
   testKuCoinConnectionAndFetchData,
   getInitialKuCoinConnectionState,
   executeKuCoinOrder,
+  syncKuCoinPositionProtectionOrders,
   loadKuCoinOrderHistory,
   clearKuCoinOrderHistory,
   fetchKuCoinFuturesContracts,
   pingKuCoinServer,
+  convertToKuCoinSymbol,
+  getCachedKuCoinContractSpec,
   type KuCoinOrderRequestParams,
 } from './services/kucoinApi';
+import {
+  reconcilePaperWithKuCoinPositions,
+  resolveKuCoinExitSizing,
+} from './services/kucoinReconciliation';
 import {
   fetchCopyTraderFullData,
   fetchSmartMoneyWhaleDetail,
@@ -71,6 +80,7 @@ import {
   loadKuCoinSecurityConfig,
   saveKuCoinSecurityConfig,
   shouldRequireUnlock,
+  lockSecurityVaultSession,
 } from './services/kucoinSecurityLock';
 
 function loadAllCopiedTradersFromStorage(): ActiveCopiedTrader[] {
@@ -131,6 +141,8 @@ export const App: React.FC = () => {
   const [kucoinConnectionState, setKucoinConnectionState] = useState<KuCoinConnectionState>(() =>
     getInitialKuCoinConnectionState(loadKuCoinConfig())
   );
+  const kucoinConnectionStateRef = useRef<KuCoinConnectionState>(kucoinConnectionState);
+  kucoinConnectionStateRef.current = kucoinConnectionState;
 
   // Unified copied traders list across Copy Trading and Whales
   const [allCopiedTraders, setAllCopiedTraders] = useState<ActiveCopiedTrader[]>(
@@ -208,11 +220,10 @@ export const App: React.FC = () => {
     []
   );
 
-  // Save KuCoin config & test
+  // Save KuCoin config & test (encrypts secrets with AES-256-GCM whenever vault PIN is unlocked)
   const handleSaveKuCoin = (updated: KuCoinConfig) => {
     setKucoinConfig(updated);
-    saveKuCoinConfig(updated);
-    // Sync trading mode if user toggled live execution in KuCoin tab
+    void saveKuCoinConfigEncrypted(updated);
     paperEngine.updateSettings({
       mode: updated.enableLiveExecution ? 'REAL' : 'VIRTUAL',
       leverage: updated.defaultLeverage || paperEngine.getSettings().leverage,
@@ -248,7 +259,7 @@ export const App: React.FC = () => {
     handleTestBinanceConnection(cleared);
   };
 
-  // Exclusive Settings Vault Handlers (v2.1 / v2.23)
+  // Exclusive Settings Vault Handlers (AES-256-GCM encrypted at rest when PIN unlocked)
   const handleSaveKuCoinSecrets = useCallback(
     (secrets: { apiSecret: string; passphrase: string }) => {
       setKucoinConfig((prev) => {
@@ -257,7 +268,7 @@ export const App: React.FC = () => {
           apiSecret: secrets.apiSecret.trim(),
           passphrase: secrets.passphrase.trim(),
         };
-        saveKuCoinConfig(next);
+        void saveKuCoinConfigEncrypted(next);
         return next;
       });
     },
@@ -580,6 +591,7 @@ export const App: React.FC = () => {
 
       // 2. Route synced entries, scale-ins, partial exits, and full exits to KuCoin API simultaneously via Promise.all
       const batchOrders: KuCoinOrderRequestParams[] = [];
+      const batchMeta: Array<{ rollbackPosId?: string; rollbackPrice: number; isLiveNewEntry: boolean }> = [];
       for (const log of logs) {
         if (
           (log.action === 'POSITION_SYNC' ||
@@ -590,18 +602,44 @@ export const App: React.FC = () => {
           log.quantity > 0
         ) {
           const isClosingAction = log.action === 'EXIT' || log.action === 'PARTIAL_EXIT';
+          const isNewEntryAction = log.action === 'ENTRY' || log.action === 'POSITION_SYNC';
           const executionSide: 'LONG' | 'SHORT' = isClosingAction
             ? log.side === 'LONG'
               ? 'SHORT'
               : 'LONG'
             : log.side;
 
+          const isFullExit = log.action === 'EXIT';
+          const isPartialExit = log.action === 'PARTIAL_EXIT';
+          const kcSym = convertToKuCoinSymbol(log.symbol, true);
+          const spec = getCachedKuCoinContractSpec(kcSym, log.price);
+
+          const exitSizing = isClosingAction
+            ? resolveKuCoinExitSizing({
+                kucoinSymbol: kcSym,
+                isFullExit,
+                exitPercent: Math.abs(log.volumePercent || 30),
+                liveKuCoinPositions: kucoinConnectionStateRef.current.positions,
+                fallbackBaseQuantity: log.quantity,
+                multiplier: spec.multiplier,
+                lotSize: spec.lotSize,
+              })
+            : null;
+
+          const matchingOpenPos = !isClosingAction
+            ? paperEngine
+                .getAccount(log.accountId)
+                .positions.find(
+                  (p) => p.status === 'OPEN' && p.symbol.toUpperCase() === log.symbol.toUpperCase() && p.side === log.side
+                )
+            : undefined;
+
           const orderAmountUsdt =
             log.action === 'SCALE_IN'
               ? currentSettings.scaleInSamePercentAsTrader !== false
                 ? Number((userTradeValue * (Math.abs(log.volumePercent || 25) / 100)).toFixed(2))
                 : Math.max(1, currentSettings.scaleInFixedValueUsdt || 10)
-              : log.action === 'PARTIAL_EXIT'
+              : isPartialExit
               ? Number((userTradeValue * (Math.abs(log.volumePercent || 30) / 100)).toFixed(2))
               : userTradeValue;
 
@@ -616,8 +654,17 @@ export const App: React.FC = () => {
             entryPrice: log.price,
             leverage: userLeverage,
             reduceOnly: isClosingAction,
+            closeFullPosition: Boolean(exitSizing?.useCloseOrderFlag),
+            exactContracts: exitSizing && !exitSizing.useCloseOrderFlag ? exitSizing.exactContracts : undefined,
+            stopLossPrice: !isClosingAction ? matchingOpenPos?.stopLossPrice : undefined,
+            takeProfitPrice: !isClosingAction ? matchingOpenPos?.takeProfitPrice : undefined,
             sourceTraderName: `${params.traderName} (${targetAcc.name})`,
             sourceSignal: `Binance ${params.source} [${targetAcc.name}] (${log.action} بالسعر الحالي • ${orderAmountUsdt}$ × ${userLeverage}x)`,
+          });
+          batchMeta.push({
+            rollbackPosId: isNewEntryAction ? matchingOpenPos?.id : undefined,
+            rollbackPrice: log.price,
+            isLiveNewEntry: currentSettings.mode === 'REAL' && isNewEntryAction,
           });
         }
       }
@@ -634,6 +681,35 @@ export const App: React.FC = () => {
                 ...prev.recentOrders.filter((r) => !newIds.has(r.id)),
               ].slice(0, 50),
             }));
+            let rolledBackAny = false;
+            executedOrders.forEach((ord, idx) => {
+              const meta = batchMeta[idx];
+              if (
+                meta?.isLiveNewEntry &&
+                meta.rollbackPosId &&
+                (ord.status === 'FAILED' || ord.status === 'REJECTED_GUARD')
+              ) {
+                try {
+                  paperEngine.closePosition(meta.rollbackPosId, meta.rollbackPrice);
+                  rolledBackAny = true;
+                } catch {
+                  // Ignore if already closed
+                }
+              }
+            });
+            if (rolledBackAny) {
+              setPaperSnapshot(paperEngine.getSnapshot(pricesMapRef.current));
+            }
+            // Immediately refresh live KuCoin positions if any live order failed or timed out
+            const hasAlertableFailure = executedOrders.some(
+              (o) =>
+                o.status === 'FAILED' ||
+                o.status === 'REJECTED_GUARD' ||
+                o.status === 'UNKNOWN_TIMEOUT'
+            );
+            if (hasAlertableFailure) {
+              void handleTestKuCoinConnection(kucoinConfigRef.current);
+            }
           })
           .catch((err) => {
             console.warn('KuCoin batch order execution error:', err);
@@ -642,11 +718,12 @@ export const App: React.FC = () => {
 
       return logs;
     },
-    [refreshCopiedTradersList]
+    [refreshCopiedTradersList, handleTestKuCoinConnection]
   );
 
   const routeSyncedLogsToKuCoin = useCallback((logs: CopiedSyncLog[]) => {
     const batchOrders: KuCoinOrderRequestParams[] = [];
+    const batchMeta: Array<{ rollbackPosId?: string; rollbackPrice: number; isLiveNewEntry: boolean }> = [];
     for (const log of logs) {
       if (
         (log.action === 'POSITION_SYNC' ||
@@ -661,11 +738,33 @@ export const App: React.FC = () => {
         const userTradeValue = currentSettings.tradeValueUsdt;
         const userLeverage = log.leverage || currentSettings.leverage;
         const isClosingAction = log.action === 'EXIT' || log.action === 'PARTIAL_EXIT';
+        const isNewEntryAction = log.action === 'ENTRY' || log.action === 'POSITION_SYNC';
+        const isFullExit = log.action === 'EXIT';
         const executionSide: 'LONG' | 'SHORT' = isClosingAction
           ? log.side === 'LONG'
             ? 'SHORT'
             : 'LONG'
           : log.side;
+
+        const kcSym = convertToKuCoinSymbol(log.symbol, true);
+        const spec = getCachedKuCoinContractSpec(kcSym, log.price);
+        const exitSizing = isClosingAction
+          ? resolveKuCoinExitSizing({
+              kucoinSymbol: kcSym,
+              isFullExit,
+              exitPercent: Math.abs(log.volumePercent || 30),
+              liveKuCoinPositions: kucoinConnectionStateRef.current.positions,
+              fallbackBaseQuantity: log.quantity,
+              multiplier: spec.multiplier,
+              lotSize: spec.lotSize,
+            })
+          : null;
+
+        const matchingOpenPos = !isClosingAction
+          ? targetAcc.positions.find(
+              (p) => p.status === 'OPEN' && p.symbol.toUpperCase() === log.symbol.toUpperCase() && p.side === log.side
+            )
+          : undefined;
 
         const orderAmountUsdt =
           log.action === 'SCALE_IN'
@@ -687,8 +786,17 @@ export const App: React.FC = () => {
           entryPrice: log.price,
           leverage: userLeverage,
           reduceOnly: isClosingAction,
+          closeFullPosition: Boolean(exitSizing?.useCloseOrderFlag),
+          exactContracts: exitSizing && !exitSizing.useCloseOrderFlag ? exitSizing.exactContracts : undefined,
+          stopLossPrice: !isClosingAction ? matchingOpenPos?.stopLossPrice : undefined,
+          takeProfitPrice: !isClosingAction ? matchingOpenPos?.takeProfitPrice : undefined,
           sourceTraderName: `${log.traderName} (${targetAcc.name})`,
           sourceSignal: `Binance ${log.source} [${targetAcc.name}] (${log.action} بالسعر الحالي • ${orderAmountUsdt}$ × ${userLeverage}x)`,
+        });
+        batchMeta.push({
+          rollbackPosId: isNewEntryAction ? matchingOpenPos?.id : undefined,
+          rollbackPrice: log.price,
+          isLiveNewEntry: currentSettings.mode === 'REAL' && isNewEntryAction,
         });
       }
     }
@@ -705,12 +813,40 @@ export const App: React.FC = () => {
               ...prev.recentOrders.filter((r) => !newIds.has(r.id)),
             ].slice(0, 50),
           }));
+          let rolledBackAny = false;
+          executedOrders.forEach((ord, idx) => {
+            const meta = batchMeta[idx];
+            if (
+              meta?.isLiveNewEntry &&
+              meta.rollbackPosId &&
+              (ord.status === 'FAILED' || ord.status === 'REJECTED_GUARD')
+            ) {
+              try {
+                paperEngine.closePosition(meta.rollbackPosId, meta.rollbackPrice);
+                rolledBackAny = true;
+              } catch {
+                // Ignore if already closed
+              }
+            }
+          });
+          if (rolledBackAny) {
+            setPaperSnapshot(paperEngine.getSnapshot(pricesMapRef.current));
+          }
+          const hasAlertableFailure = executedOrders.some(
+            (o) =>
+              o.status === 'FAILED' ||
+              o.status === 'REJECTED_GUARD' ||
+              o.status === 'UNKNOWN_TIMEOUT'
+          );
+          if (hasAlertableFailure) {
+            void handleTestKuCoinConnection(kucoinConfigRef.current);
+          }
         })
         .catch((err) => {
           console.warn('KuCoin batch order execution error:', err);
         });
     }
-  }, []);
+  }, [handleTestKuCoinConnection]);
 
   routeDrainedAutoLogsRef.current = routeSyncedLogsToKuCoin;
 
@@ -769,28 +905,43 @@ export const App: React.FC = () => {
       // 2. If the trade is already copied and had uncopied partial exits or scale-ins, route ONLY those deltas simultaneously to KuCoin via Promise.all
       if (copyResult.status === 'SYNCED_DELTAS_ONLY') {
         const deltaOrders: KuCoinOrderRequestParams[] = copyResult.appliedDeltas.map((delta) => {
-          const orderSide: 'LONG' | 'SHORT' =
-            delta.actionType === 'PARTIAL_EXIT'
-              ? pos.side === 'LONG'
-                ? 'SHORT'
-                : 'LONG'
-              : pos.side;
-          const signalLabel =
-            delta.actionType === 'PARTIAL_EXIT'
-              ? `Manual Delta Sync Partial Exit -${delta.volumePercent}% [${targetAcc.name}] (${pos.symbol})`
-              : `Manual Delta Sync Scale-In +${delta.volumePercent}% [${targetAcc.name}] (${pos.symbol})`;
+          const isPartial = delta.actionType === 'PARTIAL_EXIT';
+          const orderSide: 'LONG' | 'SHORT' = isPartial
+            ? pos.side === 'LONG'
+              ? 'SHORT'
+              : 'LONG'
+            : pos.side;
+          const kcSym = convertToKuCoinSymbol(pos.symbol, true);
+          const refPrice = delta.price > 0 ? delta.price : liveMarketPrice;
+          const spec = getCachedKuCoinContractSpec(kcSym, refPrice);
+          const exitSizing = isPartial
+            ? resolveKuCoinExitSizing({
+                kucoinSymbol: kcSym,
+                isFullExit: delta.volumePercent >= 100,
+                exitPercent: Math.abs(delta.volumePercent || 30),
+                liveKuCoinPositions: kucoinConnectionStateRef.current.positions,
+                fallbackBaseQuantity: copyResult.position.quantity,
+                multiplier: spec.multiplier,
+                lotSize: spec.lotSize,
+              })
+            : null;
+          const signalLabel = isPartial
+            ? `Manual Delta Sync Partial Exit -${delta.volumePercent}% [${targetAcc.name}] (${pos.symbol})`
+            : `Manual Delta Sync Scale-In +${delta.volumePercent}% [${targetAcc.name}] (${pos.symbol})`;
 
           return {
             config: {
-              ...kucoinConfig,
+              ...kucoinConfigRef.current,
               enableLiveExecution: currentSettings.mode === 'REAL',
             },
             binanceSymbol: pos.symbol,
             side: orderSide,
             amountUsdt: Math.max(1, delta.marginDeltaUsdt),
-            entryPrice: delta.price > 0 ? delta.price : liveMarketPrice,
+            entryPrice: refPrice,
             leverage: delta.leverage || effectiveLeverage,
-            reduceOnly: delta.actionType === 'PARTIAL_EXIT',
+            reduceOnly: isPartial,
+            closeFullPosition: Boolean(exitSizing?.useCloseOrderFlag),
+            exactContracts: exitSizing && !exitSizing.useCloseOrderFlag ? exitSizing.exactContracts : undefined,
             sourceTraderName: `${traderName} (${targetAcc.name})`,
             sourceSignal: signalLabel,
           };
@@ -808,6 +959,13 @@ export const App: React.FC = () => {
                   ...prev.recentOrders.filter((r) => !newIds.has(r.id)),
                 ].slice(0, 50),
               }));
+              if (
+                executedOrders.some(
+                  (o) => o.status === 'FAILED' || o.status === 'REJECTED_GUARD' || o.status === 'UNKNOWN_TIMEOUT'
+                )
+              ) {
+                void handleTestKuCoinConnection(kucoinConfigRef.current);
+              }
             })
             .catch((err) => {
               console.warn('KuCoin delta batch execution failed:', err);
@@ -816,17 +974,20 @@ export const App: React.FC = () => {
         return copyResult;
       }
 
-      // 3. Newly opened position: route initial entry to KuCoin once
+      // 3. Newly opened position: route initial entry to KuCoin once with exchange-native SL/TP & rollback on failure
+      const isLiveCopy = currentSettings.mode === 'REAL';
       executeKuCoinOrder({
         config: {
-          ...kucoinConfig,
-          enableLiveExecution: currentSettings.mode === 'REAL',
+          ...kucoinConfigRef.current,
+          enableLiveExecution: isLiveCopy,
         },
         binanceSymbol: pos.symbol,
         side: pos.side,
         amountUsdt: copyResult.position.marginUsdt || effectiveMargin,
         entryPrice: liveMarketPrice,
         leverage: copyResult.position.leverage || effectiveLeverage,
+        stopLossPrice: copyResult.position.stopLossPrice,
+        takeProfitPrice: copyResult.position.takeProfitPrice,
         sourceTraderName: `${traderName} (${targetAcc.name})`,
         sourceSignal: `Single Copy Market [${targetAcc.name}] (${pos.symbol} ${pos.side} @ السعر الحالي ${liveMarketPrice} • ${copyResult.position.marginUsdt || effectiveMargin}$ × ${copyResult.position.leverage || effectiveLeverage}x)`,
       })
@@ -835,6 +996,17 @@ export const App: React.FC = () => {
             ...prev,
             recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(0, 50),
           }));
+          if (isLiveCopy && (ord.status === 'FAILED' || ord.status === 'REJECTED_GUARD')) {
+            try {
+              paperEngine.closePosition(copyResult.position.id, liveMarketPrice);
+              updatePaperSnapshot();
+            } catch {
+              // Ignore if already closed
+            }
+            void handleTestKuCoinConnection(kucoinConfigRef.current);
+          } else if (isLiveCopy && ord.status === 'UNKNOWN_TIMEOUT') {
+            void handleTestKuCoinConnection(kucoinConfigRef.current);
+          }
         })
         .catch((err) => {
           console.warn('KuCoin execution failed:', err);
@@ -842,7 +1014,7 @@ export const App: React.FC = () => {
 
       return copyResult;
     },
-    [kucoinConfig, pricesMap, updatePaperSnapshot]
+    [pricesMap, updatePaperSnapshot, handleTestKuCoinConnection]
   );
 
   // Sync ALL currently copied traders & whales in parallel with sleep-recovery abort guards
@@ -1248,7 +1420,7 @@ export const App: React.FC = () => {
     const effectiveNotional = quantity * entryPrice;
     const liveQty = liveMarketPrice > 0 ? effectiveNotional / liveMarketPrice : quantity;
 
-    paperEngine.openPosition(
+    const openedManualPos = paperEngine.openPosition(
       sym,
       side,
       liveQty,
@@ -1270,22 +1442,27 @@ export const App: React.FC = () => {
     updatePaperSnapshot();
 
     const slNote =
-      options?.stopLossPrice && options.stopLossPrice > 0 ? ` • SL: ${options.stopLossPrice}` : '';
+      openedManualPos.stopLossPrice && openedManualPos.stopLossPrice > 0
+        ? ` • SL: ${openedManualPos.stopLossPrice}`
+        : '';
     const tpNote =
-      options?.takeProfitPrice && options.takeProfitPrice > 0
-        ? ` • TP: ${options.takeProfitPrice}`
+      openedManualPos.takeProfitPrice && openedManualPos.takeProfitPrice > 0
+        ? ` • TP: ${openedManualPos.takeProfitPrice}`
         : '';
 
+    const isLiveOrder = targetAcc.settings.mode === 'REAL';
     executeKuCoinOrder({
       config: {
         ...kucoinConfig,
-        enableLiveExecution: targetAcc.settings.mode === 'REAL',
+        enableLiveExecution: isLiveOrder,
       },
       binanceSymbol: sym,
       side,
       amountUsdt: (liveQty * liveMarketPrice) / leverage,
       entryPrice: liveMarketPrice,
       leverage,
+      stopLossPrice: openedManualPos.stopLossPrice,
+      takeProfitPrice: openedManualPos.takeProfitPrice,
       sourceTraderName: `تداول يدوي (${targetAcc.name})`,
       sourceSignal: `Manual Execution (${sym} ${side} @ ${liveMarketPrice} × ${leverage}x${slNote}${tpNote})`,
     })
@@ -1294,6 +1471,20 @@ export const App: React.FC = () => {
           ...prev,
           recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(0, 50),
         }));
+        // Roll back local unexecuted REAL-mode position if KuCoin definitively rejected or guard-blocked it
+        if (isLiveOrder && (ord.status === 'FAILED' || ord.status === 'REJECTED_GUARD')) {
+          try {
+            paperEngine.closePosition(openedManualPos.id, liveMarketPrice, Date.now(), targetAcc.id, {
+              closeReason: 'MANUAL',
+            });
+            updatePaperSnapshot();
+          } catch {
+            // ignore if already closed
+          }
+          void handleTestKuCoinConnection(kucoinConfigRef.current);
+        } else if (isLiveOrder && ord.status === 'UNKNOWN_TIMEOUT') {
+          void handleTestKuCoinConnection(kucoinConfigRef.current);
+        }
       })
       .catch(console.warn);
   };
@@ -1346,14 +1537,16 @@ export const App: React.FC = () => {
           entryPrice: exitPrice,
           leverage: targetPos.leverage,
           reduceOnly: true,
+          closeFullPosition: true,
           sourceTraderName: `${targetPos.sourceTraderName || 'تداول يدوي'} (${targetAcc.name})`,
-          sourceSignal: `Manual Full Close (${targetPos.symbol} @ ${exitPrice})`,
+          sourceSignal: `Manual Full Close (${targetPos.symbol} @ ${exitPrice} • closeOrder:true)`,
         })
           .then((ord) => {
             setKucoinConnectionState((prev) => ({
               ...prev,
               recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(0, 50),
             }));
+            void handleTestKuCoinConnection(kucoinConfigRef.current);
           })
           .catch(console.warn);
       }
@@ -1369,8 +1562,20 @@ export const App: React.FC = () => {
         trailingStopPercent?: number | null;
       }
     ) => {
-      paperEngine.updatePositionRiskLevels(positionId, levels);
+      const updated = paperEngine.updatePositionRiskLevels(positionId, levels);
       updatePaperSnapshot();
+      const targetAcc = paperEngine.getAccount(updated.accountId);
+      if (targetAcc.settings.mode === 'REAL') {
+        void syncKuCoinPositionProtectionOrders({
+          config: { ...kucoinConfigRef.current, enableLiveExecution: true },
+          binanceSymbol: updated.symbol,
+          positionSide: updated.side,
+          leverage: updated.leverage,
+          stopLossPrice: updated.stopLossPrice,
+          takeProfitPrice: updated.takeProfitPrice,
+          cancelExistingFirst: true,
+        });
+      }
     },
     [updatePaperSnapshot]
   );
@@ -1378,8 +1583,20 @@ export const App: React.FC = () => {
   const handleMoveStopLossToBreakEven = useCallback(
     (positionId: string, currentPrice?: number) => {
       try {
-        paperEngine.moveStopLossToBreakEven(positionId, undefined, currentPrice);
+        const updated = paperEngine.moveStopLossToBreakEven(positionId, undefined, currentPrice);
         updatePaperSnapshot();
+        const targetAcc = paperEngine.getAccount(updated.accountId);
+        if (targetAcc.settings.mode === 'REAL') {
+          void syncKuCoinPositionProtectionOrders({
+            config: { ...kucoinConfigRef.current, enableLiveExecution: true },
+            binanceSymbol: updated.symbol,
+            positionSide: updated.side,
+            leverage: updated.leverage,
+            stopLossPrice: updated.stopLossPrice,
+            takeProfitPrice: updated.takeProfitPrice,
+            cancelExistingFirst: true,
+          });
+        }
       } catch (err) {
         console.warn('Break-Even guard:', err instanceof Error ? err.message : err);
       }
@@ -1389,8 +1606,20 @@ export const App: React.FC = () => {
 
   const handleSecurePaperPosition = useCallback(
     (positionId: string, currentPrice: number, bufferPercent: number = 0.2) => {
-      paperEngine.securePositionNearCurrentPrice(positionId, currentPrice, bufferPercent);
+      const updated = paperEngine.securePositionNearCurrentPrice(positionId, currentPrice, bufferPercent);
       updatePaperSnapshot();
+      const targetAcc = paperEngine.getAccount(updated.accountId);
+      if (targetAcc.settings.mode === 'REAL') {
+        void syncKuCoinPositionProtectionOrders({
+          config: { ...kucoinConfigRef.current, enableLiveExecution: true },
+          binanceSymbol: updated.symbol,
+          positionSide: updated.side,
+          leverage: updated.leverage,
+          stopLossPrice: updated.stopLossPrice,
+          takeProfitPrice: updated.takeProfitPrice,
+          cancelExistingFirst: true,
+        });
+      }
     },
     [updatePaperSnapshot]
   );
@@ -1401,16 +1630,19 @@ export const App: React.FC = () => {
       updatePaperSnapshot();
       if (opened) {
         const targetAcc = paperEngine.getAccount(opened.accountId);
+        const isLiveOrder = targetAcc.settings.mode === 'REAL';
         executeKuCoinOrder({
           config: {
-            ...kucoinConfig,
-            enableLiveExecution: targetAcc.settings.mode === 'REAL',
+            ...kucoinConfigRef.current,
+            enableLiveExecution: isLiveOrder,
           },
           binanceSymbol: opened.symbol,
           side: opened.side,
           amountUsdt: opened.marginUsdt,
           entryPrice: opened.entryPrice,
           leverage: opened.leverage,
+          stopLossPrice: opened.stopLossPrice,
+          takeProfitPrice: opened.takeProfitPrice,
           sourceTraderName: `${opened.sourceTraderName || 'متداول'} (${targetAcc.name})`,
           sourceSignal: `تأكيد تنفيذ صفقة سابقة بالسعر الحالي (${opened.symbol} ${opened.side} @ ${opened.entryPrice})`,
         })
@@ -1419,11 +1651,22 @@ export const App: React.FC = () => {
               ...prev,
               recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(0, 50),
             }));
+            if (isLiveOrder && (ord.status === 'FAILED' || ord.status === 'REJECTED_GUARD')) {
+              try {
+                paperEngine.closePosition(opened.id, opened.entryPrice);
+                updatePaperSnapshot();
+              } catch {
+                // Ignore if already closed
+              }
+              void handleTestKuCoinConnection(kucoinConfigRef.current);
+            } else if (isLiveOrder && ord.status === 'UNKNOWN_TIMEOUT') {
+              void handleTestKuCoinConnection(kucoinConfigRef.current);
+            }
           })
           .catch(console.warn);
       }
     },
-    [kucoinConfig, pricesMap, updatePaperSnapshot]
+    [pricesMap, updatePaperSnapshot, handleTestKuCoinConnection]
   );
 
   const handleDismissPendingReconnectChoice = useCallback(
@@ -1499,6 +1742,17 @@ export const App: React.FC = () => {
       const targetAcc = paperEngine.getAccount(existing.accountId);
       if (targetAcc.settings.mode === 'REAL') {
         const closeSide: 'LONG' | 'SHORT' = existing.side === 'LONG' ? 'SHORT' : 'LONG';
+        const kcSym = convertToKuCoinSymbol(existing.symbol, true);
+        const spec = getCachedKuCoinContractSpec(kcSym, price);
+        const exitSizing = resolveKuCoinExitSizing({
+          kucoinSymbol: kcSym,
+          isFullExit: withdrawPercent >= 100,
+          exitPercent: withdrawPercent,
+          liveKuCoinPositions: kucoinConnectionStateRef.current.positions,
+          fallbackBaseQuantity: existing.quantity,
+          multiplier: spec.multiplier,
+          lotSize: spec.lotSize,
+        });
         const exitMargin = Number(
           ((existing.marginUsdt || 25) * (Math.min(100, Math.max(1, withdrawPercent)) / 100)).toFixed(2)
         );
@@ -1513,6 +1767,8 @@ export const App: React.FC = () => {
           entryPrice: price,
           leverage: existing.leverage,
           reduceOnly: true,
+          closeFullPosition: exitSizing.useCloseOrderFlag,
+          exactContracts: exitSizing.useCloseOrderFlag ? undefined : exitSizing.exactContracts,
           sourceTraderName: `${existing.sourceTraderName || 'تداول يدوي'} (${targetAcc.name})`,
           sourceSignal: `Manual Partial Exit -${withdrawPercent}% (${existing.symbol} @ ${price})`,
         })
@@ -1521,6 +1777,7 @@ export const App: React.FC = () => {
               ...prev,
               recentOrders: [ord, ...prev.recentOrders.filter((r) => r.id !== ord.id)].slice(0, 50),
             }));
+            void handleTestKuCoinConnection(kucoinConfigRef.current);
           })
           .catch(console.warn);
       }
@@ -1596,18 +1853,54 @@ export const App: React.FC = () => {
 
   const [apiSubTab, setApiSubTab] = useState<'KUCOIN' | 'BINANCE'>('KUCOIN');
 
-  // KuCoin Live Execution Tab Security Lock (PIN Code & Fingerprint)
+  // KuCoin Live Execution Tab Security Lock (PBKDF2-SHA256 PIN + AES-256-GCM Encrypted Secrets)
   const [kucoinSecurityConfig, setKucoinSecurityConfig] = useState<KuCoinSecurityLockConfig>(() =>
     loadKuCoinSecurityConfig()
   );
   const [kucoinUnlockState, setKucoinUnlockState] = useState<{
     isUnlocked: boolean;
     lastUnlockedAt: number | null;
-  }>({
-    isUnlocked: true,
-    lastUnlockedAt: Date.now(),
+  }>(() => {
+    const sec = loadKuCoinSecurityConfig();
+    const kc = loadKuCoinConfig();
+    // Lock on startup whenever security lock is enabled or encrypted secrets must be decrypted with PIN
+    const startLocked = Boolean(sec.enabled || kc.hasEncryptedSecrets);
+    return {
+      isUnlocked: !startLocked,
+      lastUnlockedAt: startLocked ? null : Date.now(),
+    };
   });
   const lastActivityTouchRef = useRef<number>(Date.now());
+
+  // Live KuCoin vs Local PaperEngine reconciliation for REAL-mode accounts
+  const kucoinReconciliationReport = useMemo(() => {
+    const realOpenPositions = paperSnapshot.accounts
+      .filter((acc) => acc.settings.mode === 'REAL')
+      .flatMap((acc) =>
+        paperEngine.getAccount(acc.id).positions.filter((p) => p.status === 'OPEN')
+      );
+    if (realOpenPositions.length === 0 && !kucoinConfig.enableLiveExecution) {
+      return { isSynced: true, discrepancies: [], checkedAt: Date.now(), summaryAr: '' };
+    }
+    return reconcilePaperWithKuCoinPositions(realOpenPositions, kucoinConnectionState.positions);
+  }, [
+    paperSnapshot.accounts,
+    paperSnapshot.positions,
+    kucoinConfig.enableLiveExecution,
+    kucoinConnectionState.positions,
+  ]);
+
+  // Periodic reconciliation refresh every 20s when REAL mode is active and authenticated
+  useEffect(() => {
+    const hasRealAccount = paperSnapshot.accounts.some((acc) => acc.settings.mode === 'REAL');
+    if (!hasRealAccount || !kucoinConfig.apiKey || !kucoinConfig.passphrase) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void handleTestKuCoinConnection(kucoinConfigRef.current);
+      }
+    }, 20_000);
+    return () => clearInterval(timer);
+  }, [paperSnapshot.accounts, kucoinConfig.apiKey, kucoinConfig.passphrase, handleTestKuCoinConnection]);
 
   // Keep security session alive while the user is actively interacting with the app so it never auto-locks mid-use
   useEffect(() => {
@@ -1641,10 +1934,24 @@ export const App: React.FC = () => {
   }, [kucoinSecurityConfig, kucoinUnlockState]);
 
   const handleUnlockKucoinSecurity = useCallback(
-    (_method: 'PIN' | 'BIOMETRIC', updatedCredentialId?: string | null) => {
-      if (updatedCredentialId && updatedCredentialId !== kucoinSecurityConfig.biometricCredentialId) {
+    async (
+      _method: 'PIN' | 'BIOMETRIC',
+      updatedCredentialId?: string | null,
+      verifiedPin?: string,
+      updatedConfig?: KuCoinSecurityLockConfig
+    ) => {
+      if (updatedConfig) {
+        setKucoinSecurityConfig(updatedConfig);
+      } else if (updatedCredentialId && updatedCredentialId !== kucoinSecurityConfig.biometricCredentialId) {
         const nextCfg = saveKuCoinSecurityConfig({ biometricCredentialId: updatedCredentialId });
         setKucoinSecurityConfig(nextCfg);
+      }
+      if (verifiedPin) {
+        const unlockedCfg = await unlockKuCoinConfigWithPin(verifiedPin);
+        setKucoinConfig(unlockedCfg);
+        if (unlockedCfg.apiKey && unlockedCfg.passphrase) {
+          void handleTestKuCoinConnection(unlockedCfg);
+        }
       }
       const now = Date.now();
       lastActivityTouchRef.current = now;
@@ -1653,10 +1960,17 @@ export const App: React.FC = () => {
         lastUnlockedAt: now,
       });
     },
-    [kucoinSecurityConfig.biometricCredentialId]
+    [kucoinSecurityConfig.biometricCredentialId, handleTestKuCoinConnection]
   );
 
   const handleLockKucoinSecurityNow = useCallback(() => {
+    lockSecurityVaultSession();
+    // Wipe decrypted secrets from React memory while preserving encrypted blobs in localStorage
+    setKucoinConfig((prev) => ({
+      ...prev,
+      apiSecret: '',
+      passphrase: '',
+    }));
     setKucoinUnlockState({
       isUnlocked: false,
       lastUnlockedAt: null,
@@ -2014,6 +2328,7 @@ export const App: React.FC = () => {
               <KucoinApiTab
                 config={kucoinConfig}
                 connectionState={kucoinConnectionState}
+                reconciliationDiscrepancies={kucoinReconciliationReport.discrepancies}
                 onSaveAndTest={handleSaveKuCoin}
                 onClearKeys={handleClearKuCoin}
                 onRefresh={() => handleTestKuCoinConnection(kucoinConfig)}

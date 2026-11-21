@@ -192,6 +192,7 @@ test('executeKuCoinOrder (v2.22): supports single-order execution and resilient 
 
   assert.equal(batchResults.length, 3);
   assert.equal(batchResults[0].status, 'DONE');
-  assert.equal(batchResults[1].status, 'SIMULATED');
+  assert.notEqual(batchResults[1].status, 'SIMULATED');
+  assert.equal(batchResults[1].status, 'UNKNOWN_TIMEOUT');
   assert.equal(batchResults[2].status, 'DONE');
 });

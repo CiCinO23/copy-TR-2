@@ -28,9 +28,11 @@ import { mobileNotifications } from '../services/mobileNotifications';
 import {
   DEFAULT_KUCOIN_SECURITY_CONFIG,
   normalizePinDigits,
-  validatePinChange,
-  isDefaultPinActive,
+  validatePinChangeAsync,
+  setupInitialPinAsync,
+  needsInitialPinSetup,
 } from '../services/kucoinSecurityLock';
+import { reencryptKuCoinSecretsOnPinChange } from '../services/kucoinApi';
 import {
   memoryCleanupService,
   MemoryTelemetrySnapshot,
@@ -256,22 +258,39 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     }
   };
 
-  const handleSaveNewPinInSettings = (e: React.FormEvent) => {
+  const handleSaveNewPinInSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setPinChangeError(null);
-    const validation = validatePinChange(
+
+    if (needsInitialPinSetup(securityConfig)) {
+      const setup = await setupInitialPinAsync(newPinInput, confirmPinInput);
+      if (!setup.valid || !setup.newPinHash) {
+        setPinChangeError(setup.errorAr || 'خطأ في إنشاء رمز PIN');
+        return;
+      }
+      handleUpdateSec(
+        { pinHash: setup.newPinHash, isPinConfigured: true, enabled: true },
+        'تم إنشاء رمز PIN وتشفيره بـ PBKDF2-SHA256 بنجاح.'
+      );
+      setNewPinInput('');
+      setConfirmPinInput('');
+      return;
+    }
+
+    const validation = await validatePinChangeAsync(
       currentPinInput,
-      securityConfig.pinHash || securityConfig.pinCode || '',
+      securityConfig.pinHash || '',
       newPinInput,
       confirmPinInput
     );
-    if (!validation.valid || !validation.normalizedNewPin) {
+    if (!validation.valid || !validation.newPinHash || !validation.normalizedCurrentPin || !validation.normalizedNewPin) {
       setPinChangeError(validation.errorAr || 'خطأ في التحقق من رمز PIN');
       return;
     }
+    await reencryptKuCoinSecretsOnPinChange(validation.normalizedCurrentPin, validation.normalizedNewPin);
     handleUpdateSec(
-      { pinCode: validation.normalizedNewPin, enabled: true },
-      'تم تحديث رمز PIN وتشفيره بنجاح.'
+      { pinHash: validation.newPinHash, isPinConfigured: true, enabled: true },
+      'تم تحديث رمز PIN وإعادة تشفير مفاتيح KuCoin السرية بنجاح.'
     );
     setCurrentPinInput('');
     setNewPinInput('');
@@ -559,13 +578,12 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <span className="text-[11px] font-semibold text-[#EAECEF] flex items-center gap-1.5">
                     <KeyRound className="w-3.5 h-3.5 text-[#01BC8D]" />
-                    <span>تغيير رمز PIN (4-6 أرقام)</span>
-                  </span>
-                  {isDefaultPinActive(securityConfig) && (
-                    <span className="text-[10px] bg-[#0B0E11] text-[#01BC8D] border border-[#01BC8D]/30 px-2 py-0.5 rounded font-mono">
-                      الافتراضي: 1234
+                    <span>
+                      {needsInitialPinSetup(securityConfig)
+                        ? 'إنشاء رمز PIN شخصي (6-8 أرقام)'
+                        : 'تغيير رمز PIN (6-8 أرقام)'}
                     </span>
-                  )}
+                  </span>
                 </div>
 
                 {pinChangeError && (
@@ -574,22 +592,24 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                   </div>
                 )}
 
-                <div className="grid grid-cols-3 gap-2">
-                  <input
-                    type="password"
-                    inputMode="numeric"
-                    value={currentPinInput}
-                    onChange={(e) => setCurrentPinInput(normalizePinDigits(e.target.value).slice(0, 6))}
-                    placeholder="PIN الحالي"
-                    data-testid="settings_pin_current_input"
-                    className="w-full bg-[#0B0E11] border border-[#1C232D] focus:border-[#01BC8D] rounded-lg px-2.5 py-2 text-xs text-white font-mono focus:outline-none"
-                  />
+                <div className={`grid ${needsInitialPinSetup(securityConfig) ? 'grid-cols-2' : 'grid-cols-3'} gap-2`}>
+                  {!needsInitialPinSetup(securityConfig) && (
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      value={currentPinInput}
+                      onChange={(e) => setCurrentPinInput(normalizePinDigits(e.target.value).slice(0, 8))}
+                      placeholder="PIN الحالي"
+                      data-testid="settings_pin_current_input"
+                      className="w-full bg-[#0B0E11] border border-[#1C232D] focus:border-[#01BC8D] rounded-lg px-2.5 py-2 text-xs text-white font-mono focus:outline-none"
+                    />
+                  )}
                   <input
                     type="password"
                     inputMode="numeric"
                     value={newPinInput}
-                    onChange={(e) => setNewPinInput(normalizePinDigits(e.target.value).slice(0, 6))}
-                    placeholder="PIN الجديد"
+                    onChange={(e) => setNewPinInput(normalizePinDigits(e.target.value).slice(0, 8))}
+                    placeholder="PIN الجديد (6-8)"
                     data-testid="settings_pin_new_input"
                     className="w-full bg-[#0B0E11] border border-[#1C232D] focus:border-[#01BC8D] rounded-lg px-2.5 py-2 text-xs text-white font-mono focus:outline-none"
                   />
@@ -597,7 +617,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                     type="password"
                     inputMode="numeric"
                     value={confirmPinInput}
-                    onChange={(e) => setConfirmPinInput(normalizePinDigits(e.target.value).slice(0, 6))}
+                    onChange={(e) => setConfirmPinInput(normalizePinDigits(e.target.value).slice(0, 8))}
                     placeholder="تأكيد PIN"
                     data-testid="settings_pin_confirm_input"
                     className="w-full bg-[#0B0E11] border border-[#1C232D] focus:border-[#01BC8D] rounded-lg px-2.5 py-2 text-xs text-white font-mono focus:outline-none"

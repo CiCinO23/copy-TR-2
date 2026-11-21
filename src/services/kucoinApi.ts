@@ -4,6 +4,12 @@ import {
   KuCoinPosition,
   KuCoinOrderRecord,
 } from '../types';
+import {
+  encryptSecretWithPin,
+  decryptSecretWithPin,
+  isEncryptedVaultPayload,
+  getActiveSessionPin,
+} from './secureVault';
 
 const KUCOIN_CONFIG_STORAGE_KEY = 'whale_copy_kucoin_config_v2';
 const KUCOIN_ORDERS_STORAGE_KEY = 'whale_copy_kucoin_orders_v1';
@@ -21,19 +27,31 @@ export const DEFAULT_KUCOIN_CONFIG: KuCoinConfig = {
   enableLiveExecution: false,
   defaultLeverage: 5,
   maxOrderUsdt: 50,
+  hasEncryptedSecrets: false,
 };
 
 export function loadKuCoinConfig(): KuCoinConfig {
   try {
+    if (typeof localStorage === 'undefined') return { ...DEFAULT_KUCOIN_CONFIG };
     const raw = localStorage.getItem(KUCOIN_CONFIG_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
+      const rawSecret = String(parsed?.apiSecret || '').trim();
+      const rawPassphrase = String(parsed?.passphrase || '').trim();
+      const secretEncrypted = isEncryptedVaultPayload(rawSecret);
+      const passphraseEncrypted = isEncryptedVaultPayload(rawPassphrase);
+      const hasEncryptedSecrets = Boolean(
+        secretEncrypted || passphraseEncrypted || parsed?.hasEncryptedSecrets
+      );
+
       return {
         ...DEFAULT_KUCOIN_CONFIG,
         ...parsed,
         apiKey: String(parsed?.apiKey || '').trim(),
-        apiSecret: String(parsed?.apiSecret || '').trim(),
-        passphrase: String(parsed?.passphrase || '').trim(),
+        // Never expose ciphertext as active credentials while vault is locked
+        apiSecret: secretEncrypted ? '' : rawSecret,
+        passphrase: passphraseEncrypted ? '' : rawPassphrase,
+        hasEncryptedSecrets,
       };
     }
   } catch (e) {
@@ -42,12 +60,170 @@ export function loadKuCoinConfig(): KuCoinConfig {
   return { ...DEFAULT_KUCOIN_CONFIG };
 }
 
-export function saveKuCoinConfig(config: KuCoinConfig): void {
+/**
+ * Persists KuCoin configuration to localStorage.
+ * If an unlocked session PIN is present (or passed explicitly), `apiSecret` and `passphrase` are
+ * encrypted with AES-256-GCM before storage so plaintext secrets are never stored in localStorage.
+ */
+export async function saveKuCoinConfigEncrypted(
+  config: KuCoinConfig,
+  explicitPin?: string | null
+): Promise<void> {
   try {
-    localStorage.setItem(KUCOIN_CONFIG_STORAGE_KEY, JSON.stringify(config));
+    if (typeof localStorage === 'undefined') return;
+    const pin = (explicitPin ?? getActiveSessionPin() ?? '').trim();
+
+    // Preserve existing encrypted blobs if caller passed empty secrets while locked
+    let existingRawSecret = '';
+    let existingRawPassphrase = '';
+    try {
+      const prevRaw = localStorage.getItem(KUCOIN_CONFIG_STORAGE_KEY);
+      if (prevRaw) {
+        const prevParsed = JSON.parse(prevRaw);
+        existingRawSecret = String(prevParsed?.apiSecret || '');
+        existingRawPassphrase = String(prevParsed?.passphrase || '');
+      }
+    } catch {
+      // ignore
+    }
+
+    const cleanSecret = (config.apiSecret || '').trim();
+    const cleanPassphrase = (config.passphrase || '').trim();
+
+    let storedSecret = '';
+    let storedPassphrase = '';
+
+    if (cleanSecret) {
+      storedSecret = pin ? await encryptSecretWithPin(cleanSecret, pin) : cleanSecret;
+    } else if (config.hasEncryptedSecrets && isEncryptedVaultPayload(existingRawSecret)) {
+      storedSecret = existingRawSecret;
+    }
+
+    if (cleanPassphrase) {
+      storedPassphrase = pin ? await encryptSecretWithPin(cleanPassphrase, pin) : cleanPassphrase;
+    } else if (config.hasEncryptedSecrets && isEncryptedVaultPayload(existingRawPassphrase)) {
+      storedPassphrase = existingRawPassphrase;
+    }
+
+    const toPersist: KuCoinConfig = {
+      ...config,
+      apiSecret: storedSecret,
+      passphrase: storedPassphrase,
+      hasEncryptedSecrets: Boolean(
+        isEncryptedVaultPayload(storedSecret) || isEncryptedVaultPayload(storedPassphrase)
+      ),
+    };
+
+    localStorage.setItem(KUCOIN_CONFIG_STORAGE_KEY, JSON.stringify(toPersist));
+  } catch (e) {
+    console.warn('Failed to save encrypted KuCoin config:', e);
+  }
+}
+
+/**
+ * Synchronous wrapper that triggers encrypted persistence using the active unlocked session PIN.
+ */
+export function saveKuCoinConfig(config: KuCoinConfig): void {
+  const pin = getActiveSessionPin();
+  if (pin) {
+    void saveKuCoinConfigEncrypted(config, pin);
+    return;
+  }
+  try {
+    if (typeof localStorage === 'undefined') return;
+    // Never overwrite existing encrypted secrets with empty strings while locked
+    const prevRaw = localStorage.getItem(KUCOIN_CONFIG_STORAGE_KEY);
+    let prevSecret = '';
+    let prevPass = '';
+    if (prevRaw) {
+      try {
+        const parsed = JSON.parse(prevRaw);
+        if (isEncryptedVaultPayload(parsed?.apiSecret)) prevSecret = parsed.apiSecret;
+        if (isEncryptedVaultPayload(parsed?.passphrase)) prevPass = parsed.passphrase;
+      } catch {
+        // ignore
+      }
+    }
+    const payload: KuCoinConfig = {
+      ...config,
+      apiSecret: config.apiSecret || prevSecret,
+      passphrase: config.passphrase || prevPass,
+      hasEncryptedSecrets: Boolean(
+        isEncryptedVaultPayload(config.apiSecret || prevSecret) ||
+          isEncryptedVaultPayload(config.passphrase || prevPass)
+      ),
+    };
+    localStorage.setItem(KUCOIN_CONFIG_STORAGE_KEY, JSON.stringify(payload));
   } catch (e) {
     console.warn('Failed to save KuCoin config:', e);
   }
+}
+
+/**
+ * Decrypts AES-256-GCM KuCoin secrets into JS memory using the verified user PIN.
+ * Also transparently migrates any legacy plaintext secrets in localStorage to AES-256-GCM.
+ */
+export async function unlockKuCoinConfigWithPin(pin: string): Promise<KuCoinConfig> {
+  const base = loadKuCoinConfig();
+  if (typeof localStorage === 'undefined' || !pin) return base;
+
+  try {
+    const raw = localStorage.getItem(KUCOIN_CONFIG_STORAGE_KEY);
+    if (!raw) return base;
+    const parsed = JSON.parse(raw);
+    const storedSecret = String(parsed?.apiSecret || '').trim();
+    const storedPassphrase = String(parsed?.passphrase || '').trim();
+
+    let decryptedSecret = '';
+    let decryptedPassphrase = '';
+    let needsLegacyEncryptionMigration = false;
+
+    if (storedSecret) {
+      if (isEncryptedVaultPayload(storedSecret)) {
+        decryptedSecret = (await decryptSecretWithPin(storedSecret, pin)) ?? '';
+      } else {
+        decryptedSecret = storedSecret;
+        needsLegacyEncryptionMigration = true;
+      }
+    }
+
+    if (storedPassphrase) {
+      if (isEncryptedVaultPayload(storedPassphrase)) {
+        decryptedPassphrase = (await decryptSecretWithPin(storedPassphrase, pin)) ?? '';
+      } else {
+        decryptedPassphrase = storedPassphrase;
+        needsLegacyEncryptionMigration = true;
+      }
+    }
+
+    const unlocked: KuCoinConfig = {
+      ...base,
+      apiSecret: decryptedSecret,
+      passphrase: decryptedPassphrase,
+      hasEncryptedSecrets: Boolean(decryptedSecret || decryptedPassphrase),
+    };
+
+    if (needsLegacyEncryptionMigration) {
+      await saveKuCoinConfigEncrypted(unlocked, pin);
+    }
+
+    return unlocked;
+  } catch (e) {
+    console.warn('Failed to unlock encrypted KuCoin config:', e);
+    return base;
+  }
+}
+
+/**
+ * Re-encrypts stored KuCoin secrets atomically when the user changes their PIN.
+ */
+export async function reencryptKuCoinSecretsOnPinChange(
+  oldPin: string,
+  newPin: string
+): Promise<KuCoinConfig> {
+  const decrypted = await unlockKuCoinConfigWithPin(oldPin);
+  await saveKuCoinConfigEncrypted(decrypted, newPin);
+  return decrypted;
 }
 
 export function clearKuCoinConfig(): KuCoinConfig {
@@ -57,6 +233,7 @@ export function clearKuCoinConfig(): KuCoinConfig {
     apiSecret: '',
     passphrase: '',
     enableLiveExecution: false,
+    hasEncryptedSecrets: false,
   };
   try {
     localStorage.setItem(KUCOIN_CONFIG_STORAGE_KEY, JSON.stringify(emptyConfig));
@@ -71,47 +248,51 @@ export interface KuCoinFuturesContractSpec {
   symbol: string;
   multiplier: number; // base currency units per 1 KuCoin contract (e.g., XBTUSDTM = 0.001 BTC)
   lotSize: number; // integer step size (typically 1)
+  minOrderQty?: number; // minimum order quantity in contracts (defaults to lotSize)
+  maxOrderQty?: number; // maximum order quantity in contracts per single order
+  tickSize?: number; // minimum price increment
 }
 
 /**
- * Verified KuCoin Futures USDTM contract multipliers for top pairs as instant fallback
+ * Verified KuCoin Futures USDTM contract multipliers & order qty bounds for top pairs as instant fallback
  * before `/kucoin-futures/api/v1/contracts/active` populates the live cache.
  */
 export const KUCOIN_FUTURES_SPECS_FALLBACK: Record<string, KuCoinFuturesContractSpec> = {
-  XBTUSDTM: { symbol: 'XBTUSDTM', multiplier: 0.001, lotSize: 1 },
-  ETHUSDTM: { symbol: 'ETHUSDTM', multiplier: 0.01, lotSize: 1 },
-  SOLUSDTM: { symbol: 'SOLUSDTM', multiplier: 0.1, lotSize: 1 },
-  BNBUSDTM: { symbol: 'BNBUSDTM', multiplier: 0.01, lotSize: 1 },
-  XRPUSDTM: { symbol: 'XRPUSDTM', multiplier: 10, lotSize: 1 },
-  DOGEUSDTM: { symbol: 'DOGEUSDTM', multiplier: 100, lotSize: 1 },
-  ADAUSDTM: { symbol: 'ADAUSDTM', multiplier: 10, lotSize: 1 },
-  AVAXUSDTM: { symbol: 'AVAXUSDTM', multiplier: 0.1, lotSize: 1 },
-  LINKUSDTM: { symbol: 'LINKUSDTM', multiplier: 0.1, lotSize: 1 },
-  SUIUSDTM: { symbol: 'SUIUSDTM', multiplier: 1, lotSize: 1 },
-  DOTUSDTM: { symbol: 'DOTUSDTM', multiplier: 1, lotSize: 1 },
-  LTCUSDTM: { symbol: 'LTCUSDTM', multiplier: 0.1, lotSize: 1 },
-  TONUSDTM: { symbol: 'TONUSDTM', multiplier: 1, lotSize: 1 },
-  TRXUSDTM: { symbol: 'TRXUSDTM', multiplier: 100, lotSize: 1 },
-  ARBUSDTM: { symbol: 'ARBUSDTM', multiplier: 1, lotSize: 1 },
-  NEARUSDTM: { symbol: 'NEARUSDTM', multiplier: 1, lotSize: 1 },
-  APTUSDTM: { symbol: 'APTUSDTM', multiplier: 0.1, lotSize: 1 },
-  OPUSDTM: { symbol: 'OPUSDTM', multiplier: 1, lotSize: 1 },
-  PEPEUSDTM: { symbol: 'PEPEUSDTM', multiplier: 1000000, lotSize: 1 },
-  '1000PEPEUSDTM': { symbol: '1000PEPEUSDTM', multiplier: 1000, lotSize: 1 },
-  SHIBUSDTM: { symbol: 'SHIBUSDTM', multiplier: 1000000, lotSize: 1 },
-  '1000SHIBUSDTM': { symbol: '1000SHIBUSDTM', multiplier: 1000, lotSize: 1 },
-  WIFUSDTM: { symbol: 'WIFUSDTM', multiplier: 1, lotSize: 1 },
-  BONKUSDTM: { symbol: 'BONKUSDTM', multiplier: 100000, lotSize: 1 },
-  BCHUSDTM: { symbol: 'BCHUSDTM', multiplier: 0.01, lotSize: 1 },
-  AAVEUSDTM: { symbol: 'AAVEUSDTM', multiplier: 0.01, lotSize: 1 },
-  UNIUSDTM: { symbol: 'UNIUSDTM', multiplier: 1, lotSize: 1 },
+  XBTUSDTM: { symbol: 'XBTUSDTM', multiplier: 0.001, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  ETHUSDTM: { symbol: 'ETHUSDTM', multiplier: 0.01, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  SOLUSDTM: { symbol: 'SOLUSDTM', multiplier: 0.1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  BNBUSDTM: { symbol: 'BNBUSDTM', multiplier: 0.01, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  XRPUSDTM: { symbol: 'XRPUSDTM', multiplier: 10, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  DOGEUSDTM: { symbol: 'DOGEUSDTM', multiplier: 100, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  ADAUSDTM: { symbol: 'ADAUSDTM', multiplier: 10, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  AVAXUSDTM: { symbol: 'AVAXUSDTM', multiplier: 0.1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  LINKUSDTM: { symbol: 'LINKUSDTM', multiplier: 0.1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  SUIUSDTM: { symbol: 'SUIUSDTM', multiplier: 1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  DOTUSDTM: { symbol: 'DOTUSDTM', multiplier: 1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  LTCUSDTM: { symbol: 'LTCUSDTM', multiplier: 0.1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  TONUSDTM: { symbol: 'TONUSDTM', multiplier: 1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  TRXUSDTM: { symbol: 'TRXUSDTM', multiplier: 100, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  ARBUSDTM: { symbol: 'ARBUSDTM', multiplier: 1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  NEARUSDTM: { symbol: 'NEARUSDTM', multiplier: 1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  APTUSDTM: { symbol: 'APTUSDTM', multiplier: 0.1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  OPUSDTM: { symbol: 'OPUSDTM', multiplier: 1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  PEPEUSDTM: { symbol: 'PEPEUSDTM', multiplier: 1000000, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  '1000PEPEUSDTM': { symbol: '1000PEPEUSDTM', multiplier: 1000, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  SHIBUSDTM: { symbol: 'SHIBUSDTM', multiplier: 1000000, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  '1000SHIBUSDTM': { symbol: '1000SHIBUSDTM', multiplier: 1000, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  WIFUSDTM: { symbol: 'WIFUSDTM', multiplier: 1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  BONKUSDTM: { symbol: 'BONKUSDTM', multiplier: 100000, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  BCHUSDTM: { symbol: 'BCHUSDTM', multiplier: 0.01, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  AAVEUSDTM: { symbol: 'AAVEUSDTM', multiplier: 0.01, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
+  UNIUSDTM: { symbol: 'UNIUSDTM', multiplier: 1, lotSize: 1, minOrderQty: 1, maxOrderQty: 1_000_000 },
 };
 
 let liveKuCoinContractsCache: Record<string, KuCoinFuturesContractSpec> = {};
 let lastKuCoinContractsFetchAt = 0;
 
 /**
- * Fetches active KuCoin Futures contract specifications (`multiplier`, `lotSize`) and caches for 10 minutes.
+ * Fetches active KuCoin Futures contract specifications (`multiplier`, `lotSize`, `minOrderQty`, `maxOrderQty`, `tickSize`)
+ * and caches them for 10 minutes.
  */
 export async function fetchKuCoinFuturesContracts(): Promise<Record<string, KuCoinFuturesContractSpec>> {
   const now = Date.now();
@@ -131,8 +312,18 @@ export async function fetchKuCoinFuturesContracts(): Promise<Record<string, KuCo
           const sym = String(item?.symbol || '').toUpperCase();
           const multiplier = Number(item?.multiplier);
           const lotSize = Math.max(1, Math.round(Number(item?.lotSize) || 1));
+          const minOrderQty = Math.max(lotSize, Math.round(Number(item?.minOrderQty) || lotSize));
+          const maxOrderQty = Math.max(minOrderQty, Math.round(Number(item?.maxOrderQty) || 1_000_000));
+          const tickSize = Number(item?.tickSize);
           if (sym && Number.isFinite(multiplier) && multiplier > 0) {
-            nextMap[sym] = { symbol: sym, multiplier, lotSize };
+            nextMap[sym] = {
+              symbol: sym,
+              multiplier,
+              lotSize,
+              minOrderQty,
+              maxOrderQty,
+              tickSize: Number.isFinite(tickSize) && tickSize > 0 ? tickSize : undefined,
+            };
           }
         }
         if (Object.keys(nextMap).length > 0) {
@@ -147,38 +338,93 @@ export async function fetchKuCoinFuturesContracts(): Promise<Record<string, KuCo
   return { ...KUCOIN_FUTURES_SPECS_FALLBACK, ...liveKuCoinContractsCache };
 }
 
+export function getCachedKuCoinContractSpec(
+  kucoinSymbol: string,
+  entryPrice: number = 100
+): KuCoinFuturesContractSpec {
+  const sym = kucoinSymbol.toUpperCase().trim();
+  return (
+    liveKuCoinContractsCache[sym] ||
+    KUCOIN_FUTURES_SPECS_FALLBACK[sym] || {
+      symbol: sym,
+      multiplier: entryPrice >= 10_000 ? 0.001 : entryPrice >= 500 ? 0.01 : entryPrice >= 20 ? 0.1 : 1,
+      lotSize: 1,
+      minOrderQty: 1,
+      maxOrderQty: 1_000_000,
+    }
+  );
+}
+
 /**
- * Pure sizing calculator converting notional USDT & entry price into exact KuCoin Futures contract count
- * respecting `multiplier` (e.g. XBTUSDTM = 0.001 BTC/contract) and `lotSize`.
+ * Budget-safe sizing calculator converting notional USDT & entry price into exact KuCoin Futures contract count.
+ * - Uses `Math.floor` (never rounds UP past the user's configured budget).
+ * - Respects `minOrderQty` and `maxOrderQty` from KuCoin contract specs.
+ * - Flags `budgetExceeded: true` and returns `contracts: 0` when even `minOrderQty` exceeds the requested notional budget.
  */
 export function calculateKuCoinFuturesContractsSize(
   kucoinSymbol: string,
   notionalUsdt: number,
   entryPrice: number,
   customSpec?: KuCoinFuturesContractSpec
-): { contracts: number; multiplier: number; lotSize: number; baseQty: number } {
+): {
+  contracts: number;
+  multiplier: number;
+  lotSize: number;
+  minOrderQty: number;
+  maxOrderQty: number;
+  baseQty: number;
+  actualNotionalUsdt: number;
+  minContractNotionalUsdt: number;
+  budgetExceeded: boolean;
+  clampedToMaxQty: boolean;
+} {
   const sym = kucoinSymbol.toUpperCase().trim();
-  const spec =
-    customSpec ||
-    liveKuCoinContractsCache[sym] ||
-    KUCOIN_FUTURES_SPECS_FALLBACK[sym] || {
-      symbol: sym,
-      multiplier: entryPrice >= 10_000 ? 0.001 : entryPrice >= 500 ? 0.01 : entryPrice >= 20 ? 0.1 : 1,
-      lotSize: 1,
-    };
+  const spec = customSpec || getCachedKuCoinContractSpec(sym, entryPrice);
 
   const safePrice = Math.max(0.00000001, Number(entryPrice) || 1);
-  const safeNotional = Math.max(1, Number(notionalUsdt) || 1);
-  const baseQty = safeNotional / safePrice;
-  const rawContracts = baseQty / spec.multiplier;
-  const lot = Math.max(1, spec.lotSize || 1);
-  const contracts = Math.max(lot, Math.round(rawContracts / lot) * lot);
+  const safeNotional = Math.max(0, Number(notionalUsdt) || 0);
+  const lot = Math.max(1, Math.round(spec.lotSize || 1));
+  const minQty = Math.max(lot, Math.round(spec.minOrderQty || lot));
+  const maxQty = Math.max(minQty, Math.round(spec.maxOrderQty || 1_000_000));
+
+  const minContractNotionalUsdt = Number((minQty * spec.multiplier * safePrice).toFixed(4));
+  const baseQtyRequested = safeNotional / safePrice;
+  const rawContracts = baseQtyRequested / spec.multiplier;
+
+  // Allow tiny floating-point tolerance (1e-6) so exact integer multiples (e.g. 5.000000) never floor down to 4
+  const floored = Math.floor((rawContracts + 1e-6) / lot) * lot;
+
+  if (floored < minQty) {
+    return {
+      contracts: 0,
+      multiplier: spec.multiplier,
+      lotSize: lot,
+      minOrderQty: minQty,
+      maxOrderQty: maxQty,
+      baseQty: 0,
+      actualNotionalUsdt: 0,
+      minContractNotionalUsdt,
+      budgetExceeded: true,
+      clampedToMaxQty: false,
+    };
+  }
+
+  const clampedToMaxQty = floored > maxQty;
+  const contracts = Math.min(maxQty, floored);
+  const actualBaseQty = Number((contracts * spec.multiplier).toPrecision(6));
+  const actualNotionalUsdt = Number((actualBaseQty * safePrice).toFixed(4));
 
   return {
     contracts,
     multiplier: spec.multiplier,
     lotSize: lot,
-    baseQty: Number((contracts * spec.multiplier).toPrecision(6)),
+    minOrderQty: minQty,
+    maxOrderQty: maxQty,
+    baseQty: actualBaseQty,
+    actualNotionalUsdt,
+    minContractNotionalUsdt,
+    budgetExceeded: false,
+    clampedToMaxQty,
   };
 }
 
@@ -599,6 +845,14 @@ export function getInitialKuCoinConnectionState(config?: KuCoinConfig): KuCoinCo
   };
 }
 
+export interface SignedKuCoinResponse {
+  ok: boolean;
+  code?: string;
+  msg?: string;
+  data?: Record<string, unknown> | unknown;
+  isTimeout?: boolean;
+}
+
 async function fetchSignedKuCoinEndpoint(params: {
   basePrefix: '/kucoin' | '/kucoin-futures';
   endpoint: string;
@@ -607,16 +861,19 @@ async function fetchSignedKuCoinEndpoint(params: {
   apiSecret?: string;
   passphrase: string;
   bodyStr?: string;
-}): Promise<{ ok: boolean; code?: string; msg?: string; data?: any }> {
+  timeoutMs?: number;
+}): Promise<SignedKuCoinResponse> {
   const hasSeparateSecret = Boolean(
     params.apiSecret && params.apiSecret.trim() && params.apiSecret.trim() !== params.passphrase.trim()
   );
-  // If user has a separate API Secret, try v2 first (HMAC-encrypted passphrase), then v1.
-  // If user only supplied API Key + Passphrase, try v1 first so KuCoin validates plain KC-API-PASSPHRASE and reports 400005 if only Secret is missing.
   const versionsToTry: ('1' | '2')[] = hasSeparateSecret ? ['2', '1'] : ['1', '2'];
 
   let lastCode: string | undefined;
   let lastMsg: string | undefined;
+  let lastIsTimeout = false;
+
+  const effectiveTimeoutMs =
+    params.timeoutMs || (params.method === 'POST' || params.method === 'DELETE' ? 8000 : 3500);
 
   for (const keyVersion of versionsToTry) {
     try {
@@ -633,11 +890,12 @@ async function fetchSignedKuCoinEndpoint(params: {
       });
 
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 2500);
+      const timer = setTimeout(() => ctrl.abort(), effectiveTimeoutMs);
       const res = await fetch(`${params.basePrefix}${params.endpoint}`, {
         method: params.method,
         headers,
         body: params.bodyStr,
+        cache: 'no-store',
         signal: ctrl.signal,
       });
       clearTimeout(timer);
@@ -649,13 +907,13 @@ async function fetchSignedKuCoinEndpoint(params: {
 
       lastCode = json?.code || String(res.status);
       lastMsg = json?.msg || res.statusText;
+      lastIsTimeout = false;
 
       if (json?.code === '400002') {
         await syncKuCoinServerTime();
         continue;
       }
 
-      // If v1 returned 400005 (Invalid KC-API-SIGN), it means Key + Passphrase are valid on KuCoin!
       if (keyVersion === '1' && json?.code === '400005') {
         return {
           ok: false,
@@ -673,9 +931,15 @@ async function fetchSignedKuCoinEndpoint(params: {
         code: lastCode,
         msg: lastMsg,
       };
-    } catch (err: any) {
-      lastCode = 'NETWORK_ERROR';
-      lastMsg = err?.message || 'Network error';
+    } catch (err: unknown) {
+      const errObj = err as { name?: string; message?: string };
+      lastIsTimeout = errObj?.name === 'AbortError' || /timeout|aborted/i.test(errObj?.message || '');
+      lastCode = lastIsTimeout ? 'TIMEOUT' : 'NETWORK_ERROR';
+      lastMsg = errObj?.message || 'Network error';
+      // Never blindly retry a timed-out POST order with another keyVersion (prevents duplicate execution!)
+      if (params.method === 'POST') {
+        break;
+      }
     }
   }
 
@@ -683,6 +947,7 @@ async function fetchSignedKuCoinEndpoint(params: {
     ok: false,
     code: lastCode || 'AUTH_FAILED',
     msg: lastMsg || 'Authentication failed',
+    isTimeout: lastIsTimeout,
   };
 }
 
@@ -980,20 +1245,239 @@ export interface KuCoinOrderRequestParams {
   entryPrice: number;
   leverage: number;
   reduceOnly?: boolean;
+  /** Sends KuCoin Futures `closeOrder: true` to atomically close 100% of the exact live position with zero leftover dust */
+  closeFullPosition?: boolean;
+  /** Exact contract count (e.g. derived from live KuCoin position quantity for partial exits) */
+  exactContracts?: number;
+  /** Optional exchange-native Stop-Loss price placed directly on KuCoin Futures after entry */
+  stopLossPrice?: number;
+  /** Optional exchange-native Take-Profit price placed directly on KuCoin Futures after entry */
+  takeProfitPrice?: number;
   sourceTraderName?: string;
   sourceSignal?: string;
 }
 
 export interface ExecuteKuCoinOrderOptions {
   /**
-   * Optional custom endpoint fetcher (used for deterministic parallel latency unit tests)
+   * Optional custom endpoint fetcher (used for deterministic parallel latency & guardrail unit tests)
    */
   customEndpointFetcher?: typeof fetchSignedKuCoinEndpoint;
 }
 
 /**
- * Internal helper that dispatches a single KuCoin order without blocking on localStorage I/O,
- * allowing multiple orders to execute concurrently inside Promise.all.
+ * Pure helper to build a KuCoin Futures exchange-native conditional Stop-Loss / Take-Profit payload.
+ */
+function buildKuCoinNativeStopPayload(params: {
+  clientOid: string;
+  kucoinSymbol: string;
+  positionSide: 'LONG' | 'SHORT';
+  kind: 'STOP_LOSS' | 'TAKE_PROFIT';
+  triggerPrice: number;
+  leverage: number;
+}): Record<string, unknown> {
+  const closeSide = params.positionSide === 'LONG' ? 'sell' : 'buy';
+  const stopDirection: 'up' | 'down' =
+    params.positionSide === 'LONG'
+      ? params.kind === 'STOP_LOSS'
+        ? 'down'
+        : 'up'
+      : params.kind === 'STOP_LOSS'
+      ? 'up'
+      : 'down';
+
+  const formattedTrigger =
+    params.triggerPrice >= 100
+      ? params.triggerPrice.toFixed(2)
+      : params.triggerPrice >= 1
+      ? params.triggerPrice.toFixed(4)
+      : params.triggerPrice.toPrecision(6);
+
+  return {
+    clientOid: params.clientOid,
+    side: closeSide,
+    symbol: params.kucoinSymbol,
+    type: 'market',
+    stop: stopDirection,
+    stopPrice: formattedTrigger,
+    stopPriceType: 'MP',
+    closeOrder: true,
+    reduceOnly: true,
+    leverage: String(Math.max(1, Math.round(params.leverage || 5))),
+  };
+}
+
+/**
+ * Queries KuCoin by `clientOid` after a network timeout to confirm whether an order actually executed on-exchange.
+ */
+async function verifyTimedOutOrderByClientOid(params: {
+  endpointFetcher: typeof fetchSignedKuCoinEndpoint;
+  isFutures: boolean;
+  clientOid: string;
+  apiKey: string;
+  apiSecret: string;
+  passphrase: string;
+}): Promise<{ state: 'CONFIRMED_EXECUTED' | 'CONFIRMED_NOT_FOUND' | 'UNKNOWN'; orderId?: string; dealSize?: number }> {
+  const basePrefix: '/kucoin-futures' | '/kucoin' = params.isFutures ? '/kucoin-futures' : '/kucoin';
+  const endpoint = params.isFutures
+    ? `/api/v1/orders/byClientOid?clientOid=${encodeURIComponent(params.clientOid)}`
+    : `/api/v1/order/client-order/${encodeURIComponent(params.clientOid)}`;
+
+  try {
+    const res = await params.endpointFetcher({
+      basePrefix,
+      endpoint,
+      method: 'GET',
+      apiKey: params.apiKey,
+      apiSecret: params.apiSecret,
+      passphrase: params.passphrase,
+      timeoutMs: 4000,
+    });
+    if (res.ok && res.data && typeof res.data === 'object') {
+      const rec = res.data as Record<string, unknown>;
+      const orderId = String(rec.id || rec.orderId || '');
+      const dealSize = Number(rec.dealSize ?? rec.filledSize ?? rec.size ?? 0) || 0;
+      if (orderId) {
+        return { state: 'CONFIRMED_EXECUTED', orderId, dealSize };
+      }
+    }
+    // KuCoin returns 400001 / 100004 / 404 when clientOid does not exist
+    if (res.code === '400001' || res.code === '100004' || res.code === '404') {
+      return { state: 'CONFIRMED_NOT_FOUND' };
+    }
+  } catch {
+    // Verification itself failed due to network outage
+  }
+  return { state: 'UNKNOWN' };
+}
+
+/**
+ * Cancels existing KuCoin Futures stop orders for a symbol and places fresh exchange-native SL / TP stop orders
+ * so protection stays active on KuCoin servers even if the app closes or the phone loses internet.
+ */
+export async function syncKuCoinPositionProtectionOrders(params: {
+  config: KuCoinConfig;
+  binanceSymbol: string;
+  positionSide: 'LONG' | 'SHORT';
+  leverage: number;
+  stopLossPrice?: number | null;
+  takeProfitPrice?: number | null;
+  cancelExistingFirst?: boolean;
+  customEndpointFetcher?: typeof fetchSignedKuCoinEndpoint;
+}): Promise<{ stopLossOrderId?: string; takeProfitOrderId?: string }> {
+  const cleanApiKey = (params.config.apiKey || '').replace(/[\s"']/g, '').trim();
+  const cleanApiSecret = (params.config.apiSecret || '').replace(/[\s"']/g, '').trim();
+  const cleanPassphrase = (params.config.passphrase || '').trim();
+
+  if (
+    !params.config.enableLiveExecution ||
+    params.config.apiType === 'SANDBOX' ||
+    params.config.marketType !== 'FUTURES' ||
+    !cleanApiKey ||
+    !cleanPassphrase
+  ) {
+    return {};
+  }
+
+  const endpointFetcher = params.customEndpointFetcher || fetchSignedKuCoinEndpoint;
+  const kucoinSymbol = convertToKuCoinSymbol(params.binanceSymbol, true);
+  const result: { stopLossOrderId?: string; takeProfitOrderId?: string } = {};
+
+  if (params.cancelExistingFirst) {
+    try {
+      await endpointFetcher({
+        basePrefix: '/kucoin-futures',
+        endpoint: `/api/v1/stopOrders?symbol=${encodeURIComponent(kucoinSymbol)}`,
+        method: 'DELETE',
+        apiKey: cleanApiKey,
+        apiSecret: cleanApiSecret,
+        passphrase: cleanPassphrase,
+        timeoutMs: 5000,
+      });
+    } catch {
+      // Best-effort cancel before re-placing updated stop levels
+    }
+  }
+
+  const jobs: Promise<void>[] = [];
+
+  if (params.stopLossPrice && Number.isFinite(params.stopLossPrice) && params.stopLossPrice > 0) {
+    const slOid = `kc_sl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const bodyStr = JSON.stringify(
+      buildKuCoinNativeStopPayload({
+        clientOid: slOid,
+        kucoinSymbol,
+        positionSide: params.positionSide,
+        kind: 'STOP_LOSS',
+        triggerPrice: params.stopLossPrice,
+        leverage: params.leverage,
+      })
+    );
+    jobs.push(
+      endpointFetcher({
+        basePrefix: '/kucoin-futures',
+        endpoint: '/api/v1/orders',
+        method: 'POST',
+        apiKey: cleanApiKey,
+        apiSecret: cleanApiSecret,
+        passphrase: cleanPassphrase,
+        bodyStr,
+      })
+        .then((res) => {
+          const dataObj = res.data as Record<string, unknown> | undefined;
+          if (res.ok && dataObj?.orderId) {
+            result.stopLossOrderId = String(dataObj.orderId);
+          }
+        })
+        .catch(() => {})
+    );
+  }
+
+  if (params.takeProfitPrice && Number.isFinite(params.takeProfitPrice) && params.takeProfitPrice > 0) {
+    const tpOid = `kc_tp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const bodyStr = JSON.stringify(
+      buildKuCoinNativeStopPayload({
+        clientOid: tpOid,
+        kucoinSymbol,
+        positionSide: params.positionSide,
+        kind: 'TAKE_PROFIT',
+        triggerPrice: params.takeProfitPrice,
+        leverage: params.leverage,
+      })
+    );
+    jobs.push(
+      endpointFetcher({
+        basePrefix: '/kucoin-futures',
+        endpoint: '/api/v1/orders',
+        method: 'POST',
+        apiKey: cleanApiKey,
+        apiSecret: cleanApiSecret,
+        passphrase: cleanPassphrase,
+        bodyStr,
+      })
+        .then((res) => {
+          const dataObj = res.data as Record<string, unknown> | undefined;
+          if (res.ok && dataObj?.orderId) {
+            result.takeProfitOrderId = String(dataObj.orderId);
+          }
+        })
+        .catch(() => {})
+    );
+  }
+
+  if (jobs.length > 0) {
+    await Promise.all(jobs);
+  }
+  return result;
+}
+
+/**
+ * Internal helper that dispatches a single KuCoin order with strict financial guardrails:
+ * 1. Enforces `maxOrderUsdt` on live opening/scale-in orders (never blocks reduceOnly/close exits).
+ * 2. Enforces budget-safe contract sizing (never rounds UP past budget or forces an unaffordable min contract).
+ * 3. Uses KuCoin's atomic `closeOrder: true` for full exits and exact contract counts for partial exits.
+ * 4. Never masks failed or timed-out live orders as `SIMULATED` — returns `FAILED`, `REJECTED_GUARD`, or `UNKNOWN_TIMEOUT`
+ *    after querying KuCoin by `clientOid`.
+ * 5. Places exchange-native Stop-Loss / Take-Profit orders on KuCoin Futures immediately after live entry.
  */
 async function dispatchSingleKuCoinOrderInternal(
   params: KuCoinOrderRequestParams,
@@ -1005,18 +1489,24 @@ async function dispatchSingleKuCoinOrderInternal(
   const kucoinSide = params.side === 'LONG' ? 'buy' : 'sell';
   const nowTs = Date.now();
   const clientOid = `kc_${nowTs}_${batchIndex}_${Math.random().toString(36).substring(2, 6)}`;
-  const notionalUsdt = Math.max(1, params.amountUsdt * (params.leverage || 1));
+  const effectiveLeverage = Math.max(1, params.leverage || params.config.defaultLeverage || 5);
+  const notionalUsdt = Math.max(0, params.amountUsdt * effectiveLeverage);
 
-  // Accurate contract sizing for KuCoin Futures using verified contract multiplier & lotSize
-  const orderSize = isFutures
-    ? calculateKuCoinFuturesContractsSize(kucoinSymbol, notionalUsdt, params.entryPrice || 100).contracts
-    : Number((Math.max(1, params.amountUsdt) / Math.max(0.000001, params.entryPrice || 100)).toPrecision(5));
+  const futuresSizing = isFutures
+    ? calculateKuCoinFuturesContractsSize(kucoinSymbol, notionalUsdt, params.entryPrice || 100)
+    : null;
+
+  const resolvedOrderSize = isFutures
+    ? params.exactContracts && params.exactContracts > 0
+      ? Math.max(1, Math.round(params.exactContracts))
+      : futuresSizing?.contracts || 0
+    : Number((Math.max(0, params.amountUsdt) / Math.max(0.000001, params.entryPrice || 100)).toPrecision(5));
 
   const cleanApiKey = (params.config.apiKey || '').replace(/[\s"']/g, '').trim();
   const cleanApiSecret = (params.config.apiSecret || '').replace(/[\s"']/g, '').trim();
   const cleanPassphrase = (params.config.passphrase || '').trim();
 
-  // If live execution is OFF or in SANDBOX/Demo mode or no API key, record a simulated KuCoin execution record
+  // Only mark as SIMULATED when explicitly in paper/dry-run/sandbox mode or unconfigured keys
   if (
     !params.config.enableLiveExecution ||
     params.config.apiType === 'SANDBOX' ||
@@ -1030,8 +1520,8 @@ async function dispatchSingleKuCoinOrderInternal(
       side: kucoinSide,
       type: 'market',
       price: params.entryPrice,
-      size: orderSize,
-      dealSize: orderSize,
+      size: resolvedOrderSize,
+      dealSize: resolvedOrderSize,
       status: 'SIMULATED',
       createdAt: nowTs,
       sourceTraderName: params.sourceTraderName,
@@ -1040,22 +1530,85 @@ async function dispatchSingleKuCoinOrderInternal(
     };
   }
 
+  // --- LIVE FINANCIAL GUARDRAILS (non-exit orders only; never block closing a position!) ---
+  const isClosingExit = Boolean(params.reduceOnly || params.closeFullPosition);
+
+  if (!isClosingExit) {
+    const maxAllowedUsdt = Number(params.config.maxOrderUsdt || 0);
+    if (maxAllowedUsdt > 0 && params.amountUsdt > maxAllowedUsdt + 0.01) {
+      const reason = `تم حظر الأمر الحقيقي: قيمة الهامش (${params.amountUsdt.toFixed(2)}$) تتجاوز الحد الأقصى المسموح للأمر (${maxAllowedUsdt.toFixed(2)}$).`;
+      return {
+        id: clientOid,
+        orderId: `GUARD_MAX_${nowTs}_${batchIndex}`,
+        clientOid,
+        symbol: kucoinSymbol,
+        side: kucoinSide,
+        type: 'market',
+        price: params.entryPrice,
+        size: 0,
+        dealSize: 0,
+        status: 'REJECTED_GUARD',
+        createdAt: nowTs,
+        sourceTraderName: params.sourceTraderName,
+        sourceSignal: `${params.sourceSignal || 'KuCoin Order'} — ${reason}`,
+        isRealKuCoin: false,
+        errorCode: 'MAX_ORDER_USDT_EXCEEDED',
+        guardReasonAr: reason,
+        errorMessageAr: reason,
+      };
+    }
+
+    if (isFutures && (!params.exactContracts || params.exactContracts <= 0)) {
+      if (futuresSizing && (futuresSizing.budgetExceeded || futuresSizing.contracts <= 0)) {
+        const minMarginRequired = Number(
+          (futuresSizing.minContractNotionalUsdt / effectiveLeverage).toFixed(2)
+        );
+        const reason = `تم حظر الأمر الحقيقي: الحد الأدنى لعقد ${kucoinSymbol} (${futuresSizing.minContractNotionalUsdt.toFixed(2)}$ قيمة اسمية ≈ ${minMarginRequired}$ هامش) يتجاوز ميزانية الأمر (${params.amountUsdt.toFixed(2)}$).`;
+        return {
+          id: clientOid,
+          orderId: `GUARD_MIN_${nowTs}_${batchIndex}`,
+          clientOid,
+          symbol: kucoinSymbol,
+          side: kucoinSide,
+          type: 'market',
+          price: params.entryPrice,
+          size: 0,
+          dealSize: 0,
+          status: 'REJECTED_GUARD',
+          createdAt: nowTs,
+          sourceTraderName: params.sourceTraderName,
+          sourceSignal: `${params.sourceSignal || 'KuCoin Order'} — ${reason}`,
+          isRealKuCoin: false,
+          errorCode: 'MIN_CONTRACT_EXCEEDS_BUDGET',
+          guardReasonAr: reason,
+          errorMessageAr: reason,
+        };
+      }
+    }
+  }
+
   const endpointFetcher = options?.customEndpointFetcher || fetchSignedKuCoinEndpoint;
   const endpoint = '/api/v1/orders';
 
   try {
     if (isFutures) {
-      const bodyObj: Record<string, unknown> = {
-        clientOid,
-        side: kucoinSide,
-        symbol: kucoinSymbol,
-        leverage: String(params.leverage || params.config.defaultLeverage || 5),
-        type: 'market',
-        size: orderSize,
-      };
-      if (params.reduceOnly) {
-        bodyObj.reduceOnly = true;
-      }
+      const bodyObj: Record<string, unknown> = params.closeFullPosition
+        ? {
+            clientOid,
+            symbol: kucoinSymbol,
+            type: 'market',
+            closeOrder: true,
+          }
+        : {
+            clientOid,
+            side: kucoinSide,
+            symbol: kucoinSymbol,
+            leverage: String(effectiveLeverage),
+            type: 'market',
+            size: Math.max(1, resolvedOrderSize),
+            ...(params.reduceOnly ? { reduceOnly: true } : {}),
+          };
+
       const bodyStr = JSON.stringify(bodyObj);
       const res = await endpointFetcher({
         basePrefix: '/kucoin-futures',
@@ -1067,23 +1620,121 @@ async function dispatchSingleKuCoinOrderInternal(
         bodyStr,
       });
 
+      if (res.ok) {
+        const dataObj = res.data as Record<string, unknown> | undefined;
+        let stopLossOrderId: string | undefined;
+        let takeProfitOrderId: string | undefined;
+
+        // Place exchange-native SL & TP stop orders on KuCoin immediately after live entry
+        if (!isClosingExit && (params.stopLossPrice || params.takeProfitPrice)) {
+          const protection = await syncKuCoinPositionProtectionOrders({
+            config: params.config,
+            binanceSymbol: params.binanceSymbol,
+            positionSide: params.side,
+            leverage: effectiveLeverage,
+            stopLossPrice: params.stopLossPrice,
+            takeProfitPrice: params.takeProfitPrice,
+            cancelExistingFirst: false,
+            customEndpointFetcher: options?.customEndpointFetcher,
+          });
+          stopLossOrderId = protection.stopLossOrderId;
+          takeProfitOrderId = protection.takeProfitOrderId;
+        }
+
+        const slTpTag =
+          stopLossOrderId || takeProfitOrderId
+            ? ` • حماية على المنصة (${[stopLossOrderId ? 'SL' : '', takeProfitOrderId ? 'TP' : ''].filter(Boolean).join('+')})`
+            : '';
+
+        return {
+          id: clientOid,
+          orderId: String(dataObj?.orderId || `KC_LIVE_${Date.now()}_${batchIndex}`),
+          clientOid,
+          symbol: kucoinSymbol,
+          side: kucoinSide,
+          type: 'market',
+          price: params.entryPrice,
+          size: resolvedOrderSize,
+          dealSize: resolvedOrderSize,
+          status: 'DONE',
+          createdAt: Date.now(),
+          sourceTraderName: params.sourceTraderName,
+          sourceSignal: `${params.sourceSignal || 'Binance Signal -> KuCoin Live Execution'}${slTpTag}`,
+          isRealKuCoin: true,
+          stopLossOrderId,
+          takeProfitOrderId,
+        };
+      }
+
+      // Timeout / network uncertainty: verify by clientOid before deciding FAILED vs DONE vs UNKNOWN_TIMEOUT
+      if (res.isTimeout || res.code === 'TIMEOUT' || res.code === 'NETWORK_ERROR') {
+        const verification = await verifyTimedOutOrderByClientOid({
+          endpointFetcher,
+          isFutures: true,
+          clientOid,
+          apiKey: cleanApiKey,
+          apiSecret: cleanApiSecret,
+          passphrase: cleanPassphrase,
+        });
+        if (verification.state === 'CONFIRMED_EXECUTED') {
+          return {
+            id: clientOid,
+            orderId: verification.orderId || `KC_VERIFIED_${Date.now()}_${batchIndex}`,
+            clientOid,
+            symbol: kucoinSymbol,
+            side: kucoinSide,
+            type: 'market',
+            price: params.entryPrice,
+            size: verification.dealSize || resolvedOrderSize,
+            dealSize: verification.dealSize || resolvedOrderSize,
+            status: 'DONE',
+            createdAt: Date.now(),
+            sourceTraderName: params.sourceTraderName,
+            sourceSignal: `${params.sourceSignal || 'KuCoin Live'} (تم التحقق من التنفيذ بعد تأخر الشبكة ✓)`,
+            isRealKuCoin: true,
+          };
+        }
+        if (verification.state === 'UNKNOWN') {
+          const errMsg = `انتهت مهلة الشبكة وحالة الأمر غير مؤكدة على KuCoin — تحقق من مراكز KuCoin فوراً (${res.msg || 'Timeout'})`;
+          return {
+            id: clientOid,
+            orderId: `KC_TIMEOUT_${Date.now()}_${batchIndex}`,
+            clientOid,
+            symbol: kucoinSymbol,
+            side: kucoinSide,
+            type: 'market',
+            price: params.entryPrice,
+            size: resolvedOrderSize,
+            dealSize: 0,
+            status: 'UNKNOWN_TIMEOUT',
+            createdAt: Date.now(),
+            sourceTraderName: params.sourceTraderName,
+            sourceSignal: `${params.sourceSignal || 'KuCoin Order'} — ${errMsg}`,
+            isRealKuCoin: false,
+            errorCode: res.code || 'TIMEOUT',
+            errorMessageAr: errMsg,
+          };
+        }
+      }
+
+      const translatedErr = translateKuCoinErrorAr(res.code, res.msg, false);
       return {
         id: clientOid,
-        orderId: (res.ok && res.data?.orderId) || `KC_LIVE_${Date.now()}_${batchIndex}`,
+        orderId: `KC_FAIL_${Date.now()}_${batchIndex}`,
         clientOid,
         symbol: kucoinSymbol,
         side: kucoinSide,
         type: 'market',
         price: params.entryPrice,
-        size: orderSize,
-        dealSize: orderSize,
-        status: res.ok ? 'DONE' : 'SIMULATED',
+        size: resolvedOrderSize,
+        dealSize: 0,
+        status: 'FAILED',
         createdAt: Date.now(),
         sourceTraderName: params.sourceTraderName,
-        sourceSignal: res.ok
-          ? params.sourceSignal || 'Binance Signal -> KuCoin Live Execution'
-          : `${params.sourceSignal || 'KuCoin Order'} (محاكاة — ${res.msg || res.code || 'Demo'})`,
-        isRealKuCoin: res.ok,
+        sourceSignal: `${params.sourceSignal || 'KuCoin Order'} (فشل التنفيذ — ${res.msg || res.code || 'Error'})`,
+        isRealKuCoin: false,
+        errorCode: res.code || 'REJECTED',
+        errorMessageAr: translatedErr,
       };
     } else {
       const bodyObj = {
@@ -1104,42 +1755,121 @@ async function dispatchSingleKuCoinOrderInternal(
         bodyStr,
       });
 
+      if (res.ok) {
+        const dataObj = res.data as Record<string, unknown> | undefined;
+        return {
+          id: clientOid,
+          orderId: String(dataObj?.orderId || `KC_SPOT_${Date.now()}_${batchIndex}`),
+          clientOid,
+          symbol: kucoinSymbol,
+          side: kucoinSide,
+          type: 'market',
+          price: params.entryPrice,
+          size: resolvedOrderSize,
+          dealSize: resolvedOrderSize,
+          status: 'DONE',
+          createdAt: Date.now(),
+          sourceTraderName: params.sourceTraderName,
+          sourceSignal: params.sourceSignal || 'Binance Spot Signal -> KuCoin Live',
+          isRealKuCoin: true,
+        };
+      }
+
+      if (res.isTimeout || res.code === 'TIMEOUT' || res.code === 'NETWORK_ERROR') {
+        const verification = await verifyTimedOutOrderByClientOid({
+          endpointFetcher,
+          isFutures: false,
+          clientOid,
+          apiKey: cleanApiKey,
+          apiSecret: cleanApiSecret,
+          passphrase: cleanPassphrase,
+        });
+        if (verification.state === 'CONFIRMED_EXECUTED') {
+          return {
+            id: clientOid,
+            orderId: verification.orderId || `KC_SPOT_VERIFIED_${Date.now()}_${batchIndex}`,
+            clientOid,
+            symbol: kucoinSymbol,
+            side: kucoinSide,
+            type: 'market',
+            price: params.entryPrice,
+            size: verification.dealSize || resolvedOrderSize,
+            dealSize: verification.dealSize || resolvedOrderSize,
+            status: 'DONE',
+            createdAt: Date.now(),
+            sourceTraderName: params.sourceTraderName,
+            sourceSignal: `${params.sourceSignal || 'KuCoin Spot'} (تم التحقق من التنفيذ ✓)`,
+            isRealKuCoin: true,
+          };
+        }
+        if (verification.state === 'UNKNOWN') {
+          const errMsg = `انتهت مهلة الشبكة وحالة أمر Spot غير مؤكدة على KuCoin (${res.msg || 'Timeout'})`;
+          return {
+            id: clientOid,
+            orderId: `KC_SPOT_TIMEOUT_${Date.now()}_${batchIndex}`,
+            clientOid,
+            symbol: kucoinSymbol,
+            side: kucoinSide,
+            type: 'market',
+            price: params.entryPrice,
+            size: resolvedOrderSize,
+            dealSize: 0,
+            status: 'UNKNOWN_TIMEOUT',
+            createdAt: Date.now(),
+            sourceTraderName: params.sourceTraderName,
+            sourceSignal: `${params.sourceSignal || 'KuCoin Spot'} — ${errMsg}`,
+            isRealKuCoin: false,
+            errorCode: res.code || 'TIMEOUT',
+            errorMessageAr: errMsg,
+          };
+        }
+      }
+
+      const translatedErr = translateKuCoinErrorAr(res.code, res.msg, false);
       return {
         id: clientOid,
-        orderId: (res.ok && res.data?.orderId) || `KC_SPOT_${Date.now()}_${batchIndex}`,
+        orderId: `KC_SPOT_FAIL_${Date.now()}_${batchIndex}`,
         clientOid,
         symbol: kucoinSymbol,
         side: kucoinSide,
         type: 'market',
         price: params.entryPrice,
-        size: orderSize,
-        dealSize: orderSize,
-        status: res.ok ? 'DONE' : 'SIMULATED',
+        size: resolvedOrderSize,
+        dealSize: 0,
+        status: 'FAILED',
         createdAt: Date.now(),
         sourceTraderName: params.sourceTraderName,
-        sourceSignal: res.ok
-          ? params.sourceSignal || 'Binance Spot Signal -> KuCoin Live'
-          : `${params.sourceSignal || 'KuCoin Spot'} (محاكاة — ${res.msg || res.code || 'Demo'})`,
-        isRealKuCoin: res.ok,
+        sourceSignal: `${params.sourceSignal || 'KuCoin Spot'} (فشل التنفيذ — ${res.msg || res.code || 'Error'})`,
+        isRealKuCoin: false,
+        errorCode: res.code || 'REJECTED',
+        errorMessageAr: translatedErr,
       };
     }
-  } catch (err: any) {
-    // Resilience guard so one network failure inside Promise.all never aborts sibling orders in the same batch
+  } catch (err: unknown) {
+    const errObj = err as { name?: string; message?: string };
+    const isTimeoutErr =
+      errObj?.name === 'AbortError' || /timeout|aborted|network/i.test(errObj?.message || '');
+    const errMsg = isTimeoutErr
+      ? `انقطع الاتصال أثناء إرسال الأمر الحقيقي (${errObj?.message || 'Timeout'}) — تحقق من مراكز KuCoin فوراً`
+      : `فشل إرسال الأمر الحقيقي: ${errObj?.message || 'Unknown error'}`;
+
     return {
       id: clientOid,
-      orderId: `KC_FALLBACK_${Date.now()}_${batchIndex}`,
+      orderId: `KC_ERR_${Date.now()}_${batchIndex}`,
       clientOid,
       symbol: kucoinSymbol,
       side: kucoinSide,
       type: 'market',
       price: params.entryPrice,
-      size: orderSize,
-      dealSize: orderSize,
-      status: 'SIMULATED',
+      size: resolvedOrderSize,
+      dealSize: 0,
+      status: isTimeoutErr ? 'UNKNOWN_TIMEOUT' : 'FAILED',
       createdAt: Date.now(),
       sourceTraderName: params.sourceTraderName,
-      sourceSignal: `${params.sourceSignal || 'KuCoin Order'} (محاكاة — ${err?.message || 'Network Fallback'})`,
+      sourceSignal: `${params.sourceSignal || 'KuCoin Order'} (${isTimeoutErr ? 'حالة غير مؤكدة' : 'فشل التنفيذ'} — ${errObj?.message || 'Error'})`,
       isRealKuCoin: false,
+      errorCode: isTimeoutErr ? 'UNKNOWN_TIMEOUT' : 'EXECUTION_EXCEPTION',
+      errorMessageAr: errMsg,
     };
   }
 }
@@ -1163,7 +1893,6 @@ export async function executeKuCoinOrder(
 ): Promise<KuCoinOrderRecord | KuCoinOrderRecord[]> {
   if (Array.isArray(params)) {
     if (params.length === 0) return [];
-    // Execute all orders concurrently in parallel using Promise.all to reduce total latency
     const records = await Promise.all(
       params.map((item, idx) => dispatchSingleKuCoinOrderInternal(item, idx, options))
     );
